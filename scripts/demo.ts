@@ -13,7 +13,9 @@ const proofText =
     ? "Meanwhile Codex ACP local proof"
     : agentType === "claude-code"
       ? "Meanwhile Claude Code ACP local proof"
-      : "Meanwhile local demo"
+      : agentType === "pi"
+        ? "Meanwhile Pi ACP local proof"
+        : "Meanwhile local demo"
 const servePreview = arguments_.includes("--serve")
 const timeoutMs = agentType === "demo" ? 30_000 : 5 * 60_000
 
@@ -151,6 +153,7 @@ function selectedAgentType(arguments_: readonly string[]): DemoAgentType {
   const selections = [
     arguments_.includes("--codex") ? "codex" : null,
     arguments_.includes("--claude") ? "claude-code" : null,
+    arguments_.includes("--pi") ? "pi" : null,
   ].filter((value): value is Exclude<DemoAgentType, "demo"> => value !== null)
   if (selections.length > 1) {
     throw new DemoError("DEMO_AGENT_CONFLICT", "Select at most one live agent")

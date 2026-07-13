@@ -14,7 +14,8 @@
         "FIXTURE_DELAY_MS",
         "FIXTURE_REQUEST_PERMISSION",
         "FIXTURE_MALFORMED_OUTPUT",
-        "FIXTURE_OVERSIZED_BYTES"
+        "FIXTURE_OVERSIZED_BYTES",
+        "FIXTURE_OUTPUT_PATH"
       ],
       "secretEnvNames": ["TEST_RUNNER_SECRET"]
     }

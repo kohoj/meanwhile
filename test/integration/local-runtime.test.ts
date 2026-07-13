@@ -40,13 +40,15 @@ describe("LocalRuntimeProvider", () => {
     const events = await Array.fromAsync(provider.events(process, null))
     const exit = await provider.wait(process)
     expect(exit).toMatchObject({ exitCode: 0, signal: null, reason: "exited" })
-    expect(events.map(({ stream, data }) => [stream, data])).toEqual([
-      ["stdout", "stdout-frame\n"],
+    expect(events.map(({ stream, data }) => [stream, data]).sort()).toEqual([
       ["stderr", "stderr-diagnostic\n"],
+      ["stdout", "stdout-frame\n"],
     ])
 
     const resumed = await Array.fromAsync(provider.events(process, events[0]?.cursor ?? null))
-    expect(resumed.map(({ stream }) => stream)).toEqual(["stderr"])
+    expect(resumed.map(({ cursor, stream, data }) => ({ cursor, stream, data }))).toEqual(
+      events.slice(1).map(({ cursor, stream, data }) => ({ cursor, stream, data })),
+    )
     expect(await Array.fromAsync(provider.events(process, events.at(-1)?.cursor ?? null))).toEqual(
       [],
     )

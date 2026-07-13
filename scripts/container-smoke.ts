@@ -7,7 +7,8 @@ const meanwhile = new Meanwhile({
   baseUrl: "http://127.0.0.1:7331",
   apiKey,
 })
-const previewText = "Packaged Meanwhile runtime proof"
+const prompt = "Return this exact packaged runtime proof"
+const previewText = `fixture response: ${prompt}`
 const created = await meanwhile.runs.create(
   {
     workspace: {
@@ -16,16 +17,17 @@ const created = await meanwhile.runs.create(
         {
           path: "site/index.html",
           contentBase64: new TextEncoder()
-            .encode(`<!doctype html><title>Meanwhile</title><h1>${previewText}</h1>`)
+            .encode("<!doctype html><title>Unverified input</title>")
             .toBase64(),
         },
       ],
     },
     agentType: "demo",
     provider: "local",
+    env: { FIXTURE_OUTPUT_PATH: "site/index.html" },
     artifactPaths: ["site"],
     timeoutMs: 20_000,
-    prompt: "Verify the packaged runtime",
+    prompt,
   },
   { idempotencyKey: "packaged-runtime-smoke-v1" },
 )

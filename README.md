@@ -50,7 +50,7 @@ A runtime may disappear without erasing its run. A deployment never reaches back
 
 ## Run it locally
 
-Requires [Bun 1.3.13+](https://bun.sh/) and Git. The local provider needs no cloud account, but it is **not a security sandbox**.
+Requires [Bun 1.3.13+](https://bun.sh/) and Git. Every Meanwhile application, CLI, demo, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The local provider needs no cloud account, but it is **not a security sandbox**.
 
 ```console
 bun install
@@ -212,14 +212,17 @@ The checkout ships a deterministic `demo` agent. Copy the required entries from 
 }
 ```
 
-Claude Code and Hermes use the same shape with `claude-agent-acp` and `hermes-acp`. A tool without native ACP needs a small explicit adapter executable; agent-specific output parsing never belongs in the control plane.
+Claude Code, Pi, and Hermes use the same shape with `claude-agent-acp`, `pi-acp`, and `hermes-acp`. A tool without native ACP needs a small explicit adapter executable; agent-specific output parsing never belongs in the control plane.
 
-Authenticated local proofs are available when the respective CLIs are installed:
+Authenticated local proofs are available when the corresponding local credentials are configured:
 
 ```console
 bun run demo:codex
 bun run demo:claude
+bun run demo:pi
 ```
+
+Each command installs an exact adapter/runtime pair into a disposable directory, references existing local authentication only for the agent process, sends a real ACP task, verifies the agent-written artifact, deploys it through the API, and fetches the immutable preview. The Pi proof uses its pinned headless RPC runtime through `pi-acp`; on this bootstrap path it accepts an allowlisted Amazon Bedrock token and region without persisting either value.
 
 ## Runtime providers
 
@@ -370,13 +373,15 @@ Prompts, process output, credentials, file contents, and raw provider bodies are
 ```console
 bun run check                       # Biome, types, notices, runner builds, deterministic suite
 bun run demo                        # no-account product path
-bun run proof:release               # cleanup, restart, preview persistence, backup
+bun run proof:release               # semantic round trip, telemetry, restart, backup/restore
 bun run cloudflare:check            # bridge package and protocol contract
 bun run test:live:cloudflare        # explicit real-account lifecycle
 bun run proof:release:cloudflare    # complete remote control-plane proof
 ```
 
-The deterministic suite covers owner isolation, lifecycle transitions, log replay, artifacts, cancellation, timeout, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence. The credential-gated Cloudflare proof separately establishes real provider behavior; a skipped account test is never described as remote proof.
+The release proof sends a revision-bound token through ACP, structurally verifies the durable response, deploys bytes written by the agent, and fetches the result. It also validates OTLP trace and metric semantics, correlated structured logs, private-data exclusion, exact status and replay evidence, runtime destruction, restart recovery, hashed backup, restore into an empty data root, and a second successful boot. The Cloudflare variant applies that same proof to real remote compute; a skipped account test is never described as remote proof.
+
+The deterministic suite separately covers owner isolation, lifecycle transitions, log replay, artifacts, cancellation, timeout, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence.
 
 ## Production status
 
@@ -402,9 +407,18 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 - [Threat model](docs/threat-model.md) — trust boundaries and residual risks
 - [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 
-## AI assistance
+## Authorship and AI assistance
 
-AI agents assist implementation, tests, documentation, and review. Maintainers own the architectural decisions: lifecycle separation, adapter boundaries, failure semantics, trust model, dependency selection, and acceptance evidence. AI-assisted changes meet the same test, security, licensing, and review requirements as any other contribution.
+Codex performed 100% of the engineering implementation: production code, tests, executable proofs, documentation, and iterative review. The human author directed the work and made the defining product and architecture decisions:
+
+- build a real open-source control plane rather than a command runner or take-home artifact;
+- make the durable run the product, with run, runtime, artifact, and deployment as separate lifecycles;
+- keep ACP local to the runtime runner and keep provider APIs behind one provider-neutral compute contract;
+- use a small Bun-native stack—Hono, Zod, SQLite, Web primitives, and bounded OpenTelemetry—without distributed machinery added for appearance;
+- require semantic end-to-end evidence across local and real Cloudflare execution, including agent-written output, telemetry safety, cleanup, restart, backup, and restore;
+- expose the same control plane coherently through API, typed SDK, and CLI while treating local execution as a non-isolating development path.
+
+Codex translated those decisions into the concrete implementation and verification details. AI-authored changes are held to the same correctness, security, licensing, and review standards as human-authored code.
 
 ## License
 

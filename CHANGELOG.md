@@ -28,19 +28,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Explicit `bun run demo:codex` live proof that uses locally authenticated Codex through an exact ACP adapter and compatible exact Codex runtime, then exercises the complete local API, evidence, artifact, deployment, and preview path without copying or persisting local authentication material.
 - `bun run demo:codex:serve` inspection mode that keeps the verified Codex-generated local preview available until explicitly stopped.
 - Exact `bun run demo:claude` and `demo:claude:serve` proofs through the official Claude Agent SDK ACP adapter, importing only allowlisted environment configuration from `~/.claude/settings.json` while keeping credential material ephemeral.
+- Exact `bun run demo:pi` and `demo:pi:serve` proofs through the pinned Pi ACP adapter and headless RPC runtime, with an ephemeral allowlisted Amazon Bedrock authentication boundary and the same artifact, deployment, and preview acceptance path.
 - Executable documentation contracts for local links, JSON examples, and the published agent-catalog template.
 - Typed Web-standard client with resource namespaces, shared runtime-validated contracts, structured errors, deterministic terminal waits, response evidence, and replay-safe asynchronous log following.
 - Bounded link-free Bun workspace capture as a separate client entrypoint and direct client contract coverage.
 - Complete owner-scoped resource namespaces across HTTP, SDK, and CLI for artifact inspection/streaming download, deployment history, audit queries, and API-key create/list/revoke with final-key lockout protection.
 - Immutable per-run execution provenance covering agent/catalog, runner, provider adapter/capabilities, runtime image evidence, and bridge protocol, with idempotency participation and fail-closed drift detection.
 - Exclusive local data-root lease plus quiescent hashed backup/verification, staged restore, and explicit dry-run/apply reachability garbage collection.
-- `bun run proof:release` system proof for agent execution, immutable download, deployment, runtime destruction audit, process restart, persisted preview/history, and verified backup, plus a real-provider Cloudflare variant that requires complete configured execution provenance.
+- `bun run proof:release` system proof for a revision-bound ACP request and exact durable response, agent-produced artifact and preview, semantic OTLP signals and private-data exclusion, runtime destruction, restart, hashed backup, restore, and second boot; the Cloudflare variant runs the same proof with complete remote execution provenance.
 
 ### Changed
 
 - The complete quality gate now builds the standalone runner and bundled demo agent before tests, so a clean checkout proves the same executables used by local and remote runtimes.
-- CI uses the current Node 24-based checkout action and emits no deprecated-action runtime warning.
-- Container CI now boots the packaged image and drives a complete SDK run, ACP evidence, artifact capture, deployment, and separate-origin preview flow instead of stopping at readiness.
+- Container CI now boots the packaged image and drives a complete SDK run, exact ACP response, agent-written artifact capture, deployment, and separate-origin preview flow instead of stopping at readiness.
 - Agent launch configuration is now strict, portable, capability-derived, content-digested, and snapshotted into each run's durable idempotent intent; recovering runs no longer change behavior after catalog edits. The shipped catalog advertises only the bundled demo agent, with external ACP adapter entries supplied as documentation templates.
 - Run creation may omit `provider`; the configured default is resolved and validated before any run or uploaded workspace state is persisted.
 - Local preview URLs now use an explicit browser-facing origin whenever the server binds all interfaces, so deployment records never publish wildcard bind addresses.

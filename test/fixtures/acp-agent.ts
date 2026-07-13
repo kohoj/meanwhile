@@ -102,6 +102,13 @@ const fixture = acp
         : `fixture response: ${text}${leak ? ` secret=${leak}` : ""}${
             environment("FIXTURE_REPORT_TZ") === "1" ? ` tz=${environment("TZ")}` : ""
           }`
+    const outputPath = fixtureOutputPath(environment("FIXTURE_OUTPUT_PATH"))
+    if (outputPath !== undefined) {
+      await Bun.write(
+        outputPath,
+        `<!doctype html><meta charset="utf-8"><title>Meanwhile proof</title><pre>${escapeHtml(responseText)}</pre>`,
+      )
+    }
     await context.client.notify(acp.methods.client.session.update, {
       sessionId: context.params.sessionId,
       update: {
@@ -158,6 +165,31 @@ async function writeStdout(message: string): Promise<void> {
 
 function environment(name: string): string | undefined {
   return Bun.env[name]
+}
+
+function fixtureOutputPath(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const segments = value.split("/")
+  if (
+    value.length === 0 ||
+    value.length > 1_024 ||
+    value.startsWith("/") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
+    throw new Error("Fixture output path must be a normalized relative path")
+  }
+  return value
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;")
 }
 
 function parseDelay(value: string | undefined): number {

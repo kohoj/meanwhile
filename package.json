@@ -33,6 +33,8 @@
     "demo:codex:serve": "bun scripts/demo.ts --codex --serve",
     "demo:claude": "bun scripts/demo.ts --claude",
     "demo:claude:serve": "bun scripts/demo.ts --claude --serve",
+    "demo:pi": "bun scripts/demo.ts --pi",
+    "demo:pi:serve": "bun scripts/demo.ts --pi --serve",
     "preproof:release": "bun run runtime:build",
     "proof:release": "bun scripts/release-proof.ts --provider=local",
     "preproof:release:cloudflare": "bun run runtime:build",

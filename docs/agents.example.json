@@ -40,6 +40,23 @@
         "GOOGLE_APPLICATION_CREDENTIALS"
       ]
     },
+    "pi": {
+      "transport": "stdio",
+      "executable": "pi-acp",
+      "args": [],
+      "workingDirectory": "workspace",
+      "capabilities": {
+        "filesystem": true,
+        "terminal": true
+      },
+      "envNames": ["AWS_REGION", "PI_TELEMETRY"],
+      "secretEnvNames": [
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "PI_CODING_AGENT_DIR"
+      ]
+    },
     "hermes": {
       "transport": "stdio",
       "executable": "hermes-acp",

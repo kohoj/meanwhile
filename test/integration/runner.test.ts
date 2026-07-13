@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -59,6 +59,25 @@ describe("meanwhile runner", () => {
       type: "terminal",
       payload: { outcome: "succeeded", stopReason: "end_turn" },
     })
+  })
+
+  test("allows an ACP agent to materialize declared output inside the workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "meanwhile-runner-output-"))
+    try {
+      await mkdir(join(workspace, "site"))
+      const result = await executeRunner(
+        spec({ environment: { FIXTURE_OUTPUT_PATH: "site/index.html" } }),
+        {},
+        { cwd: workspace },
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(await Bun.file(join(workspace, "site/index.html")).text()).toContain(
+        "fixture response: do the work",
+      )
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
   })
 
   for (const [stopReason, errorCode] of [

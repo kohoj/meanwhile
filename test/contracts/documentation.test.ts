@@ -38,7 +38,7 @@ describe("living documentation", () => {
 
   test("keeps the documented agent catalog loadable by the production parser", async () => {
     const catalog = await AgentCatalog.load(join(root, "docs/agents.example.json"))
-    expect(catalog.list()).toEqual(["claude-code", "codex", "hermes"])
+    expect(catalog.list()).toEqual(["claude-code", "codex", "hermes", "pi"])
   })
 
   test("keeps the packaged data root beneath its writable ownership volume", async () => {

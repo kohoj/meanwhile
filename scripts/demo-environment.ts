@@ -17,6 +17,12 @@ const CLAUDE_ADAPTER_NAME = "@agentclientprotocol/claude-agent-acp"
 const CLAUDE_ADAPTER_VERSION = "0.58.1"
 const CLAUDE_SDK_NAME = "@anthropic-ai/claude-agent-sdk"
 const CLAUDE_SDK_VERSION = "0.3.205"
+const PI_ADAPTER_NAME = "pi-acp"
+const PI_ADAPTER_VERSION = "0.0.31"
+const PI_RUNTIME_NAME = "@earendil-works/pi-coding-agent"
+const PI_RUNTIME_VERSION = "0.80.6"
+const PI_PROVIDER = "amazon-bedrock"
+const PI_MODEL = "us.anthropic.claude-opus-4-8"
 const CLAUDE_SETTINGS_SECRET_ENV = new Set([
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -42,7 +48,7 @@ const CLAUDE_SETTINGS_AUTH_ENV = new Set([
   "GOOGLE_APPLICATION_CREDENTIALS",
 ])
 
-export type DemoAgentType = "demo" | "codex" | "claude-code"
+export type DemoAgentType = "demo" | "codex" | "claude-code" | "pi"
 
 export interface LiveAgentProof {
   readonly type: Exclude<DemoAgentType, "demo">
@@ -179,7 +185,7 @@ function agentCatalog(agent: LiveAgentProof | null): object {
       agents: {
         [agent.type]: {
           transport: "stdio",
-          executable: agent.type === "codex" ? "codex-acp" : "claude-agent-acp",
+          executable: liveAgentExecutable(agent.type),
           args: [],
           workingDirectory: "workspace",
           capabilities: { filesystem: true, terminal: true },
@@ -217,6 +223,19 @@ async function prepareLiveAgent(
       return prepareCodexProof(join(temporary, "codex-tools"))
     case "claude-code":
       return prepareClaudeProof(join(temporary, "claude-tools"), originalEnvironment)
+    case "pi":
+      return preparePiProof(join(temporary, "pi-tools"), originalEnvironment)
+  }
+}
+
+function liveAgentExecutable(type: LiveAgentProof["type"]): string {
+  switch (type) {
+    case "codex":
+      return "codex-acp"
+    case "claude-code":
+      return "claude-agent-acp"
+    case "pi":
+      return "pi-acp"
   }
 }
 
@@ -364,6 +383,99 @@ async function prepareClaudeProof(
     environment,
     secretReferences,
   }
+}
+
+async function preparePiProof(
+  toolsDirectory: string,
+  originalEnvironment: Map<string, string | undefined>,
+): Promise<LiveAgentProof> {
+  const authentication = await resolvePiBedrockAuthentication()
+
+  await mkdir(toolsDirectory, { recursive: true })
+  await Bun.write(
+    join(toolsDirectory, "package.json"),
+    JSON.stringify({
+      private: true,
+      dependencies: {
+        [PI_ADAPTER_NAME]: PI_ADAPTER_VERSION,
+        [PI_RUNTIME_NAME]: PI_RUNTIME_VERSION,
+      },
+    }),
+  )
+  const bun = Bun.which("bun")
+  if (bun === null) throw new DemoError("BUN_NOT_FOUND", "Bun executable could not be located")
+  const install = Bun.spawn([bun, "install", "--no-progress"], {
+    cwd: toolsDirectory,
+    stdout: "ignore",
+    stderr: "ignore",
+  })
+  if ((await install.exited) !== 0) {
+    throw new DemoError("PI_ADAPTER_INSTALL_FAILED", "The pinned Pi ACP toolchain failed")
+  }
+
+  await assertPackageVersion(toolsDirectory, PI_ADAPTER_NAME, PI_ADAPTER_VERSION)
+  await assertPackageVersion(toolsDirectory, PI_RUNTIME_NAME, PI_RUNTIME_VERSION)
+  const binaryDirectory = join(toolsDirectory, "node_modules", ".bin")
+  const adapterPath = Bun.which("pi-acp", { PATH: binaryDirectory })
+  const piPath = Bun.which("pi", { PATH: binaryDirectory })
+  if (adapterPath === null || piPath === null) {
+    throw new DemoError("PI_ADAPTER_UNAVAILABLE", "The Pi ACP toolchain is unavailable")
+  }
+
+  const piConfigDirectory = join(toolsDirectory, "config")
+  await mkdir(piConfigDirectory, { recursive: true })
+  await Bun.write(
+    join(piConfigDirectory, "settings.json"),
+    JSON.stringify({ defaultProvider: PI_PROVIDER, defaultModel: PI_MODEL }),
+  )
+  setTemporaryEnvironment(
+    originalEnvironment,
+    "AWS_BEARER_TOKEN_BEDROCK",
+    authentication.bearerToken,
+  )
+  setTemporaryEnvironment(originalEnvironment, "PI_ACP_PI_COMMAND", piPath)
+  setTemporaryEnvironment(originalEnvironment, "PI_CODING_AGENT_DIR", piConfigDirectory)
+  Bun.env["PATH"] = `${binaryDirectory}${delimiter}${Bun.env["PATH"] ?? ""}`
+
+  return {
+    type: "pi",
+    adapter: `${PI_ADAPTER_NAME}@${PI_ADAPTER_VERSION}`,
+    loginVerifiedBy: `Amazon Bedrock ${authentication.region} via ${authentication.source}`,
+    runtimeVersion: await executableVersion(piPath, "PI_VERSION_UNAVAILABLE"),
+    environment: { AWS_REGION: authentication.region, PI_TELEMETRY: "0" },
+    secretReferences: {
+      AWS_BEARER_TOKEN_BEDROCK: "env://AWS_BEARER_TOKEN_BEDROCK",
+      PI_ACP_PI_COMMAND: "env://PI_ACP_PI_COMMAND",
+      PI_CODING_AGENT_DIR: "env://PI_CODING_AGENT_DIR",
+    },
+  }
+}
+
+async function resolvePiBedrockAuthentication(): Promise<{
+  readonly bearerToken: string
+  readonly region: string
+  readonly source: "process environment" | "Claude Code settings"
+}> {
+  const directToken = Bun.env["AWS_BEARER_TOKEN_BEDROCK"]
+  const directRegion = Bun.env["AWS_REGION"]
+  if (directToken !== undefined && directToken.length > 0 && directRegion !== undefined) {
+    return { bearerToken: directToken, region: directRegion, source: "process environment" }
+  }
+
+  try {
+    const configuredEnvironment = await readClaudeSettingsEnvironment()
+    const bearerToken = configuredEnvironment["AWS_BEARER_TOKEN_BEDROCK"]
+    const region = configuredEnvironment["AWS_REGION"]
+    if (bearerToken !== undefined && region !== undefined) {
+      return { bearerToken, region, source: "Claude Code settings" }
+    }
+  } catch {
+    // The Pi-specific error below remains the public proof boundary.
+  }
+  throw new DemoError(
+    "PI_AUTHENTICATION_REQUIRED",
+    "The Pi proof requires an Amazon Bedrock bearer token and region",
+  )
 }
 
 async function readClaudeSettingsEnvironment(): Promise<Readonly<Record<string, string>>> {

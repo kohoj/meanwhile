@@ -5,8 +5,9 @@ import { createApplication, type MeanwhileApplication } from "../src/app"
 import { issueApiKey } from "../src/auth"
 import { Meanwhile, MeanwhileError } from "../src/client"
 import type { AppConfig } from "../src/config"
-import { backupDataRoot, verifyDataBackup } from "../src/data-root"
+import { backupDataRoot, restoreDataRoot, verifyDataBackup } from "../src/data-root"
 import { initializeInstrumentation } from "../src/instrumentation"
+import type { TelemetryHealthSnapshot } from "../src/telemetry"
 import { SERVICE_VERSION } from "../src/version"
 
 type ProofProvider = "local" | "cloudflare"
@@ -15,6 +16,30 @@ interface RunningInstance {
   readonly application: MeanwhileApplication
   readonly server: ReturnType<typeof Bun.serve>
   readonly client: Meanwhile
+  readonly operationalLogs: readonly string[]
+  flushTelemetry(): Promise<TelemetryHealthSnapshot>
+  close(): Promise<void>
+}
+
+interface TelemetryCapture {
+  readonly requests: number
+  readonly bytes: number
+}
+
+interface ProofTelemetryEvidence {
+  readonly health: "healthy"
+  readonly traces: TelemetryCapture
+  readonly metrics: TelemetryCapture
+  readonly structuredLogs: number
+}
+
+interface ProofTelemetryCollector {
+  readonly endpoint: string
+  evidence(
+    health: TelemetryHealthSnapshot,
+    operationalLogs: readonly string[],
+    forbiddenValues: readonly string[],
+  ): ProofTelemetryEvidence
   close(): Promise<void>
 }
 
@@ -38,12 +63,18 @@ const runnerPath = resolve("dist/meanwhile-runner")
 const catalogPath = resolve("config/agents.json")
 const key = await issueApiKey()
 const previewPort = await reservePort()
+const telemetryCollector = startProofTelemetryCollector(
+  [key.key, Bun.env["CLOUDFLARE_BRIDGE_TOKEN"]].filter(
+    (value): value is string => value !== undefined && value.length > 0,
+  ),
+)
 const config = proofConfig({
   provider,
   dataDir,
   runnerPath,
   catalogPath,
   previewPort,
+  telemetryEndpoint: telemetryCollector.endpoint,
   key: key.key,
 })
 let running: RunningInstance | null = null
@@ -51,7 +82,12 @@ let running: RunningInstance | null = null
 try {
   if (requireProvenance && provider === "cloudflare") assertRemoteProvenance(config)
   const revision = await repositoryRevision()
-  const previewText = `Meanwhile ${provider} release proof`
+  const roundTripToken = sha256(
+    new TextEncoder().encode(`meanwhile:${provider}:${revision.commit}:round-trip`),
+  )
+  const prompt = `Return this exact release token: ${roundTripToken}`
+  const expectedAgentResponse = `fixture response: ${prompt}`
+  const previewText = expectedAgentResponse
   running = await startInstance(config, key.key)
   const providerDiagnostics = await running.client.providers.test(provider)
   if (providerDiagnostics.health.status !== "healthy") {
@@ -66,14 +102,15 @@ try {
           {
             path: "site/index.html",
             contentBase64: new TextEncoder()
-              .encode(`<!doctype html><title>Meanwhile</title><h1>${previewText}</h1>`)
+              .encode("<!doctype html><title>Unverified input</title>")
               .toBase64(),
           },
         ],
       },
       agentType: "demo",
       provider,
-      prompt: "Verify the immutable release-proof workspace and finish successfully.",
+      prompt,
+      env: { FIXTURE_OUTPUT_PATH: "site/index.html" },
       artifactPaths: ["site"],
       timeoutMs: 60_000,
     },
@@ -97,6 +134,31 @@ try {
         event,
       })
     }
+  }
+  assertAgentRoundTrip(logs.items, expectedAgentResponse)
+
+  const statusHistory = running.application.store
+    .listRunStatusEvents(run.ownerId, run.id)
+    .map(({ toStatus }) => toStatus)
+  if (
+    JSON.stringify(statusHistory) !==
+    JSON.stringify(["queued", "provisioning", "running", "succeeded"])
+  ) {
+    throw new ProofError("RUN_STATUS_HISTORY_INVALID", "Durable run status history is incomplete", {
+      statusHistory,
+    })
+  }
+  const runnerSession = running.application.store.getRunnerSession(run.id)
+  if (
+    runnerSession === null ||
+    runnerSession.runnerSequence <= 0 ||
+    runnerSession.providerCursor === null ||
+    runnerSession.terminalResult === null
+  ) {
+    throw new ProofError(
+      "RUNNER_EVIDENCE_INCOMPLETE",
+      "Durable runner replay evidence is incomplete",
+    )
   }
 
   const artifact = (await running.client.artifacts.list(run.id)).find(
@@ -130,8 +192,36 @@ try {
   if (deployment.status !== "succeeded" || deployment.url === null) {
     throw new ProofError("DEPLOYMENT_PROOF_FAILED", "Immutable deployment did not succeed")
   }
+  const deploymentLogs = await running.client.deployments.logs(deployment.id, { limit: 1_000 })
+  const deploymentEvents = new Set(deploymentLogs.items.map(({ event }) => event))
+  for (const event of [
+    "deployment.local_static.materializing",
+    "deployment.local_static.published",
+  ]) {
+    if (!deploymentEvents.has(event)) {
+      throw new ProofError(
+        "DEPLOYMENT_EVIDENCE_INCOMPLETE",
+        "Durable deployment evidence is incomplete",
+        { event },
+      )
+    }
+  }
   await assertPreview(deployment.url, previewText)
   const cleanupAudit = await waitForAudit(running.client, run.id, "runtime.destroy", 30_000)
+  const runtimeEvidence = running.application.store.getRuntimeForRun(run.id)
+  if (
+    runtimeEvidence === null ||
+    runtimeEvidence.cleanupStatus !== "succeeded" ||
+    runtimeEvidence.destroyedAt === null
+  ) {
+    throw new ProofError("CLEANUP_EVIDENCE_INCOMPLETE", "Runtime cleanup state is incomplete")
+  }
+  await assertExpectedNotFound(running.client)
+  const telemetryHealth = await running.flushTelemetry()
+  const telemetry = telemetryCollector.evidence(telemetryHealth, running.operationalLogs, [
+    prompt,
+    expectedAgentResponse,
+  ])
 
   const runId = run.id
   const deploymentId = deployment.id
@@ -160,6 +250,35 @@ try {
 
   const backup = await backupDataRoot(config, backupDir)
   const verifiedBackup = await verifyDataBackup(backupDir)
+  const restoredDataDir = join(root, "restored")
+  const restoredConfig = proofConfig({
+    provider,
+    dataDir: restoredDataDir,
+    runnerPath,
+    catalogPath,
+    previewPort,
+    telemetryEndpoint: telemetryCollector.endpoint,
+    key: key.key,
+  })
+  await restoreDataRoot(backupDir, restoredConfig)
+  running = await startInstance(restoredConfig, key.key)
+  const restoredRun = await running.client.runs.get(runId)
+  const restoredDeployment = await running.client.deployments.get(deploymentId)
+  const restoredArtifact = await running.client.artifacts.get(artifact.id)
+  const restoredAudit = await running.client.audit.list({ resourceId: runId, limit: 100 })
+  await assertPreview(deploymentUrl, previewText)
+  if (
+    restoredRun.status !== "succeeded" ||
+    restoredRun.executionProvenance?.digest !== provenanceDigest ||
+    restoredDeployment.status !== "succeeded" ||
+    restoredArtifact.artifact.digest !== artifact.digest ||
+    restoredAudit.items.length !== recoveredAudit.items.length
+  ) {
+    throw new ProofError("RESTORE_PROOF_FAILED", "Restored durable evidence is incomplete")
+  }
+  await running.close()
+  running = null
+
   const result = {
     proof: "meanwhile-release",
     status: "succeeded",
@@ -185,14 +304,32 @@ try {
           ? "unavailable"
           : "operator-asserted-platform-evidence",
     },
-    run: { id: runId, logs: logs.items.length, cleanupAuditId: cleanupAudit.id },
+    roundTrip: {
+      promptDigest: sha256(new TextEncoder().encode(prompt)),
+      responseDigest: sha256(new TextEncoder().encode(expectedAgentResponse)),
+      durableResponse: true,
+      agentProducedArtifact: true,
+    },
+    telemetry,
+    run: {
+      id: runId,
+      statusHistory,
+      runnerSequence: runnerSession.runnerSequence,
+      logs: logs.items.length,
+      cleanupAuditId: cleanupAudit.id,
+    },
     artifact: {
       id: artifact.id,
       digest: artifact.digest,
       files: artifactDetail.entries.length,
     },
     deployment: { id: deploymentId, url: deploymentUrl, previewVerifiedAfterRestart: true },
-    persistence: { restartVerified: true, auditRecords: recoveredAudit.items.length },
+    persistence: {
+      restartVerified: true,
+      restoreVerified: true,
+      deploymentLogs: deploymentLogs.items.length,
+      auditRecords: recoveredAudit.items.length,
+    },
     backup: {
       digest: verifiedBackup.database.digest,
       artifacts: backup.artifacts.length,
@@ -210,6 +347,7 @@ try {
   process.exitCode = 1
 } finally {
   await running?.close().catch(() => undefined)
+  await telemetryCollector.close().catch(() => undefined)
   await rm(root, { recursive: true, force: true })
   await rm(`${dataDir}.lock`, { recursive: true, force: true })
 }
@@ -220,6 +358,7 @@ function proofConfig(input: {
   runnerPath: string
   catalogPath: string
   previewPort: number
+  telemetryEndpoint: string
   key: string
 }): AppConfig {
   const bridgeUrl = Bun.env["CLOUDFLARE_BRIDGE_URL"]
@@ -247,7 +386,7 @@ function proofConfig(input: {
     localProvider: { enabled: input.provider === "local", unsafeHostExecution: false },
     secretSourceCatalog: [],
     logLevel: "error",
-    telemetry: { enabled: false },
+    telemetry: { enabled: true, endpoint: input.telemetryEndpoint },
     ...(input.provider === "cloudflare"
       ? {
           cloudflare: {
@@ -266,12 +405,21 @@ function proofConfig(input: {
 }
 
 async function startInstance(config: AppConfig, apiKey: string): Promise<RunningInstance> {
+  const operationalLogs: string[] = []
   const instrumentation = await initializeInstrumentation({
     serviceName: "meanwhile-release-proof",
     serviceVersion: SERVICE_VERSION,
     environment: "release-proof",
     logLevel: "error",
-    sink: { write() {} },
+    sink: { write: (line) => operationalLogs.push(line) },
+    ...(config.telemetry.enabled && config.telemetry.endpoint !== undefined
+      ? {
+          otlp: {
+            endpoint: config.telemetry.endpoint,
+            metricExportIntervalMs: 60_000,
+          },
+        }
+      : {}),
   })
   let application: MeanwhileApplication | null = null
   try {
@@ -287,6 +435,8 @@ async function startInstance(config: AppConfig, apiKey: string): Promise<Running
       application,
       server,
       client: new Meanwhile({ baseUrl: server.url.origin, apiKey }),
+      operationalLogs,
+      flushTelemetry: () => instrumentation.forceFlush(),
       async close() {
         if (closed) return
         closed = true
@@ -299,6 +449,202 @@ async function startInstance(config: AppConfig, apiKey: string): Promise<Running
     else await instrumentation.shutdown().catch(() => undefined)
     throw error
   }
+}
+
+function assertAgentRoundTrip(
+  logs: readonly { readonly eventType: string; readonly data: string }[],
+  expectedResponse: string,
+): void {
+  for (const log of logs) {
+    if (log.eventType !== "session.update") continue
+    let payload: unknown
+    try {
+      payload = JSON.parse(log.data)
+    } catch {
+      continue
+    }
+    if (
+      isRecord(payload) &&
+      payload["truncated"] === false &&
+      isRecord(payload["update"]) &&
+      payload["update"]["sessionUpdate"] === "agent_message_chunk" &&
+      isRecord(payload["update"]["content"]) &&
+      payload["update"]["content"]["type"] === "text" &&
+      payload["update"]["content"]["text"] === expectedResponse
+    ) {
+      return
+    }
+  }
+  throw new ProofError(
+    "ACP_ROUND_TRIP_FAILED",
+    "The durable ACP response did not contain the expected semantic result",
+  )
+}
+
+async function assertExpectedNotFound(meanwhile: Meanwhile): Promise<void> {
+  try {
+    await meanwhile.runs.get(crypto.randomUUID())
+  } catch (error) {
+    if (error instanceof MeanwhileError && error.code === "NOT_FOUND" && error.status === 404) {
+      return
+    }
+    throw error
+  }
+  throw new ProofError("STRUCTURED_ERROR_MISSING", "The API did not return a structured error")
+}
+
+function startProofTelemetryCollector(secretValues: readonly string[]): ProofTelemetryCollector {
+  const captures = {
+    traces: { requests: 0, bytes: 0, bodies: [] as Uint8Array[] },
+    metrics: { requests: 0, bytes: 0, bodies: [] as Uint8Array[] },
+  }
+  const secretBytes = secretValues.map((value) => new TextEncoder().encode(value))
+  let failure: ProofError | null = null
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname
+      const signal = path === "/v1/traces" ? "traces" : path === "/v1/metrics" ? "metrics" : null
+      if (request.method !== "POST" || signal === null) return new Response(null, { status: 404 })
+      const bytes = new Uint8Array(await request.arrayBuffer())
+      const contentType = request.headers.get("content-type") ?? ""
+      const isOtlpContent =
+        contentType.includes("application/x-protobuf") || contentType.includes("application/json")
+      if (bytes.byteLength === 0 || !isOtlpContent) {
+        failure ??= new ProofError(
+          "TELEMETRY_PAYLOAD_INVALID",
+          "The OTLP collector received an invalid payload",
+          { signal, contentType },
+        )
+        return new Response(null, { status: 400 })
+      }
+      if (secretBytes.some((secret) => containsBytes(bytes, secret))) {
+        failure ??= new ProofError(
+          "TELEMETRY_SECRET_LEAK",
+          "A secret reached the OTLP export boundary",
+          { signal },
+        )
+        return new Response(null, { status: 400 })
+      }
+      captures[signal].requests += 1
+      captures[signal].bytes += bytes.byteLength
+      captures[signal].bodies.push(bytes)
+      return new Response(null, { status: 200 })
+    },
+  })
+
+  return {
+    endpoint: server.url.origin,
+    evidence(health, operationalLogs, forbiddenValues) {
+      if (failure !== null) throw failure
+      if (health.state !== "healthy" || health.exporter !== "healthy") {
+        throw new ProofError("TELEMETRY_UNHEALTHY", "Telemetry exporters are not healthy", {
+          state: health.state,
+          exporter: health.exporter,
+        })
+      }
+      assertTelemetryCapture(captures.traces, ["meanwhile-release-proof", "meanwhile.http.request"])
+      assertTelemetryCapture(captures.metrics, [
+        "meanwhile-release-proof",
+        "meanwhile.run.outcomes",
+      ])
+
+      const forbidden = [...secretValues, ...forbiddenValues].filter((value) => value.length > 0)
+      const encodedForbidden = forbidden.map((value) => new TextEncoder().encode(value))
+      for (const capture of [captures.traces, captures.metrics]) {
+        if (
+          capture.bodies.some((body) =>
+            encodedForbidden.some((value) => containsBytes(body, value)),
+          )
+        ) {
+          throw new ProofError(
+            "TELEMETRY_PRIVATE_DATA_LEAK",
+            "Private run input reached the OTLP export boundary",
+          )
+        }
+      }
+      const serializedLogs = operationalLogs.join("\n")
+      if (forbidden.some((value) => serializedLogs.includes(value))) {
+        throw new ProofError(
+          "OPERATIONAL_LOG_PRIVATE_DATA_LEAK",
+          "Private data reached structured operational logs",
+        )
+      }
+      const structuredError = operationalLogs
+        .map(parseJsonRecord)
+        .find(
+          (record) =>
+            record["event"] === "http.request_failed" &&
+            typeof record["requestId"] === "string" &&
+            typeof record["ownerId"] === "string" &&
+            isRecord(record["attributes"]) &&
+            record["attributes"]["code"] === "NOT_FOUND" &&
+            record["attributes"]["status"] === 404,
+        )
+      if (structuredError === undefined) {
+        throw new ProofError(
+          "STRUCTURED_TELEMETRY_MISSING",
+          "Correlated structured error telemetry was not recorded",
+        )
+      }
+      return {
+        health: "healthy",
+        traces: { requests: captures.traces.requests, bytes: captures.traces.bytes },
+        metrics: { requests: captures.metrics.requests, bytes: captures.metrics.bytes },
+        structuredLogs: operationalLogs.length,
+      }
+    },
+    async close() {
+      await server.stop(true)
+    },
+  }
+}
+
+function assertTelemetryCapture(
+  capture: { readonly requests: number; readonly bytes: number; readonly bodies: Uint8Array[] },
+  expectedStrings: readonly string[],
+): void {
+  if (capture.requests === 0 || capture.bytes === 0) {
+    throw new ProofError("TELEMETRY_EXPORT_MISSING", "An OTLP signal was not exported")
+  }
+  for (const expected of expectedStrings) {
+    const bytes = new TextEncoder().encode(expected)
+    if (!capture.bodies.some((body) => containsBytes(body, bytes))) {
+      throw new ProofError("TELEMETRY_SEMANTICS_MISSING", "Expected OTLP semantics are missing", {
+        expected,
+      })
+    }
+  }
+}
+
+function containsBytes(haystack: Uint8Array, needle: Uint8Array): boolean {
+  if (needle.byteLength === 0 || needle.byteLength > haystack.byteLength) return false
+  const finalStart = haystack.byteLength - needle.byteLength
+  for (let start = 0; start <= finalStart; start += 1) {
+    let matches = true
+    for (let offset = 0; offset < needle.byteLength; offset += 1) {
+      if (haystack[start + offset] !== needle[offset]) {
+        matches = false
+        break
+      }
+    }
+    if (matches) return true
+  }
+  return false
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return isRecord(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 async function waitForAudit(

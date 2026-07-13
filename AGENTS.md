@@ -547,7 +547,7 @@ Tests must prove:
 - artifact inspection/download, deployment listing, audit queries, and API-key lifecycle are owner-scoped through API, SDK, and CLI;
 - sandbox clock skew cannot control durable log timestamps or runner timeout duration, and the ACP child timezone is UTC;
 - the no-account demo completes create → run → logs → artifact → local deployment;
-- the release proof additionally verifies cleanup audit, service restart, persisted preview, artifact integrity, and a restorable hashed data-root backup;
+- the release proof sends a revision-bound prompt through ACP, structurally verifies the exact durable response and agent-written artifact, validates semantic OTLP signals without private run input, then proves cleanup, restart, hashed backup, restore, and a second boot;
 - pinned OTel SDK/exporter packages initialize and export under Bun.
 
 Assert ordering, error codes, and side effects with injected clocks and deterministic adapters. Do not sleep and hope. A mock proves replaceability; only the gated live test proves real provider integration.
@@ -640,9 +640,10 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 ## 18. Current status
 
 - The Bun control plane, SQLite store/migrations and data-root lifecycle, ACP runner, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, complete owner-facing API/SDK/CLI resources, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
-- The no-account demo proves create → ACP run → durable logs/status → artifact capture → API-driven deployment → isolated preview. The release proof extends that path through runtime destruction, service restart, persisted preview/history reads, and a verified complete backup.
+- The no-account demo proves create → ACP run → durable logs/status → artifact capture → API-driven deployment → isolated preview. The release proof binds an exact prompt and response to the revision, deploys agent-written bytes, verifies telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
+- Authenticated local compatibility proofs run Codex, Claude Code, and Pi through pinned ACP adapters, require agent-written output, and complete artifact promotion plus preview verification without persisting local credentials.
 - The Cloudflare package uses the real official Sandbox SDK and container image; bridge and container execution are verified locally, while the real-account lifecycle test remains explicitly credential-gated.
-- No tagged compatibility baseline or production-support promise exists yet. Current evolution limits are recorded in Section 17 and README.
+- Version `0.1.0` is the first tagged compatibility baseline, not a blanket production-support promise. Current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

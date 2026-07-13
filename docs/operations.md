@@ -234,7 +234,7 @@ Before enabling it in the control plane:
 5. record `CLOUDFLARE_RUNNER_DIGEST` and, when the platform exposes it, `CLOUDFLARE_RUNTIME_IMAGE_DIGEST`; absent evidence remains `null` rather than being guessed;
 6. run `doctor` and the mock-bridge integration tests;
 7. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
-8. run `bun run proof:release:cloudflare` to prove the full control-plane, promotion, cleanup, restart, and backup path with complete configured provenance;
+8. run `bun run proof:release:cloudflare` to prove the full semantic ACP round trip, agent-written artifact, OTLP telemetry, promotion, cleanup, restart, backup/restore, and second-boot path with complete configured provenance;
 9. inspect Cloudflare for leaked test resources.
 
 The configured runner and image digests are operator/platform assertions used to pin execution identity. They are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
@@ -320,7 +320,7 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 - [ ] Every configured ACP agent is pinned and catalog-validated.
 - [ ] Local provider is disabled for untrusted tenants.
 - [ ] Remote provider shared contract and live lifecycle tests pass.
-- [ ] The release proof passes on the exact revision; remote release requires complete configured runner/image provenance.
+- [ ] The release proof passes on the exact revision, including telemetry export and backup restore; remote release requires complete configured runner/image provenance.
 - [ ] Bridge credentials are scoped, stored outside images, and rotatable.
 - [ ] Cleanup backlog, queue latency, run outcomes, and storage capacity are monitored.
 - [ ] OTLP compatibility is proven under Bun before export is enabled.
