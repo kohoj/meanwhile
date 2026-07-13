@@ -6,6 +6,7 @@ type PackageManifest = {
   readonly repository?: string | { readonly url?: string }
   readonly homepage?: string
   readonly dependencies?: Readonly<Record<string, string>>
+  readonly optionalDependencies?: Readonly<Record<string, string>>
 }
 
 type DependencyScope = "control-plane-and-runner" | "cloudflare-bridge" | "cloudflare-runtime-agent"
@@ -80,7 +81,7 @@ async function renderNotices(): Promise<string> {
 
   for (const scope of packageScopes) {
     const manifest = await readManifest(scope.packagePath)
-    const pending = Object.keys(manifest.dependencies ?? {}).map((name) => ({
+    const pending = (await dependencyNames(manifest, scope.resolveFrom)).map((name) => ({
       name,
       resolveFrom: scope.resolveFrom,
     }))
@@ -111,7 +112,7 @@ async function renderNotices(): Promise<string> {
         })
       }
 
-      for (const child of Object.keys(packageManifest.dependencies ?? {})) {
+      for (const child of await dependencyNames(packageManifest, packageRoot)) {
         pending.push({ name: child, resolveFrom: packageRoot })
       }
     }
@@ -194,13 +195,36 @@ async function renderNotices(): Promise<string> {
 }
 
 async function resolvePackageRoot(name: string, resolveFrom: string): Promise<string> {
-  let candidate = Bun.resolveSync(name, resolveFrom)
-  while (!(await Bun.file(`${candidate}/package.json`).exists())) {
-    const parent = parentPath(candidate)
-    if (parent === candidate) throw new Error(`could not locate package.json for ${name}`)
-    candidate = parent
+  const resolved = await tryResolvePackageRoot(name, resolveFrom)
+  if (resolved === undefined) throw new Error(`could not locate package.json for ${name}`)
+  return resolved
+}
+
+async function tryResolvePackageRoot(
+  name: string,
+  resolveFrom: string,
+): Promise<string | undefined> {
+  try {
+    let candidate = Bun.resolveSync(name, resolveFrom)
+    while (!(await Bun.file(`${candidate}/package.json`).exists())) {
+      const parent = parentPath(candidate)
+      if (parent === candidate) break
+      candidate = parent
+    }
+    if (await Bun.file(`${candidate}/package.json`).exists()) return candidate
+  } catch {
+    // Target-platform optional packages can be present on disk while the host
+    // resolver intentionally refuses them. Fall through to an exact lookup.
   }
-  return candidate
+
+  let directory = resolveFrom
+  while (true) {
+    const installed = `${directory}/node_modules/${name}`
+    if (await Bun.file(`${installed}/package.json`).exists()) return installed
+    const parent = parentPath(directory)
+    if (parent === directory) return undefined
+    directory = parent
+  }
 }
 
 async function readManifest(path: string): Promise<PackageManifest> {
@@ -231,4 +255,15 @@ function sourceUrl(manifest: PackageManifest): string | undefined {
 function parentPath(path: string): string {
   const separator = path.lastIndexOf("/")
   return separator <= 0 ? "/" : path.slice(0, separator)
+}
+
+async function dependencyNames(manifest: PackageManifest, resolveFrom: string): Promise<string[]> {
+  const required = Object.keys(manifest.dependencies ?? {})
+  const installedOptional: string[] = []
+  for (const name of Object.keys(manifest.optionalDependencies ?? {})) {
+    if ((await tryResolvePackageRoot(name, resolveFrom)) !== undefined) {
+      installedOptional.push(name)
+    }
+  }
+  return [...new Set([...required, ...installedOptional])]
 }

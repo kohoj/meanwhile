@@ -23,6 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - Retryable Cloudflare transport operations now use one bounded, abortable retry boundary with stable request identity; event replay also preserves the same durable cursor without duplicating or skipping accepted output.
 - Terminal Cloudflare processes now wait for bounded quiescence of the SDK's eventually consistent accumulated logs before the bridge publishes an exit cursor.
+- Third-party notice verification now materializes the independent Cloudflare runtime-agent graph for its actual Linux/x64 target and includes installed optional platform dependencies.
 - Cloudflare provenance no longer pairs the upstream Sandbox base-image tag with a digest belonging to the deployed custom image.
 
 ### Security
