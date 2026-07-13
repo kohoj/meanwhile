@@ -94,7 +94,7 @@ export MEANWHILE_API_KEY='<local bootstrap key>'
 docker compose up --build
 ```
 
-Mount `MEANWHILE_DATA_DIR` on durable storage and ensure the container's service user owns it. The supplied Compose topology publishes API and preview ports on host loopback only. It deliberately sets `MEANWHILE_LOCAL_PROVIDER=enabled` and `MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER=true` because container-internal listeners bind all interfaces; it is for trusted local work and must not be exposed to untrusted tenants.
+Mount the ownership parent of `MEANWHILE_DATA_DIR` on durable storage and ensure the container's service user owns it. The supplied image mounts `/data` and places the actual root at `/data/state`, so the adjacent `/data/state.lock` lease stays inside the same writable, durable ownership volume without becoming part of the replaceable data root. The supplied Compose topology publishes API and preview ports on host loopback only. It deliberately sets `MEANWHILE_LOCAL_PROVIDER=enabled` and `MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER=true` because container-internal listeners bind all interfaces; it is for trusted local work and must not be exposed to untrusted tenants.
 
 `compose.yaml` optionally reads `${MEANWHILE_ENV_FILE:-./compose.env}`. Copy [compose.env.example](../compose.env.example) for Cloudflare bridge settings or local-bootstrap agent secret values named by `MEANWHILE_SECRET_ENV_ALLOWLIST`. The file is ignored by Git and Docker build context. It is not required by shell-only Bun workflows, and production should use an owner-scoped secret broker rather than a plaintext process environment.
 
@@ -230,11 +230,12 @@ Before enabling it in the control plane:
 1. configure a high-entropy `BRIDGE_TOKEN` secret binding in the Cloudflare deployment;
 2. deploy the exact bridge and container image revision tested together;
 3. set `CLOUDFLARE_BRIDGE_URL` to that deployment's URL and set control-plane `CLOUDFLARE_BRIDGE_TOKEN` to the same secret value stored under bridge binding `BRIDGE_TOKEN`;
-4. record `CLOUDFLARE_RUNNER_DIGEST` and, when the platform exposes it, `CLOUDFLARE_RUNTIME_IMAGE_DIGEST`; absent evidence remains `null` rather than being guessed;
-5. run `doctor` and the mock-bridge integration tests;
-6. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
-7. run `bun run proof:release:cloudflare` to prove the full control-plane, promotion, cleanup, restart, and backup path with complete configured provenance;
-8. inspect Cloudflare for leaked test resources.
+4. after a deploy or secret rotation, poll the authenticated `/v1/health` boundary until the expected bridge protocol is stable; a successful Wrangler mutation is not edge readiness, and a fixed sleep is not evidence;
+5. record `CLOUDFLARE_RUNNER_DIGEST` and, when the platform exposes it, `CLOUDFLARE_RUNTIME_IMAGE_DIGEST`; absent evidence remains `null` rather than being guessed;
+6. run `doctor` and the mock-bridge integration tests;
+7. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
+8. run `bun run proof:release:cloudflare` to prove the full control-plane, promotion, cleanup, restart, and backup path with complete configured provenance;
+9. inspect Cloudflare for leaked test resources.
 
 The configured runner and image digests are operator/platform assertions used to pin execution identity. They are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
 

@@ -386,11 +386,12 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     const runtimeId = this.#runtimeId(runtime, "writeFiles")
     if (files.length === 0) return
     const encoded = files.map((file) => {
-      if (file.mode !== undefined) {
+      const mode = file.mode ?? 0o600
+      if (!Number.isInteger(mode) || mode < 0 || mode > 0o777 || (mode & 0o600) !== 0o600) {
         throw this.#error(
           "writeFiles",
-          "FILE_MODE_UNSUPPORTED",
-          "Cloudflare bridge does not support explicit file modes",
+          "INVALID_FILE_MODE",
+          "Workspace file mode must preserve owner read and write access",
         )
       }
       let path: RelativePath
@@ -410,7 +411,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
           "Workspace file exceeds the bridge write limit",
         )
       }
-      return { path, contentBase64 }
+      return { path, contentBase64, mode }
     })
 
     for (const batch of fileBatches(encoded)) {

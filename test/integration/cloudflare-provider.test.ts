@@ -30,8 +30,13 @@ describe("CloudflareRuntimeProvider", () => {
     await provider.start(runtime)
     expect((await provider.inspect(runtime)).status).toBe("running")
     await provider.writeFiles(runtime, [
-      { path: relativePath("src/main.ts"), content: new TextEncoder().encode("export {}") },
+      {
+        path: relativePath("src/main.ts"),
+        content: new TextEncoder().encode("export {}"),
+        mode: 0o700,
+      },
     ])
+    expect(bridge.fileModes.get("src/main.ts")).toBe(0o700)
     expect(
       new TextDecoder().decode(
         await provider.readFile(runtime, relativePath("src/main.ts"), { maxBytes: 1_024 }),
@@ -135,7 +140,7 @@ describe("CloudflareRuntimeProvider", () => {
     expect(JSON.stringify(failure)).not.toContain("internalCredential")
   })
 
-  test("fails closed on transport, protocol, URL, and unsupported-mode errors", async () => {
+  test("fails closed on transport, protocol, URL, and invalid-mode errors", async () => {
     expect(
       () =>
         new CloudflareRuntimeProvider({
@@ -159,9 +164,9 @@ describe("CloudflareRuntimeProvider", () => {
     await expect(provider.expose(runtime, 3_000)).rejects.toMatchObject({ code: "INVALID_PORT" })
     await expect(
       provider.writeFiles(runtime, [
-        { path: relativePath("executable"), content: new Uint8Array(), mode: 0o755 },
+        { path: relativePath("executable"), content: new Uint8Array(), mode: 0o500 },
       ]),
-    ).rejects.toMatchObject({ code: "FILE_MODE_UNSUPPORTED" })
+    ).rejects.toMatchObject({ code: "INVALID_FILE_MODE" })
   })
 
   test("aborts an in-flight bridge observation without a process mutation", async () => {
@@ -221,6 +226,7 @@ class BridgeStub {
   readonly requests: Request[] = []
   readonly runtimeOperationIds: string[] = []
   readonly processOperationIds: string[] = []
+  readonly fileModes = new Map<string, number>()
   readonly #token: string
   readonly #files = new Map<string, Uint8Array>()
   runtimeId: string | null = null
@@ -304,10 +310,12 @@ class BridgeStub {
     }
     if (request.method === "PUT" && path.endsWith("/files")) {
       const body = (await request.json()) as {
-        files: Array<{ path: string; contentBase64: string }>
+        files: Array<{ path: string; contentBase64: string; mode: number }>
       }
-      for (const file of body.files)
+      for (const file of body.files) {
         this.#files.set(file.path, new Uint8Array(Buffer.from(file.contentBase64, "base64")))
+        this.fileModes.set(file.path, file.mode)
+      }
       return json({ written: body.files.map(({ path: filePath }) => filePath) })
     }
     if (request.method === "GET" && path.endsWith("/files")) {

@@ -124,7 +124,9 @@ describe("Cloudflare Sandbox bridge", () => {
     const response = await fixture.request(`/v1/runtimes/${RUNTIME_ID}/files`, {
       method: "PUT",
       headers: jsonHeaders(),
-      body: JSON.stringify({ files: [{ path: "../escape", contentBase64: "c2VjcmV0" }] }),
+      body: JSON.stringify({
+        files: [{ path: "../escape", contentBase64: "c2VjcmV0", mode: 0o600 }],
+      }),
     })
 
     expect(response.status).toBe(400)
@@ -373,28 +375,45 @@ describe("Cloudflare Sandbox bridge", () => {
   })
 
   test("verifies workspace writes before and after directory creation without command interpolation", async () => {
-    const fixture = createWorkspaceSdkFixture([0, 0])
+    const fixture = createWorkspaceSdkFixture([0, 0, 0, 0])
     const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox)
     const uniquePath = "safe/unique-user-path.txt"
 
-    await runtime.writeFiles({ files: [{ path: uniquePath, contentBase64: "c2FmZQ==" }] })
+    await runtime.writeFiles({
+      files: [{ path: uniquePath, contentBase64: "c2FmZQ==", mode: 0o700 }],
+    })
 
-    expect(fixture.calls.map((call) => call.type)).toEqual(["exec", "mkdir", "exec", "write"])
-    expect(fixture.execCalls).toHaveLength(2)
-    expect(new Set(fixture.execCalls.map((call) => call.command)).size).toBe(1)
-    for (const call of fixture.execCalls) {
+    expect(fixture.calls.map((call) => call.type)).toEqual([
+      "exec",
+      "mkdir",
+      "exec",
+      "write",
+      "exec",
+      "exec",
+    ])
+    expect(fixture.execCalls).toHaveLength(4)
+    expect(new Set(fixture.execCalls.slice(0, 3).map((call) => call.command)).size).toBe(1)
+    for (const call of fixture.execCalls.slice(0, 3)) {
       expect(call.command).not.toContain(uniquePath)
       expect(call.command).toContain('realpath -m -- "$target"')
       expect(call.command).toContain('[ -L "$current" ]')
-      expect(call.options).toMatchObject({
-        env: {
-          MEANWHILE_REQUIRE_EXISTING: "0",
-          MEANWHILE_WORKSPACE_PATH: `/workspace/${uniquePath}`,
-        },
-        origin: "internal",
-        timeout: 5_000,
-      })
     }
+    expect(fixture.execCalls.map((call) => call.options.env.MEANWHILE_REQUIRE_EXISTING)).toEqual([
+      "0",
+      "0",
+      "1",
+      undefined,
+    ])
+    expect(fixture.execCalls[3]?.command).not.toContain(uniquePath)
+    expect(fixture.execCalls[3]?.command).toContain('chmod -- "$mode" "$target"')
+    expect(fixture.execCalls[3]?.options).toMatchObject({
+      env: {
+        MEANWHILE_FILE_MODE: "700",
+        MEANWHILE_WORKSPACE_PATH: `/workspace/${uniquePath}`,
+      },
+      origin: "internal",
+      timeout: 5_000,
+    })
   })
 
   test("rejects a symlink introduced while creating a write path", async () => {
@@ -403,7 +422,7 @@ describe("Cloudflare Sandbox bridge", () => {
 
     await expect(
       runtime.writeFiles({
-        files: [{ path: "malicious-link/output.txt", contentBase64: "c2FmZQ==" }],
+        files: [{ path: "malicious-link/output.txt", contentBase64: "c2FmZQ==", mode: 0o600 }],
       }),
     ).rejects.toMatchObject({
       code: "SYMLINK_NOT_ALLOWED",
@@ -413,6 +432,40 @@ describe("Cloudflare Sandbox bridge", () => {
 
     expect(fixture.calls.map((call) => call.type)).toEqual(["exec", "mkdir", "exec"])
     expect(fixture.writeCount).toBe(0)
+  })
+
+  test("rejects a symlink introduced after a workspace write", async () => {
+    const fixture = createWorkspaceSdkFixture([0, 0, 42])
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox)
+
+    await expect(
+      runtime.writeFiles({
+        files: [{ path: "changed/output.txt", contentBase64: "c2FmZQ==", mode: 0o600 }],
+      }),
+    ).rejects.toMatchObject({ code: "SYMLINK_NOT_ALLOWED", status: 409 })
+
+    expect(fixture.calls.map((call) => call.type)).toEqual([
+      "exec",
+      "mkdir",
+      "exec",
+      "write",
+      "exec",
+    ])
+  })
+
+  test("fails closed when an exact workspace file mode cannot be applied", async () => {
+    const fixture = createWorkspaceSdkFixture([0, 0, 0, 1])
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox)
+
+    await expect(
+      runtime.writeFiles({
+        files: [{ path: "bin/tool", contentBase64: "c2FmZQ==", mode: 0o755 }],
+      }),
+    ).rejects.toMatchObject({
+      code: "FILE_MODE_APPLY_FAILED",
+      status: 502,
+      details: { retryable: false },
+    })
   })
 
   test("rejects symlink reads and external realpath resolution before file SDK operations", async () => {

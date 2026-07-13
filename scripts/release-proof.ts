@@ -86,7 +86,7 @@ try {
   if (run.status !== "succeeded" || run.executionProvenance === null) {
     throw new ProofError("RUN_PROOF_FAILED", "The release-proof run did not succeed", {
       status: run.status,
-      errorCode: run.error?.code ?? null,
+      error: run.error,
     })
   }
   const logs = await running.client.runs.logs(run.id, { limit: 1_000 })

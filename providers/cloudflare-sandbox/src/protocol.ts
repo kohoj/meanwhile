@@ -1,6 +1,6 @@
 import { z } from "zod"
 
-export const BRIDGE_PROTOCOL_VERSION = 2 as const
+export const BRIDGE_PROTOCOL_VERSION = 3 as const
 export const CLOUDFLARE_SANDBOX_VERSION = "0.12.3" as const
 export const INITIAL_EVENT_CURSOR = "v2.0.0.0" as const
 export const MAX_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -117,6 +117,12 @@ export const signalProcessRequestSchema = z.strictObject({
 })
 
 const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+const workspaceFileModeSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(0o777)
+  .refine((mode) => (mode & 0o600) === 0o600, "owner read and write bits are required")
 
 export const writeFilesRequestSchema = z
   .strictObject({
@@ -125,6 +131,7 @@ export const writeFilesRequestSchema = z
         z.strictObject({
           path: relativeFilePathSchema,
           contentBase64: z.string().max(MAX_FILE_ENCODED_BYTES).regex(canonicalBase64),
+          mode: workspaceFileModeSchema,
         }),
       )
       .min(1)

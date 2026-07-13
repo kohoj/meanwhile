@@ -40,6 +40,16 @@ describe("living documentation", () => {
     const catalog = await AgentCatalog.load(join(root, "docs/agents.example.json"))
     expect(catalog.list()).toEqual(["claude-code", "codex", "hermes"])
   })
+
+  test("keeps the packaged data root beneath its writable ownership volume", async () => {
+    const dockerfile = await Bun.file(join(root, "Dockerfile")).text()
+    const compose = await Bun.file(join(root, "compose.yaml")).text()
+
+    expect(dockerfile).toContain("MEANWHILE_DATA_DIR=/data/state")
+    expect(dockerfile).toContain('VOLUME ["/data"]')
+    expect(compose).toContain("MEANWHILE_DATA_DIR: /data/state")
+    expect(compose).toContain("- meanwhile-data:/data")
+  })
 })
 
 function requiredCapture(value: string | undefined, source: string): string {

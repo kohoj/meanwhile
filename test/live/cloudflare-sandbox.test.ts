@@ -9,6 +9,7 @@ import {
 import { CloudflareRuntimeProvider } from "../../src/providers/cloudflare-provider"
 import {
   type ProcessEvent,
+  type ProcessHandle,
   type RuntimeHandle,
   relativePath,
 } from "../../src/providers/runtime-provider"
@@ -59,15 +60,34 @@ liveTest(
           path: relativePath("live/probe.txt"),
           content: new TextEncoder().encode("cloudflare-sandbox-live"),
         },
+        {
+          path: relativePath("live/executable-probe"),
+          content: new TextEncoder().encode("#!/bin/sh\nprintf mode-preserved"),
+          mode: 0o700,
+        },
       ])
       expect(
         new TextDecoder().decode(
           await provider.readFile(runtime, relativePath("live/probe.txt"), { maxBytes: 1_024 }),
         ),
       ).toBe("cloudflare-sandbox-live")
-      expect(await provider.listFiles(runtime, relativePath("live"), { maxEntries: 10 })).toEqual([
-        expect.objectContaining({ path: "live/probe.txt", type: "file" }),
-      ])
+      expect(
+        (await provider.listFiles(runtime, relativePath("live"), { maxEntries: 10 }))
+          .map(({ path }) => String(path))
+          .sort(),
+      ).toEqual(["live/executable-probe", "live/probe.txt"])
+
+      const modeProbe = await provider.spawn(runtime, {
+        processId: `live-mode-${crypto.randomUUID()}`,
+        argv: ["./live/executable-probe"],
+        cwd: relativePath("."),
+        timeoutMs: 30_000,
+        terminationGraceMs: 5_000,
+      })
+      expect(
+        (await Array.fromAsync(provider.events(modeProbe, null))).map(({ data }) => data).join(""),
+      ).toBe("mode-preserved\n")
+      expect(await provider.wait(modeProbe)).toMatchObject({ exitCode: 0, reason: "exited" })
 
       const process = await provider.spawn(runtime, {
         processId: `live-process-${crypto.randomUUID()}`,
@@ -138,12 +158,13 @@ liveTest(
         argv: [
           "bun",
           "-e",
-          "Bun.serve({port:3001,hostname:'0.0.0.0',fetch(){return new Response('ok')}})",
+          "Bun.serve({port:3001,hostname:'0.0.0.0',fetch(){return new Response('ok')}});console.log('preview-ready')",
         ],
         cwd: relativePath("."),
         timeoutMs: 60_000,
         terminationGraceMs: 5_000,
       })
+      await waitForProcessOutput(provider, previewServer, "preview-ready")
       expect(await provider.expose(runtime, 3_001)).toMatchObject({
         port: 3_001,
         url: expect.stringMatching(/^https:\/\//),
@@ -161,6 +182,19 @@ liveTest(
   },
   120_000,
 )
+
+async function waitForProcessOutput(
+  provider: CloudflareRuntimeProvider,
+  process: ProcessHandle,
+  expected: string,
+): Promise<void> {
+  let output = ""
+  for await (const event of provider.events(process, null, AbortSignal.timeout(30_000))) {
+    output += event.data
+    if (output.includes(expected)) return
+  }
+  throw new Error("Cloudflare preview process exited before reporting readiness")
+}
 
 function parseRunnerFrames(events: readonly ProcessEvent[]): RunnerFrame[] {
   return events

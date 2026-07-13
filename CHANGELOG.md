@@ -2,9 +2,11 @@
 
 All user-visible, operator-visible, compatibility, migration, and security-relevant changes to Meanwhile are recorded here.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and releases will follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once a public compatibility baseline exists.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-07-14
 
 ### Added
 
@@ -43,13 +45,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Local preview URLs now use an explicit browser-facing origin whenever the server binds all interfaces, so deployment records never publish wildcard bind addresses.
 - Source-checkout CLI examples use the executable `bun run cli --` path and `doctor` no longer performs an implicit runner build.
 - Compose publishes only loopback host ports, makes its unsafe local-provider choice explicit, and accepts optional provider plus allowlisted `env://` values through an uncommitted runtime env file.
-- Cloudflare bridge protocol v2 now binds process retries to a secret-safe full-spec fingerprint, requires an explicit version header, keeps lifecycle truth in a separate durable registry, advertises only the SDK's hard-termination capability, and bounds accumulated replay to 4 MiB of UTF-8 output.
+- Cloudflare bridge protocol v3 binds process retries to a secret-safe full-spec fingerprint, requires an explicit version header, preserves declared workspace file modes, keeps lifecycle truth in a separate durable registry, advertises only the SDK's hard-termination capability, and bounds accumulated replay to 4 MiB of UTF-8 output.
 - CLI and executable demos now consume the same public client as external callers; public Zod contracts are separated from Hono registration, and hermetic demo-environment setup no longer obscures the SDK usage path.
 - Runner protocol v2 carries a remaining timeout duration instead of a cross-machine wall-clock deadline; ACP children run in UTC, monotonic elapsed time owns runtime duration, and durable event timestamps come from control-plane acceptance.
 - Successful local-static previews resume their separate listener after a control-plane restart.
 
 ### Fixed
 
+- Packaged containers now place the data root beneath the writable `/data` volume, keeping its adjacent single-writer lease durable and writable for the non-root service user.
+- Cloudflare workspace upload now applies and verifies immutable file modes, closing the uploaded-bundle path for executable agent and repository files.
 - Local process recovery now reads Linux kernel process identity directly instead of requiring a `ps` utility that minimal production images do not contain.
 - Sparse telemetry correlation is canonicalized before validation, preventing an unavailable optional identifier from obscuring the original failure.
 - The production image now carries both versioned protocol modules required by the control-plane import graph, and CI boots the built image through `/readyz` instead of treating a successful image build as runtime proof.
@@ -75,7 +79,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Known limitations
 
-- No tagged release exists.
 - SQLite intentionally supports one active control-plane writer.
 - Local execution is not a sandbox; Cloudflare requires a deployed bridge and live account verification for the exact revision.
 - Quotas/rate limits, horizontal coordination, large-log object retention, release signing, and additional deployment targets are not yet productized.
@@ -85,9 +88,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## Compatibility policy
 
-Until the first tagged release, public HTTP schemas, runner and bridge protocols, database migrations, artifact representation, agent catalog, and adapter contracts may change. Changes must still be deliberate, versioned where they cross a process or persistence boundary, tested for rejection/upgrade behavior, and recorded above.
-
-After a compatibility baseline is declared:
+Version `0.1.0` is the first compatibility baseline for public HTTP schemas, runner and bridge protocols, database migrations, artifact representation, agent catalog, and adapter contracts:
 
 - breaking public API or persisted-format changes require a major release;
 - additive backward-compatible API behavior may ship in a minor release;
@@ -96,4 +97,5 @@ After a compatibility baseline is declared:
 - released migrations are immutable and upgrades move forward through new migrations;
 - security advisories identify affected and fixed versions without exposing active credentials or tenant data.
 
-Release links will be added when the repository has a canonical public origin and first tag.
+[Unreleased]: https://github.com/kohoj/meanwhile/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/kohoj/meanwhile/releases/tag/v0.1.0

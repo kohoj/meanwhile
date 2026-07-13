@@ -25,7 +25,7 @@ RUN apt-get update \
 ENV NODE_ENV=production \
     MEANWHILE_HOST=0.0.0.0 \
     MEANWHILE_PORT=7331 \
-    MEANWHILE_DATA_DIR=/data \
+    MEANWHILE_DATA_DIR=/data/state \
     MEANWHILE_RUNNER_PATH=/usr/local/bin/meanwhile-runner
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json ./

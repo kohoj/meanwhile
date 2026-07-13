@@ -27,6 +27,7 @@ import {
 const WORKSPACE_ROOT = "/workspace"
 const STAGING_ROOT = "/tmp/meanwhile-bridge"
 const WORKSPACE_PATH_PROBE_TIMEOUT_MS = 5_000
+const WORKSPACE_FILE_MODE_TIMEOUT_MS = 5_000
 const PROCESS_LOG_REFRESH_INTERVAL_MS = 250
 const WORKSPACE_PATH_PROBE_COMMAND = shellJoin([
   "/bin/sh",
@@ -71,6 +72,16 @@ esac
 if [ "$require_existing" = 1 ] && [ ! -e "$target" ]; then
   exit 44
 fi`,
+])
+const WORKSPACE_FILE_MODE_COMMAND = shellJoin([
+  "/bin/sh",
+  "-c",
+  `set -eu
+target=\${MEANWHILE_WORKSPACE_PATH-}
+mode=\${MEANWHILE_FILE_MODE-}
+chmod -- "$mode" "$target"
+actual=$(stat -c %a -- "$target")
+[ "$actual" = "$mode" ]`,
 ])
 const TERMINAL_PROCESS_STATES = new Set<ProviderProcessStatus>([
   "completed",
@@ -345,6 +356,8 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
       // replaced while the provider was creating the missing path.
       await this.#assertWorkspacePath(path, false)
       await this.#sandbox.writeFile(path, file.contentBase64, { encoding: "base64" })
+      await this.#assertWorkspacePath(path, true)
+      await this.#applyWorkspaceFileMode(path, file.mode)
     }
   }
 
@@ -516,6 +529,25 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
             retryable: false,
           },
         )
+    }
+  }
+
+  async #applyWorkspaceFileMode(path: string, mode: number): Promise<void> {
+    const result = await this.#sandbox.exec(WORKSPACE_FILE_MODE_COMMAND, {
+      env: {
+        MEANWHILE_FILE_MODE: mode.toString(8),
+        MEANWHILE_WORKSPACE_PATH: path,
+      },
+      origin: "internal",
+      timeout: WORKSPACE_FILE_MODE_TIMEOUT_MS,
+    })
+    if (result.exitCode !== 0) {
+      throw new BridgeError(
+        "FILE_MODE_APPLY_FAILED",
+        "The workspace file mode could not be applied exactly.",
+        502,
+        { retryable: false },
+      )
     }
   }
 

@@ -173,7 +173,9 @@ Rules:
 - handles are opaque, versioned, and persistable; core code never inspects private fields;
 - capabilities describe provider-neutral facts such as process recovery, event replay, and port exposure; policy may branch on capabilities, never provider names;
 - arguments are arrays; paths are normalized relative paths;
+- providers preserve the declared portable file mode; executable intent is immutable workspace input, not adapter-specific metadata that core may discard;
 - process events have a monotonic provider cursor for reconnect without duplication;
+- `expose` publishes an already-ready service; workload readiness is explicit evidence from the process, never inferred from provider process creation;
 - `stop` and `destroy` are idempotent; missing during cleanup means already absent;
 - errors preserve provider, operation, safe provider code, and retryability before normalization;
 - providers never receive a database handle.

@@ -205,7 +205,7 @@ All paths crossing the contract are relative to the provider workspace and use o
 - paths that resolve outside the workspace;
 - symlink escapes.
 
-`writeFiles` receives bounded bytes and creates parent directories only within the workspace. Define overwrite semantics explicitly and avoid partial publication.
+`writeFiles` receives bounded bytes plus a portable Unix permission mode and creates parent directories only within the workspace. The mode is part of immutable workspace identity: preserve it exactly, including executable intent, and fail before execution if the backend cannot. Define overwrite semantics explicitly and avoid partial publication.
 
 `listFiles` returns stable metadata sufficient for safe artifact traversal. It must identify directories, regular files, and symlinks rather than silently following them.
 
@@ -220,6 +220,7 @@ If supported, `expose(runtime, port)` returns a normalized endpoint with provide
 Exposure requirements:
 
 - validate port range and provider restrictions;
+- require the caller to establish that the workload is listening before exposure; process creation is not service readiness;
 - do not place credentials in durable URLs when avoidable;
 - report expiration truthfully;
 - make endpoint cleanup follow runtime destruction;
@@ -281,6 +282,7 @@ Cloudflare-specific SDK types live only under `providers/cloudflare-sandbox/` an
 - authenticates the control plane;
 - validates the versioned bridge request;
 - translates to the official Sandbox SDK using its current RPC transport;
+- applies and verifies declared workspace file modes through a fixed internal command because the pinned file API does not expose mode directly;
 - starts the fixed runner with bounded initial stdin;
 - when an SDK lacks direct initial stdin, may use a random provider-private staging file plus safely quoted redirection, provided the bytes never enter argv/diagnostics and the file is removed on every path;
 - preserves runner stdout as protocol and stderr as diagnostics;
@@ -308,8 +310,9 @@ Every adapter, including local and fake, runs the same deterministic suite:
 11. expose a port when capability is true;
 12. normalize authentication, unavailable, expired cursor, and invalid-handle errors;
 13. ensure diagnostics and handles contain no injected secret;
-14. reconnect according to declared capabilities.
-15. keep provenance immutable and reject configuration drift before an execution uses the adapter.
+14. reconnect according to declared capabilities;
+15. preserve declared workspace file modes;
+16. keep provenance immutable and reject configuration drift before an execution uses the adapter.
 
 Use injected identities and bounded event-driven waits; do not use arbitrary sleeps. A fake proves core replaceability. A local adapter proves real host process semantics. Each remote adapter additionally needs a credential-gated live test that creates, starts, executes, reads, stops, and destroys actual provider compute.
 
@@ -324,6 +327,7 @@ Use injected identities and bounded event-driven waits; do not use arbitrary sle
 - [ ] Events are ordered, bounded, resumable, and channel-aware.
 - [ ] Stop and destroy are idempotent and distinct.
 - [ ] Paths and symlinks cannot escape the workspace.
+- [ ] Workspace file modes survive the adapter boundary exactly.
 - [ ] Errors are structured, safe, and operation-specific.
 - [ ] Provider credentials never enter workload environment.
 - [ ] Shared contract tests pass.
