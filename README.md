@@ -12,24 +12,7 @@ Meanwhile gives agent work a portable identity. One `RunSpec` composes intent, a
 
 Run a fix, migration, review, or release on disposable compute. Hand the resulting run—not a terminal session—to the next person or agent. Promote only immutable output.
 
-```text
-fix one repo · maintain a fleet · compare agents · ship generated software
-                              │
-                        SDK · API · CLI
-                              │ RunSpec
-        ┌─────────────────────▼─────────────────────┐
-        │                 MEANWHILE                 │
-        │ intent → durable run → evidence → artifact│
-        │ auth · policy · audit · recovery · cleanup│
-        └──────────────┬────────────────┬───────────┘
-                       │                └── DeployAdapter → URL
-                RuntimeProvider
-                       │ disposable compute
-      local · Cloudflare · Daytona · Fly · Modal · your adapter
-                       │ meanwhile-runner
-                       │ local ACP
-       Claude Code · Codex · Hermes · OMP · any ACP agent
-```
+![Meanwhile turns any ACP agent and runtime adapter into a durable run for fleets, continuous maintenance, evaluation, embedded agent products, and autonomous delivery.](docs/assets/meanwhile-product-map.webp)
 
 ## The run is the product
 
