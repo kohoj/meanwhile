@@ -431,6 +431,7 @@ The bridge:
 - owns no run, owner, artifact, or deployment business state;
 - starts the fixed runner as a background process and delivers one validated `RunnerSpec` as bounded stdin data; the pinned SDK lacks direct initial-stdin support, so the current bridge uses a random provider-private staging file, quoted redirection, and unconditional deletion without placing prompt data in argv;
 - exposes cursor-bearing live/replayed stdout frames and separate safe diagnostics;
+- waits for bounded quiescence of the SDK's accumulated logs after terminal process state before publishing the exit cursor;
 - retries only retryable transport failures with bounded, abortable backoff while preserving operation identity and, for events, the same durable cursor;
 - advertises only the hard termination primitive the pinned SDK actually implements; control-plane cancellation then stops remaining sandbox processes through the runtime lifecycle;
 - makes stop/destroy idempotent and explicitly destroys rather than confusing sleep with cleanup;

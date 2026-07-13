@@ -266,7 +266,7 @@ interface RuntimeProvider {
 }
 ```
 
-`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, image, standalone Bun runner, and bundled Claude ACP adapter are pinned as one compatibility unit; Cloudflare types remain inside the provider package. One bounded transport-retry boundary preserves the same operation request identity; event replay also preserves its durable cursor, so transient bridge failures cannot silently duplicate or skip accepted evidence.
+`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, image, standalone Bun runner, and bundled Claude ACP adapter are pinned as one compatibility unit; Cloudflare types remain inside the provider package. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor and waits for terminal accumulated logs to become quiescent before publishing exit, so transient or eventually consistent provider reads cannot silently lose, duplicate, or skip accepted evidence.
 
 The shipped Cloudflare image uses `standard-1` deliberately: a real Claude coding-agent process exceeded the `lite` class's 256 MiB limit. Deterministic bridge checks can fit smaller compute, but the supported live-agent proof must use a class sized for the agent toolchain. Runtime destruction remains the cost boundary.
 

@@ -254,7 +254,7 @@ describe("Cloudflare Sandbox bridge", () => {
         return { stdout, stderr, processId: PROCESS_ID }
       },
     } as unknown as Sandbox
-    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
 
     const first = await runtime.events(PROCESS_ID, INITIAL_EVENT_CURSOR, 4)
     expect(
@@ -317,6 +317,50 @@ describe("Cloudflare Sandbox bridge", () => {
     ).toEqual(["final-runner-frame\n", "exit"])
   })
 
+  test("waits for terminal accumulated logs to become quiescent before publishing exit", async () => {
+    let status: "running" | "completed" = "running"
+    let logReads = 0
+    const process = {
+      id: PROCESS_ID,
+      command: "runner",
+      status,
+      startTime: new Date("2026-07-13T00:00:00.000Z"),
+      endTime: new Date("2026-07-13T00:00:01.000Z"),
+      exitCode: 0,
+      async getStatus() {
+        return status
+      },
+    }
+    const prefix = "runner-started\n"
+    const terminal = "runner-terminal\n"
+    const sandbox = {
+      async getProcess() {
+        return process
+      },
+      async getProcessLogs() {
+        logReads += 1
+        return {
+          stdout: status === "completed" && logReads >= 4 ? `${prefix}${terminal}` : prefix,
+          stderr: "",
+          processId: PROCESS_ID,
+        }
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
+
+    const first = await runtime.events(PROCESS_ID, INITIAL_EVENT_CURSOR, 1_024)
+    expect(
+      first.events.map((event) => (event.type === "output" ? event.data : event.type)),
+    ).toEqual([prefix])
+
+    status = "completed"
+    const second = await runtime.events(PROCESS_ID, first.nextCursor, 1_024)
+    expect(
+      second.events.map((event) => (event.type === "output" ? event.data : event.type)),
+    ).toEqual([terminal, "exit"])
+    expect(logReads).toBeGreaterThanOrEqual(9)
+  })
+
   test("rejects UTF-8 output beyond the replay budget and detects provider truncation", async () => {
     let status: "running" | "completed" = "running"
     let stdout = "😀".repeat(MAX_PROCESS_OUTPUT_BYTES / 4 + 1)
@@ -338,7 +382,7 @@ describe("Cloudflare Sandbox bridge", () => {
         return { stdout, stderr: "", processId: PROCESS_ID }
       },
     } as unknown as Sandbox
-    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
 
     await expect(runtime.events(PROCESS_ID, INITIAL_EVENT_CURSOR, 1)).rejects.toMatchObject({
       code: "PROCESS_OUTPUT_LIMIT_EXCEEDED",

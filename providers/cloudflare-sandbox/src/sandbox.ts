@@ -29,6 +29,9 @@ const STAGING_ROOT = "/tmp/meanwhile-bridge"
 const WORKSPACE_PATH_PROBE_TIMEOUT_MS = 5_000
 const WORKSPACE_FILE_MODE_TIMEOUT_MS = 5_000
 const PROCESS_LOG_REFRESH_INTERVAL_MS = 250
+const TERMINAL_LOG_SETTLE_INTERVAL_MS = 100
+const TERMINAL_LOG_QUIET_READS = 5
+const TERMINAL_LOG_MAX_READS = 20
 const WORKSPACE_PATH_PROBE_COMMAND = shellJoin([
   "/bin/sh",
   "-c",
@@ -152,11 +155,17 @@ export function createCloudflareRuntimeFactory(
 export class CloudflareBridgeRuntime implements BridgeRuntime {
   readonly #handle: RuntimeHandle
   readonly #sandbox: Sandbox
+  readonly #sleep: (milliseconds: number) => Promise<void>
   readonly #processOutput = new Map<string, ProcessOutputCache>()
 
-  constructor(runtimeId: string, sandbox: Sandbox) {
+  constructor(
+    runtimeId: string,
+    sandbox: Sandbox,
+    sleep: (milliseconds: number) => Promise<void> = defaultSleep,
+  ) {
     this.#handle = { version: BRIDGE_PROTOCOL_VERSION, id: runtimeId }
     this.#sandbox = sandbox
+    this.#sleep = sleep
   }
 
   async start(): Promise<RuntimeSnapshot> {
@@ -446,7 +455,10 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
       return cached
     }
 
-    const logs = await this.#sandbox.getProcessLogs(processId)
+    const logs =
+      terminal && cached !== undefined && !cached.terminal
+        ? await this.#settledTerminalLogs(processId)
+        : await this.#sandbox.getProcessLogs(processId)
     if (utf8Length(logs.stdout) + utf8Length(logs.stderr) > MAX_PROCESS_OUTPUT_BYTES) {
       throw new BridgeError(
         "PROCESS_OUTPUT_LIMIT_EXCEEDED",
@@ -478,6 +490,23 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
     }
     this.#processOutput.set(processId, observed)
     return observed
+  }
+
+  async #settledTerminalLogs(processId: string) {
+    let current = await this.#sandbox.getProcessLogs(processId)
+    let quietReads = 0
+    for (let read = 1; read < TERMINAL_LOG_MAX_READS; read += 1) {
+      await this.#sleep(TERMINAL_LOG_SETTLE_INTERVAL_MS)
+      const next = await this.#sandbox.getProcessLogs(processId)
+      if (next.stdout === current.stdout && next.stderr === current.stderr) {
+        quietReads += 1
+        if (quietReads >= TERMINAL_LOG_QUIET_READS) return next
+      } else {
+        quietReads = 0
+      }
+      current = next
+    }
+    return current
   }
 
   async #requireProcess(processId: string): Promise<Process> {
@@ -638,4 +667,8 @@ function toIsoString(value: Date): string {
 
 function utf8Length(value: string): number {
   return new TextEncoder().encode(value).byteLength
+}
+
+function defaultSleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
