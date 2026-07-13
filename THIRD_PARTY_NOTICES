@@ -16,7 +16,9 @@ and upstream license material alongside this application-level inventory.
 
 DEPENDENCY INVENTORY
 
-- @agentclientprotocol/sdk@1.2.1 — Apache-2.0 — control-plane-and-runner; https://github.com/agentclientprotocol/typescript-sdk
+- @agentclientprotocol/claude-agent-acp@0.58.1 — Apache-2.0 — cloudflare-runtime-agent; https://github.com/agentclientprotocol/claude-agent-acp
+- @agentclientprotocol/sdk@1.2.1 — Apache-2.0 — cloudflare-runtime-agent, control-plane-and-runner; https://github.com/agentclientprotocol/typescript-sdk
+- @anthropic-ai/claude-agent-sdk@0.3.205 — SEE LICENSE IN README.md — cloudflare-runtime-agent; https://github.com/anthropics/claude-agent-sdk-typescript
 - @asteasolutions/zod-to-openapi@8.5.0 — MIT — control-plane-and-runner; https://github.com/asteasolutions/zod-to-openapi
 - @cloudflare/containers@0.3.7 — MIT OR Apache-2.0 — cloudflare-bridge; https://github.com/cloudflare/containers
 - @cloudflare/sandbox@0.12.3 — Apache-2.0 — cloudflare-bridge; https://github.com/cloudflare/sandbox-sdk
@@ -41,9 +43,13 @@ DEPENDENCY INVENTORY
 - hono@4.12.30 — MIT — cloudflare-bridge, control-plane-and-runner; https://github.com/honojs/hono
 - openapi3-ts@4.6.0 — MIT — control-plane-and-runner; https://github.com/metadevpro/openapi3-ts
 - yaml@2.9.0 — ISC — control-plane-and-runner; https://github.com/eemeli/yaml
-- zod@4.4.3 — MIT — cloudflare-bridge, control-plane-and-runner; https://github.com/colinhacks/zod
+- zod@4.4.3 — MIT — cloudflare-bridge, cloudflare-runtime-agent, control-plane-and-runner; https://github.com/colinhacks/zod
 
 LICENSE TEXTS
+
+Applies to: @anthropic-ai/claude-agent-sdk@0.3.205
+
+© Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
 
 Applies to: @opentelemetry/api-logs@0.220.0, @opentelemetry/api@1.9.1, @opentelemetry/core@2.9.0, @opentelemetry/exporter-metrics-otlp-http@0.220.0, @opentelemetry/exporter-trace-otlp-http@0.220.0, @opentelemetry/otlp-exporter-base@0.220.0, @opentelemetry/otlp-transformer@0.220.0, @opentelemetry/resources@2.9.0, @opentelemetry/sdk-logs@0.220.0, @opentelemetry/sdk-metrics@2.9.0, @opentelemetry/sdk-trace-base@2.9.0, @opentelemetry/sdk-trace@2.9.0, @opentelemetry/semantic-conventions@1.43.0
 
@@ -249,7 +255,7 @@ Apache License
    See the License for the specific language governing permissions and
    limitations under the License.
 
-Applies to: @agentclientprotocol/sdk@1.2.1
+Applies to: @agentclientprotocol/claude-agent-acp@0.58.1, @agentclientprotocol/sdk@1.2.1
 
 Apache License
                            Version 2.0, January 2004

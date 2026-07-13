@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -295,27 +295,6 @@ describe("meanwhile runner", () => {
       },
     })
   }, 5_000)
-
-  test("derives the physical workspace from cwd and rejects symlink escape", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), "meanwhile-runner-"))
-    try {
-      await symlink(tmpdir(), join(workspace, "escape"), "dir")
-      const invalidSpec = spec()
-      invalidSpec.agent = { ...invalidSpec.agent, workingDirectory: "escape" }
-      const result = await executeRunner(invalidSpec, {}, { cwd: workspace })
-
-      expect(result.exitCode).toBe(1)
-      expect(result.frames.at(-1)).toMatchObject({
-        type: "terminal",
-        payload: {
-          outcome: "failed",
-          error: { code: "WORKSPACE_INVALID" },
-        },
-      })
-    } finally {
-      await rm(workspace, { recursive: true, force: true })
-    }
-  })
 })
 
 async function executeRunner(
@@ -403,6 +382,7 @@ function spec(overrides: Partial<RunnerSpec> = {}): RunnerSpec {
     agent: {
       executable: "bun",
       args: [fixturePath],
+      workingDirectory: "workspace",
     },
     prompt: "do the work",
     permissionPolicy: { mode: "deny-all" },

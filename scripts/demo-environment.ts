@@ -8,45 +8,26 @@ import type { AppConfig } from "../src/config"
 import { initializeInstrumentation } from "../src/instrumentation"
 import { SERVICE_VERSION } from "../src/version"
 import { captureWorkspace, type UploadedWorkspaceFile } from "../src/workspace"
+import {
+  CLAUDE_ADAPTER_NAME,
+  CLAUDE_ADAPTER_VERSION,
+  CLAUDE_SDK_NAME,
+  CLAUDE_SDK_VERSION,
+  ClaudeSettingsError,
+  loadClaudeRunEnvironment,
+  readClaudeSettingsEnvironment,
+} from "./claude-settings"
 
 const CODEX_ADAPTER_NAME = "@agentclientprotocol/codex-acp"
 const CODEX_ADAPTER_VERSION = "1.1.2"
 const CODEX_RUNTIME_NAME = "@openai/codex"
 const CODEX_RUNTIME_VERSION = "0.144.3"
-const CLAUDE_ADAPTER_NAME = "@agentclientprotocol/claude-agent-acp"
-const CLAUDE_ADAPTER_VERSION = "0.58.1"
-const CLAUDE_SDK_NAME = "@anthropic-ai/claude-agent-sdk"
-const CLAUDE_SDK_VERSION = "0.3.205"
 const PI_ADAPTER_NAME = "pi-acp"
 const PI_ADAPTER_VERSION = "0.0.31"
 const PI_RUNTIME_NAME = "@earendil-works/pi-coding-agent"
 const PI_RUNTIME_VERSION = "0.80.6"
 const PI_PROVIDER = "amazon-bedrock"
 const PI_MODEL = "us.anthropic.claude-opus-4-8"
-const CLAUDE_SETTINGS_SECRET_ENV = new Set([
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "AWS_BEARER_TOKEN_BEDROCK",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-])
-const CLAUDE_SETTINGS_SAFE_ENV = new Set([
-  "ANTHROPIC_VERTEX_PROJECT_ID",
-  "AWS_REGION",
-  "CLAUDE_CODE_ATTRIBUTION_HEADER",
-  "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_FOUNDRY",
-  "CLAUDE_CODE_USE_VERTEX",
-])
-const CLAUDE_SETTINGS_AUTH_ENV = new Set([
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "AWS_BEARER_TOKEN_BEDROCK",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-])
 
 export type DemoAgentType = "demo" | "codex" | "claude-code" | "pi"
 
@@ -325,27 +306,9 @@ async function prepareClaudeProof(
     throw new DemoError("CLAUDE_NOT_FOUND", "Claude Code must be installed for the local proof")
   }
 
-  const configuredEnvironment = await readClaudeSettingsEnvironment()
-  const environment: Record<string, string> = {
-    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
-    CLAUDE_CODE_DISABLE_AGENT_VIEW: "1",
-  }
-  const secretReferences: Record<string, string> = {}
-  let hasAuthentication = false
-  for (const [name, value] of Object.entries(configuredEnvironment)) {
-    if (CLAUDE_SETTINGS_SECRET_ENV.has(name)) {
-      setTemporaryEnvironment(originalEnvironment, name, value)
-      secretReferences[name] = `env://${name}`
-    } else if (CLAUDE_SETTINGS_SAFE_ENV.has(name)) {
-      environment[name] = value
-    }
-    if (CLAUDE_SETTINGS_AUTH_ENV.has(name)) hasAuthentication = true
-  }
-  if (!hasAuthentication) {
-    throw new DemoError(
-      "CLAUDE_SETTINGS_AUTH_MISSING",
-      "Claude settings do not contain a supported non-interactive authentication source",
-    )
+  const configured = await loadClaudeEnvironmentForDemo()
+  for (const [name, value] of Object.entries(configured.secretValues)) {
+    setTemporaryEnvironment(originalEnvironment, name, value)
   }
 
   await mkdir(toolsDirectory, { recursive: true })
@@ -380,8 +343,8 @@ async function prepareClaudeProof(
     adapter: `${CLAUDE_ADAPTER_NAME}@${CLAUDE_ADAPTER_VERSION}`,
     loginVerifiedBy: `${await executableVersion(claudePath, "CLAUDE_VERSION_UNAVAILABLE")} via ~/.claude/settings.json`,
     runtimeVersion: `${CLAUDE_SDK_NAME}@${CLAUDE_SDK_VERSION}`,
-    environment,
-    secretReferences,
+    environment: configured.environment,
+    secretReferences: configured.secretReferences,
   }
 }
 
@@ -478,31 +441,12 @@ async function resolvePiBedrockAuthentication(): Promise<{
   )
 }
 
-async function readClaudeSettingsEnvironment(): Promise<Readonly<Record<string, string>>> {
-  const home = Bun.env["HOME"]
-  if (home === undefined) {
-    throw new DemoError("CLAUDE_CONFIG_MISSING", "Claude Code configuration could not be located")
-  }
+async function loadClaudeEnvironmentForDemo() {
   try {
-    const parsed = (await Bun.file(join(home, ".claude", "settings.json")).json()) as unknown
-    const configuredEnvironment =
-      typeof parsed === "object" && parsed !== null ? Reflect.get(parsed, "env") : null
-    if (typeof configuredEnvironment !== "object" || configuredEnvironment === null) {
-      throw new TypeError("Claude settings env is unavailable")
-    }
-    const result: Record<string, string> = {}
-    for (const [name, value] of Object.entries(configuredEnvironment)) {
-      if (typeof value !== "string" || value.length === 0) {
-        throw new TypeError("Claude settings contain an invalid environment value")
-      }
-      if (CLAUDE_SETTINGS_SECRET_ENV.has(name) || CLAUDE_SETTINGS_SAFE_ENV.has(name)) {
-        result[name] = value
-      }
-    }
-    return result
-  } catch (cause) {
-    if (cause instanceof DemoError) throw cause
-    throw new DemoError("CLAUDE_CONFIG_INVALID", "Claude Code settings could not be read safely")
+    return await loadClaudeRunEnvironment()
+  } catch (error) {
+    if (error instanceof ClaudeSettingsError) throw new DemoError(error.code, error.message)
+    throw error
   }
 }
 

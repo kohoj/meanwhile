@@ -79,6 +79,20 @@ try {
     )
   }
 
+  const downloaded = await meanwhile.artifacts.download(site.id, { path: "index.html" })
+  const downloadedBytes = new Uint8Array(await new Response(downloaded.body).arrayBuffer())
+  const downloadedText = new TextDecoder().decode(downloadedBytes)
+  if (
+    downloadedBytes.byteLength !== downloaded.byteSize ||
+    new Bun.CryptoHasher("sha256").update(downloadedBytes).digest("hex") !== downloaded.digest ||
+    !downloadedText.includes(proofText)
+  ) {
+    throw new DemoError(
+      "DEMO_ARTIFACT_DOWNLOAD_INVALID",
+      "The SDK did not return the immutable agent output",
+    )
+  }
+
   const queuedDeployment = await meanwhile.deployments.create({
     runId: run.id,
     artifactPath: "site",
@@ -124,6 +138,7 @@ try {
       path: site.logicalPath,
       digest: site.digest,
       byteSize: site.byteSize,
+      sdkDownloadVerified: true,
     },
     deployment: {
       id: deployment.id,

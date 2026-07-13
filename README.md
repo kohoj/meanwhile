@@ -76,7 +76,7 @@ That command creates a run, follows logs, captures an artifact, deploys it throu
 The typed client is the canonical programmatic interface. It uses Web `fetch`, `AbortSignal`, streams, and the same Zod contracts as the HTTP API. Install the tagged source package from a Bun client project:
 
 ```console
-bun add github:kohoj/meanwhile#v0.1.0
+bun add github:kohoj/meanwhile#v0.1.1
 ```
 
 The example below assumes the Codex ACP entry described under [Agent execution](#agent-execution) is installed in the selected runtime.
@@ -107,6 +107,20 @@ for await (const log of meanwhile.runs.followLogs(run.id)) {
 }
 
 const finished = await meanwhile.runs.wait(run.id)
+if (finished.status !== "succeeded") throw new Error(`run ${finished.status}`)
+
+const artifact = (await meanwhile.artifacts.list(finished.id)).find(
+  ({ logicalPath }) => logicalPath === "dist",
+)
+if (!artifact) throw new Error("dist artifact was not captured")
+
+const download = await meanwhile.artifacts.download(artifact.id, {
+  path: "index.html",
+})
+const bytes = new Uint8Array(await new Response(download.body).arrayBuffer())
+const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
+if (digest !== download.digest) throw new Error("artifact digest mismatch")
+
 const deployment = await meanwhile.deployments.create({
   runId: finished.id,
   artifactPath: "dist",
@@ -252,7 +266,9 @@ interface RuntimeProvider {
 }
 ```
 
-`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK and container image are pinned as one compatibility unit; Cloudflare types remain inside the provider package.
+`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, image, standalone Bun runner, and bundled Claude ACP adapter are pinned as one compatibility unit; Cloudflare types remain inside the provider package. Retryable event reads resume from the same durable cursor, so a transient bridge failure cannot silently duplicate or skip accepted evidence.
+
+The shipped Cloudflare image uses `standard-1` deliberately: a real Claude coding-agent process exceeded the `lite` class's 256 MiB limit. Deterministic bridge checks can fit smaller compute, but the supported live-agent proof must use a class sized for the agent toolchain. Runtime destruction remains the cost boundary.
 
 Configure the deployed bridge in the control plane:
 
@@ -261,7 +277,8 @@ MEANWHILE_DEFAULT_PROVIDER=cloudflare
 CLOUDFLARE_BRIDGE_URL=https://<bridge-worker>
 CLOUDFLARE_BRIDGE_TOKEN=<high-entropy shared credential>
 CLOUDFLARE_RUNNER_DIGEST=<sha256 of deployed meanwhile-runner>
-CLOUDFLARE_RUNTIME_IMAGE_DIGEST=sha256:<deployed image digest when available>
+CLOUDFLARE_RUNTIME_IMAGE_REFERENCE=<deployed custom image reference>
+CLOUDFLARE_RUNTIME_IMAGE_DIGEST=sha256:<deployed image digest>
 ```
 
 Then verify it explicitly—remote mutation is never triggered merely because credentials exist:
@@ -269,7 +286,8 @@ Then verify it explicitly—remote mutation is never triggered merely because cr
 ```console
 bun run cloudflare:check
 bun run test:live:cloudflare
-bun run proof:release:cloudflare
+bun run proof:release:cloudflare          # deterministic ACP compatibility proof
+bun run proof:release:cloudflare:claude   # real Claude generation → SDK download → deploy → URL
 ```
 
 To add Daytona, Fly Machines, Modal, or another backend, implement `RuntimeProvider`, declare truthful capabilities, and pass the shared provider contract plus a real-account lifecycle proof. The run executor contains no provider-name branches. See [Provider contract](docs/provider-contract.md).
@@ -376,16 +394,19 @@ bun run demo                        # no-account product path
 bun run proof:release               # semantic round trip, telemetry, restart, backup/restore
 bun run cloudflare:check            # bridge package and protocol contract
 bun run test:live:cloudflare        # explicit real-account lifecycle
-bun run proof:release:cloudflare    # complete remote control-plane proof
+bun run proof:release:cloudflare    # deterministic remote compatibility proof
+bun run proof:release:cloudflare:claude # real model, SDK artifact/deploy, URL, telemetry, recovery
 ```
 
-The release proof sends a revision-bound token through ACP, structurally verifies the durable response, deploys bytes written by the agent, and fetches the result. It also validates OTLP trace and metric semantics, correlated structured logs, private-data exclusion, exact status and replay evidence, runtime destruction, restart recovery, hashed backup, restore into an empty data root, and a second successful boot. The Cloudflare variant applies that same proof to real remote compute; a skipped account test is never described as remote proof.
+The release proof sends a revision-bound token through ACP, structurally verifies the durable response, downloads immutable agent output through the public SDK, deploys those bytes through the SDK, and fetches the returned URL. It also validates OTLP trace and metric semantics, correlated structured logs, byte-scans the live data root and backup for exact private values, verifies exact status and replay evidence, destroys the runtime, restarts, restores into an empty data root, and boots again successfully.
+
+`proof:release:cloudflare` isolates provider/control-plane compatibility with the deterministic ACP fixture. `proof:release:cloudflare:claude` is the acceptance proof for real agent work: Claude receives the task inside Cloudflare Sandbox, creates `site/index.html`, and only the public SDK is used to retrieve and promote the captured artifact. A health response, skipped account test, or deterministic response is never described as real-model proof.
 
 The deterministic suite separately covers owner isolation, lifecycle transitions, log replay, artifacts, cancellation, timeout, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence.
 
 ## Production status
 
-Meanwhile `v0.1.0` is the first public compatibility baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox path are implemented and release-proven. A compatibility baseline is not a blanket production-support promise.
+Meanwhile `v0.1.1` is the current public compatibility baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox Claude path are implemented and release-proven through artifact download and deployment. A compatibility baseline is not a blanket production-support promise.
 
 Before broad multi-tenant production use, the project still needs:
 
@@ -407,18 +428,13 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 - [Threat model](docs/threat-model.md) — trust boundaries and residual risks
 - [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 
-## Authorship and AI assistance
+## Development
 
-Codex performed 100% of the engineering implementation: production code, tests, executable proofs, documentation, and iterative review. The human author directed the work and made the defining product and architecture decisions:
+Codex produced the initial implementation end to end, including production code, tests, release proofs, documentation, and iterative review. The maintainer set the product model, architectural contracts, and acceptance criteria expressed throughout this README.
 
-- build a real open-source control plane rather than a command runner or take-home artifact;
-- make the durable run the product, with run, runtime, artifact, and deployment as separate lifecycles;
-- keep ACP local to the runtime runner and keep provider APIs behind one provider-neutral compute contract;
-- use a small Bun-native stack—Hono, Zod, SQLite, Web primitives, and bounded OpenTelemetry—without distributed machinery added for appearance;
-- require semantic end-to-end evidence across local and real Cloudflare execution, including agent-written output, telemetry safety, cleanup, restart, backup, and restore;
-- expose the same control plane coherently through API, typed SDK, and CLI while treating local execution as a non-isolating development path.
+Those decisions establish the durable Run as the chain of custody connecting intent, execution identity, evidence, artifacts, and deployment. Authority follows lifecycle: the control plane owns policy and durable state, runtime adapters report compute facts, the colocated runner owns ACP, artifact storage owns immutable bytes, and deployment adapters promote those bytes. Capability declarations, replay cursors, and accepted execution provenance make replaceability and recovery explicit system properties. Semantic release evidence spans agent output, telemetry, cleanup, restart, backup, restore, and deployment.
 
-Codex translated those decisions into the concrete implementation and verification details. AI-authored changes are held to the same correctness, security, licensing, and review standards as human-authored code.
+These contracts are maintained in [AGENTS.md](AGENTS.md) and the architecture, provider, operations, and threat-model documentation, and they govern future contributions.
 
 ## License
 

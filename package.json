@@ -1,6 +1,6 @@
 {
   "name": "meanwhile",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The open control plane for running any coding agent in any isolated runtime.",
   "type": "module",
   "private": true,
@@ -39,6 +39,7 @@
     "proof:release": "bun scripts/release-proof.ts --provider=local",
     "preproof:release:cloudflare": "bun run runtime:build",
     "proof:release:cloudflare": "bun scripts/release-proof.ts --provider=cloudflare --require-provenance",
+    "proof:release:cloudflare:claude": "bun scripts/release-proof.ts --provider=cloudflare --agent=claude-code --require-provenance",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
     "format": "biome format --write .",

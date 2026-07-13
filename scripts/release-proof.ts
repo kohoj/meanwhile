@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createApplication, type MeanwhileApplication } from "../src/app"
@@ -9,8 +9,33 @@ import { backupDataRoot, restoreDataRoot, verifyDataBackup } from "../src/data-r
 import { initializeInstrumentation } from "../src/instrumentation"
 import type { TelemetryHealthSnapshot } from "../src/telemetry"
 import { SERVICE_VERSION } from "../src/version"
+import {
+  CLAUDE_ADAPTER_NAME,
+  CLAUDE_ADAPTER_VERSION,
+  CLAUDE_SDK_NAME,
+  CLAUDE_SDK_VERSION,
+  ClaudeSettingsError,
+  loadClaudeRunEnvironment,
+} from "./claude-settings"
 
 type ProofProvider = "local" | "cloudflare"
+type ProofAgent = "demo" | "claude-code"
+
+interface PreparedProofAgent {
+  readonly type: ProofAgent
+  readonly adapter: string
+  readonly runtime: string
+  readonly catalogPath: string
+  readonly environment: Readonly<Record<string, string>>
+  readonly secretReferences: Readonly<Record<string, string>>
+  readonly secretValues: readonly string[]
+  readonly workspaceFiles: readonly { readonly path: string; readonly contentBase64: string }[]
+  readonly timeoutMs: number
+  readonly waitTimeoutMs: number
+  prompt(token: string): string
+  previewText(token: string, prompt: string): string
+  restore(): void
+}
 
 interface RunningInstance {
   readonly application: MeanwhileApplication
@@ -55,19 +80,22 @@ class ProofError extends Error {
 }
 
 const provider = selectedProvider(process.argv.slice(2))
+const proofAgentType = selectedProofAgent(process.argv.slice(2))
 const requireProvenance = process.argv.includes("--require-provenance")
 const root = await mkdtemp(join(tmpdir(), "meanwhile-release-proof-"))
 const dataDir = join(root, "data")
 const backupDir = join(root, "backup")
 const runnerPath = resolve("dist/meanwhile-runner")
-const catalogPath = resolve("config/agents.json")
+const proofAgent = await prepareProofAgent(proofAgentType, provider, root)
+const catalogPath = proofAgent.catalogPath
 const key = await issueApiKey()
 const previewPort = await reservePort()
-const telemetryCollector = startProofTelemetryCollector(
-  [key.key, Bun.env["CLOUDFLARE_BRIDGE_TOKEN"]].filter(
-    (value): value is string => value !== undefined && value.length > 0,
-  ),
-)
+const privateValues = [
+  key.key,
+  Bun.env["CLOUDFLARE_BRIDGE_TOKEN"],
+  ...proofAgent.secretValues,
+].filter((value): value is string => value !== undefined && value.length > 0)
+const telemetryCollector = startProofTelemetryCollector(privateValues)
 const config = proofConfig({
   provider,
   dataDir,
@@ -76,6 +104,7 @@ const config = proofConfig({
   previewPort,
   telemetryEndpoint: telemetryCollector.endpoint,
   key: key.key,
+  secretSourceCatalog: Object.keys(proofAgent.secretReferences),
 })
 let running: RunningInstance | null = null
 
@@ -83,11 +112,12 @@ try {
   if (requireProvenance && provider === "cloudflare") assertRemoteProvenance(config)
   const revision = await repositoryRevision()
   const roundTripToken = sha256(
-    new TextEncoder().encode(`meanwhile:${provider}:${revision.commit}:round-trip`),
+    new TextEncoder().encode(
+      `meanwhile:${provider}:${proofAgent.type}:${revision.commit}:round-trip`,
+    ),
   )
-  const prompt = `Return this exact release token: ${roundTripToken}`
-  const expectedAgentResponse = `fixture response: ${prompt}`
-  const previewText = expectedAgentResponse
+  const prompt = proofAgent.prompt(roundTripToken)
+  const previewText = proofAgent.previewText(roundTripToken, prompt)
   running = await startInstance(config, key.key)
   const providerDiagnostics = await running.client.providers.test(provider)
   if (providerDiagnostics.health.status !== "healthy") {
@@ -98,26 +128,22 @@ try {
     {
       workspace: {
         type: "files",
-        files: [
-          {
-            path: "site/index.html",
-            contentBase64: new TextEncoder()
-              .encode("<!doctype html><title>Unverified input</title>")
-              .toBase64(),
-          },
-        ],
+        files: [...proofAgent.workspaceFiles],
       },
-      agentType: "demo",
+      agentType: proofAgent.type,
       provider,
       prompt,
-      env: { FIXTURE_OUTPUT_PATH: "site/index.html" },
+      env: { ...proofAgent.environment },
+      secretRefs: { ...proofAgent.secretReferences },
       artifactPaths: ["site"],
-      timeoutMs: 60_000,
+      timeoutMs: proofAgent.timeoutMs,
     },
-    { idempotencyKey: `release-proof:${provider}:${revision.commit}` },
+    {
+      idempotencyKey: `release-proof:${provider}:${proofAgent.type}:${revision.commit}`,
+    },
   )
   const run = await running.client.runs.wait(created.id, {
-    timeoutMs: provider === "cloudflare" ? 120_000 : 30_000,
+    timeoutMs: proofAgent.waitTimeoutMs,
     pollIntervalMs: 50,
   })
   if (run.status !== "succeeded" || run.executionProvenance === null) {
@@ -135,7 +161,16 @@ try {
       })
     }
   }
-  assertAgentRoundTrip(logs.items, expectedAgentResponse)
+  const agentResponse = agentResponseText(logs.items)
+  if (proofAgent.type === "demo" && agentResponse !== `fixture response: ${prompt}`) {
+    throw new ProofError(
+      "ACP_ROUND_TRIP_FAILED",
+      "The durable ACP response did not contain the expected semantic result",
+    )
+  }
+  if (agentResponse.trim().length === 0) {
+    throw new ProofError("ACP_ROUND_TRIP_FAILED", "The durable ACP response was empty")
+  }
 
   const statusHistory = running.application.store
     .listRunStatusEvents(run.ownerId, run.id)
@@ -220,8 +255,10 @@ try {
   const telemetryHealth = await running.flushTelemetry()
   const telemetry = telemetryCollector.evidence(telemetryHealth, running.operationalLogs, [
     prompt,
-    expectedAgentResponse,
+    agentResponse,
+    previewText,
   ])
+  await assertPrivateValuesAbsent(dataDir, privateValues)
 
   const runId = run.id
   const deploymentId = deployment.id
@@ -250,6 +287,7 @@ try {
 
   const backup = await backupDataRoot(config, backupDir)
   const verifiedBackup = await verifyDataBackup(backupDir)
+  await assertPrivateValuesAbsent(backupDir, privateValues)
   const restoredDataDir = join(root, "restored")
   const restoredConfig = proofConfig({
     provider,
@@ -259,6 +297,7 @@ try {
     previewPort,
     telemetryEndpoint: telemetryCollector.endpoint,
     key: key.key,
+    secretSourceCatalog: Object.keys(proofAgent.secretReferences),
   })
   await restoreDataRoot(backupDir, restoredConfig)
   running = await startInstance(restoredConfig, key.key)
@@ -283,6 +322,12 @@ try {
     proof: "meanwhile-release",
     status: "succeeded",
     provider,
+    agent: {
+      type: proofAgent.type,
+      adapter: proofAgent.adapter,
+      runtime: proofAgent.runtime,
+      realModel: proofAgent.type !== "demo",
+    },
     revision,
     provenance: {
       digest: provenanceDigest,
@@ -292,7 +337,9 @@ try {
       bridgeProtocolVersion: run.executionProvenance.provider.bridgeProtocolVersion,
       configuredIdentityComplete:
         run.executionProvenance.runnerDigest !== null &&
-        (provider === "local" || run.executionProvenance.provider.runtimeImageDigest !== null),
+        (provider === "local" ||
+          (run.executionProvenance.provider.runtimeImageReference !== null &&
+            run.executionProvenance.provider.runtimeImageDigest !== null)),
       runnerDigestAuthority:
         provider === "local"
           ? "measured-local-file"
@@ -306,9 +353,11 @@ try {
     },
     roundTrip: {
       promptDigest: sha256(new TextEncoder().encode(prompt)),
-      responseDigest: sha256(new TextEncoder().encode(expectedAgentResponse)),
+      responseDigest: sha256(new TextEncoder().encode(agentResponse)),
       durableResponse: true,
       agentProducedArtifact: true,
+      sdkArtifactDownloadVerified: true,
+      sdkDeploymentVerified: true,
     },
     telemetry,
     run: {
@@ -327,6 +376,7 @@ try {
     persistence: {
       restartVerified: true,
       restoreVerified: true,
+      privateValuesAbsent: true,
       deploymentLogs: deploymentLogs.items.length,
       auditRecords: recoveredAudit.items.length,
     },
@@ -348,6 +398,7 @@ try {
 } finally {
   await running?.close().catch(() => undefined)
   await telemetryCollector.close().catch(() => undefined)
+  proofAgent.restore()
   await rm(root, { recursive: true, force: true })
   await rm(`${dataDir}.lock`, { recursive: true, force: true })
 }
@@ -360,6 +411,7 @@ function proofConfig(input: {
   previewPort: number
   telemetryEndpoint: string
   key: string
+  secretSourceCatalog: readonly string[]
 }): AppConfig {
   const bridgeUrl = Bun.env["CLOUDFLARE_BRIDGE_URL"]
   const bridgeToken = Bun.env["CLOUDFLARE_BRIDGE_TOKEN"]
@@ -384,7 +436,7 @@ function proofConfig(input: {
     agentCatalogPath: input.catalogPath,
     defaultProvider: input.provider,
     localProvider: { enabled: input.provider === "local", unsafeHostExecution: false },
-    secretSourceCatalog: [],
+    secretSourceCatalog: input.secretSourceCatalog,
     logLevel: "error",
     telemetry: { enabled: true, endpoint: input.telemetryEndpoint },
     ...(input.provider === "cloudflare"
@@ -392,6 +444,11 @@ function proofConfig(input: {
           cloudflare: {
             bridgeUrl: bridgeUrl as string,
             token: bridgeToken as string,
+            ...(Bun.env["CLOUDFLARE_RUNTIME_IMAGE_REFERENCE"] === undefined
+              ? {}
+              : {
+                  runtimeImageReference: Bun.env["CLOUDFLARE_RUNTIME_IMAGE_REFERENCE"] as string,
+                }),
             ...(Bun.env["CLOUDFLARE_RUNTIME_IMAGE_DIGEST"] === undefined
               ? {}
               : { runtimeImageDigest: Bun.env["CLOUDFLARE_RUNTIME_IMAGE_DIGEST"] as string }),
@@ -451,10 +508,10 @@ async function startInstance(config: AppConfig, apiKey: string): Promise<Running
   }
 }
 
-function assertAgentRoundTrip(
+function agentResponseText(
   logs: readonly { readonly eventType: string; readonly data: string }[],
-  expectedResponse: string,
-): void {
+): string {
+  const chunks: string[] = []
   for (const log of logs) {
     if (log.eventType !== "session.update") continue
     let payload: unknown
@@ -470,15 +527,12 @@ function assertAgentRoundTrip(
       payload["update"]["sessionUpdate"] === "agent_message_chunk" &&
       isRecord(payload["update"]["content"]) &&
       payload["update"]["content"]["type"] === "text" &&
-      payload["update"]["content"]["text"] === expectedResponse
+      typeof payload["update"]["content"]["text"] === "string"
     ) {
-      return
+      chunks.push(payload["update"]["content"]["text"])
     }
   }
-  throw new ProofError(
-    "ACP_ROUND_TRIP_FAILED",
-    "The durable ACP response did not contain the expected semantic result",
-  )
+  return chunks.join("")
 }
 
 async function assertExpectedNotFound(meanwhile: Meanwhile): Promise<void> {
@@ -634,6 +688,38 @@ function containsBytes(haystack: Uint8Array, needle: Uint8Array): boolean {
   return false
 }
 
+async function assertPrivateValuesAbsent(
+  directory: string,
+  privateValues: readonly string[],
+): Promise<void> {
+  const needles = privateValues.map((value) => new TextEncoder().encode(value))
+  const pending = [directory]
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (current === undefined) break
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) {
+        pending.push(path)
+        continue
+      }
+      if (!entry.isFile()) {
+        throw new ProofError(
+          "PERSISTENCE_SCAN_UNSAFE",
+          "The release-proof data root contains an unsupported entry",
+        )
+      }
+      const bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
+      if (needles.some((needle) => containsBytes(bytes, needle))) {
+        throw new ProofError(
+          "PERSISTENCE_PRIVATE_DATA_LEAK",
+          "A private value reached durable release-proof data",
+        )
+      }
+    }
+  }
+}
+
 function parseJsonRecord(value: string): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(value)
@@ -714,14 +800,118 @@ function selectedProvider(arguments_: readonly string[]): ProofProvider {
   return value
 }
 
+function selectedProofAgent(arguments_: readonly string[]): ProofAgent {
+  const option = arguments_.find((argument) => argument.startsWith("--agent="))
+  const value = option?.slice("--agent=".length) ?? "demo"
+  if (value !== "demo" && value !== "claude-code") {
+    throw new ProofError("INVALID_ARGUMENT", "Agent must be demo or claude-code")
+  }
+  return value
+}
+
+async function prepareProofAgent(
+  type: ProofAgent,
+  provider: ProofProvider,
+  root: string,
+): Promise<PreparedProofAgent> {
+  const encode = (value: string) => new TextEncoder().encode(value).toBase64()
+  if (type === "demo") {
+    return {
+      type,
+      adapter: "meanwhile-demo-agent",
+      runtime: `bun@${Bun.version}`,
+      catalogPath: resolve("config/agents.json"),
+      environment: { FIXTURE_OUTPUT_PATH: "site/index.html" },
+      secretReferences: {},
+      secretValues: [],
+      workspaceFiles: [
+        {
+          path: "site/index.html",
+          contentBase64: encode("<!doctype html><title>Unverified input</title>"),
+        },
+      ],
+      timeoutMs: 60_000,
+      waitTimeoutMs: provider === "cloudflare" ? 120_000 : 30_000,
+      prompt: (token) => `Return this exact release token: ${token}`,
+      previewText: (_token, prompt) => `fixture response: ${prompt}`,
+      restore() {},
+    }
+  }
+
+  if (provider !== "cloudflare") {
+    throw new ProofError(
+      "INVALID_ARGUMENT",
+      "The release proof uses the Cloudflare image for its pinned Claude ACP toolchain; use bun run demo:claude for the local proof",
+    )
+  }
+  const configured = await loadClaudeRunEnvironment()
+  const secretValues = { ...configured.secretValues }
+  const previous = new Map<string, string | undefined>()
+  for (const [name, value] of Object.entries(secretValues)) {
+    previous.set(name, Bun.env[name])
+    Bun.env[name] = value
+  }
+  const catalogPath = join(root, "agents.json")
+  await Bun.write(
+    catalogPath,
+    JSON.stringify({
+      version: 1,
+      agents: {
+        "claude-code": {
+          transport: "stdio",
+          executable: "claude-agent-acp",
+          args: [],
+          workingDirectory: "workspace",
+          capabilities: { filesystem: true, terminal: true },
+          envNames: Object.keys(configured.environment),
+          secretEnvNames: Object.keys(configured.secretReferences),
+        },
+      },
+    }),
+  )
+
+  return {
+    type,
+    adapter: `${CLAUDE_ADAPTER_NAME}@${CLAUDE_ADAPTER_VERSION}`,
+    runtime: `${CLAUDE_SDK_NAME}@${CLAUDE_SDK_VERSION}`,
+    catalogPath,
+    environment: configured.environment,
+    secretReferences: configured.secretReferences,
+    secretValues: Object.values(secretValues),
+    workspaceFiles: [
+      {
+        path: "README.md",
+        contentBase64: encode(
+          "This workspace is a live Meanwhile Cloudflare Sandbox proof over ACP.\n",
+        ),
+      },
+    ],
+    timeoutMs: 4 * 60_000,
+    waitTimeoutMs: 6 * 60_000,
+    prompt: (token) =>
+      `Create site/index.html as a complete HTML document containing the exact visible text 'Meanwhile Cloudflare Claude proof ${token}'. Do not modify any other file. Finish after saving it.`,
+    previewText: (token) => `Meanwhile Cloudflare Claude proof ${token}`,
+    restore() {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete Bun.env[name]
+        else Bun.env[name] = value
+      }
+      for (const name of Object.keys(secretValues)) {
+        secretValues[name] = ""
+      }
+    },
+  }
+}
+
 function assertRemoteProvenance(config: AppConfig): void {
   if (
     config.cloudflare?.runnerDigest === undefined ||
+    config.cloudflare.runtimeImageReference === undefined ||
     config.cloudflare.runtimeImageDigest === undefined
   ) {
     throw new ProofError(
       "REMOTE_PROVENANCE_REQUIRED",
-      "Cloudflare release proof requires configured runner and runtime-image provenance",
+      "Cloudflare release proof requires configured runner and matching runtime-image provenance",
     )
   }
 }
@@ -732,6 +922,7 @@ function sha256(bytes: Uint8Array): string {
 
 function normalizeProofError(error: unknown): ProofError {
   if (error instanceof ProofError) return error
+  if (error instanceof ClaudeSettingsError) return new ProofError(error.code, error.message)
   if (error instanceof MeanwhileError)
     return new ProofError(error.code, error.message, error.details)
   return new ProofError("RELEASE_PROOF_FAILED", "Release proof failed")

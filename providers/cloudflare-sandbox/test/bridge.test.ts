@@ -85,7 +85,16 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(dockerfile).toContain(
       ".runner/meanwhile-demo-agent /opt/meanwhile/bin/meanwhile-demo-agent",
     )
+    expect(dockerfile).toContain("bun install --frozen-lockfile --production")
+    expect(dockerfile).toContain("image/claude-agent-acp /opt/meanwhile/bin/claude-agent-acp")
+    const runtimeAgentManifest = JSON.parse(
+      await Bun.file(new URL("../image/package.json", import.meta.url)).text(),
+    ) as { dependencies: Record<string, string> }
+    expect(runtimeAgentManifest.dependencies["@agentclientprotocol/claude-agent-acp"]).toBe(
+      "0.58.1",
+    )
     expect(wrangler).toContain('"SANDBOX_TRANSPORT": "rpc"')
+    expect(wrangler).toContain('"instance_type": "standard-1"')
   })
 
   test("fails closed when the bridge secret is weak or absent", async () => {

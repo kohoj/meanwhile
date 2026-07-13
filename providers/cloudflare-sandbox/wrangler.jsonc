@@ -11,7 +11,7 @@
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile",
-      "instance_type": "lite"
+      "instance_type": "standard-1"
     }
   ],
   "durable_objects": {

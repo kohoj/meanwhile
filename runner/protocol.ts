@@ -96,7 +96,7 @@ export const runnerSpecSchema = z
       .object({
         executable: portableExecutableSchema,
         args: z.array(commandPartSchema).max(256),
-        workingDirectory: relativePathSchema.optional(),
+        workingDirectory: z.literal("workspace").optional(),
       })
       .strict(),
     prompt: withoutNullBytes(z.string().max(MAX_PROMPT_LENGTH)),

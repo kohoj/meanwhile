@@ -467,6 +467,7 @@ export class RunExecutor implements ManagedComponent {
           agent: {
             executable: run.agentSpec.executable,
             args: [...run.agentSpec.args],
+            workingDirectory: run.agentSpec.workingDirectory,
           },
           prompt: run.prompt,
           permissionPolicy:

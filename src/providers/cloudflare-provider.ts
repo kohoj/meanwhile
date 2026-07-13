@@ -2,7 +2,6 @@ import type { z } from "zod"
 import {
   BRIDGE_PROTOCOL_VERSION,
   bridgeErrorResponseSchema,
-  CLOUDFLARE_SANDBOX_VERSION,
   exposedEndpointSchema,
   INITIAL_EVENT_CURSOR,
   processEventsResponseSchema,
@@ -47,6 +46,7 @@ const MAX_FILE_RESPONSE_BYTES = 64 * 1024 * 1024
 const MAX_FILE_ENCODED_BYTES = 8 * 1024 * 1024
 const MAX_WRITE_ENCODED_BYTES = 16 * 1024 * 1024
 const MAX_FILES_PER_WRITE = 32
+const DEFAULT_EVENT_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1_000, 2_000])
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -62,7 +62,9 @@ export interface CloudflareRuntimeProviderOptions {
   readonly requestTimeoutMs?: number
   readonly eventPollIntervalMs?: number
   readonly eventPageCharacters?: number
+  readonly eventRetryDelaysMs?: readonly number[]
   readonly waitRequestMs?: number
+  readonly runtimeImageReference?: string
   readonly runtimeImageDigest?: string
   readonly runnerDigest?: string
 }
@@ -90,9 +92,16 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
   readonly #requestTimeoutMs: number
   readonly #eventPollIntervalMs: number
   readonly #eventPageCharacters: number
+  readonly #eventRetryDelaysMs: readonly number[]
   readonly #waitRequestMs: number
 
   constructor(options: CloudflareRuntimeProviderOptions) {
+    if (
+      options.runtimeImageReference !== undefined &&
+      (!/^\S+$/.test(options.runtimeImageReference) || options.runtimeImageReference.length > 512)
+    ) {
+      throw new TypeError("runtimeImageReference must be a non-empty custom image reference")
+    }
     if (
       options.runtimeImageDigest !== undefined &&
       !/^sha256:[a-f0-9]{64}$/.test(options.runtimeImageDigest)
@@ -105,7 +114,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     this.provenance = Object.freeze({
       adapterVersion: SERVICE_VERSION,
       runnerDigest: options.runnerDigest ?? null,
-      runtimeImageReference: `docker.io/cloudflare/sandbox:${CLOUDFLARE_SANDBOX_VERSION}`,
+      runtimeImageReference: options.runtimeImageReference ?? null,
       runtimeImageDigest: options.runtimeImageDigest ?? null,
       bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
     })
@@ -127,6 +136,10 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     if (this.#eventPageCharacters > 262_144) {
       throw new TypeError("eventPageCharacters must not exceed the bridge limit")
     }
+    this.#eventRetryDelaysMs = retryDelays(
+      options.eventRetryDelaysMs ?? DEFAULT_EVENT_RETRY_DELAYS_MS,
+      "eventRetryDelaysMs",
+    )
     this.#waitRequestMs = positiveInteger(options.waitRequestMs ?? 20_000, "waitRequestMs")
     if (this.#waitRequestMs > 25_000) {
       throw new TypeError("waitRequestMs must not exceed the bridge limit")
@@ -295,13 +308,17 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
         cursor: position,
         limitChars: String(this.#eventPageCharacters),
       })
-      const response = await this.#validatedJsonRequest(
-        "events",
-        "GET",
-        `${this.#processPath(identity)}/events?${query}`,
-        undefined,
-        processEventsResponseSchema,
-        undefined,
+      const response = await this.#retryEventRead(
+        () =>
+          this.#validatedJsonRequest(
+            "events",
+            "GET",
+            `${this.#processPath(identity)}/events?${query}`,
+            undefined,
+            processEventsResponseSchema,
+            undefined,
+            signal,
+          ),
         signal,
       )
       position = response.nextCursor
@@ -322,15 +339,19 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       if (terminal) return
       if (response.events.length > 0) continue
 
-      const snapshot = await this.#snapshotRequest(
-        "events",
-        "GET",
-        this.#processPath(identity),
-        undefined,
-        "process",
-        processSnapshotSchema,
-        true,
-        undefined,
+      const snapshot = await this.#retryEventRead(
+        () =>
+          this.#snapshotRequest(
+            "events",
+            "GET",
+            this.#processPath(identity),
+            undefined,
+            "process",
+            processSnapshotSchema,
+            true,
+            undefined,
+            signal,
+          ),
         signal,
       )
       if (snapshot === null || (snapshot.status !== "starting" && snapshot.status !== "running")) {
@@ -562,6 +583,23 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
           cause instanceof RuntimeProviderError
             ? cause.message
             : "Cloudflare bridge is unavailable",
+      }
+    }
+  }
+
+  async #retryEventRead<Output>(
+    read: () => Promise<Output>,
+    signal?: AbortSignal,
+  ): Promise<Output> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await read()
+      } catch (error) {
+        const delay = this.#eventRetryDelaysMs[attempt]
+        if (!(error instanceof RuntimeProviderError) || !error.retryable || delay === undefined) {
+          throw error
+        }
+        await abortableDelay(delay, signal)
       }
     }
   }
@@ -885,6 +923,11 @@ function positiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0)
     throw new TypeError(`${name} must be a positive safe integer`)
   return value
+}
+
+function retryDelays(values: readonly number[], name: string): readonly number[] {
+  if (values.length > 8) throw new TypeError(`${name} supports at most eight delays`)
+  return Object.freeze(values.map((value, index) => positiveInteger(value, `${name}[${index}]`)))
 }
 
 async function readBoundedResponse(

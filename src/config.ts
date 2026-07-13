@@ -33,6 +33,10 @@ const environmentSchema = z.object({
   OTEL_EXPORTER_OTLP_ENDPOINT: z.url().optional(),
   CLOUDFLARE_BRIDGE_URL: z.url().optional(),
   CLOUDFLARE_BRIDGE_TOKEN: z.string().min(24).optional(),
+  CLOUDFLARE_RUNTIME_IMAGE_REFERENCE: z
+    .string()
+    .regex(/^\S{1,512}$/)
+    .optional(),
   CLOUDFLARE_RUNTIME_IMAGE_DIGEST: z
     .string()
     .regex(/^sha256:[a-f0-9]{64}$/)
@@ -71,6 +75,7 @@ export interface AppConfig {
   readonly cloudflare?: {
     readonly bridgeUrl: string
     readonly token: string
+    readonly runtimeImageReference?: string
     readonly runtimeImageDigest?: string
     readonly runnerDigest?: string
   }
@@ -89,6 +94,10 @@ export const loadConfig = (
       : normalizePublicOrigin(parsed.MEANWHILE_PREVIEW_PUBLIC_URL)
   const cloudflareConfigured =
     parsed.CLOUDFLARE_BRIDGE_URL !== undefined || parsed.CLOUDFLARE_BRIDGE_TOKEN !== undefined
+  const cloudflareEvidenceConfigured =
+    parsed.CLOUDFLARE_RUNTIME_IMAGE_REFERENCE !== undefined ||
+    parsed.CLOUDFLARE_RUNTIME_IMAGE_DIGEST !== undefined ||
+    parsed.CLOUDFLARE_RUNNER_DIGEST !== undefined
   const localProvider = resolveLocalProviderPolicy(
     parsed.MEANWHILE_LOCAL_PROVIDER,
     parsed.MEANWHILE_HOST,
@@ -98,6 +107,9 @@ export const loadConfig = (
 
   if (cloudflareConfigured && !(parsed.CLOUDFLARE_BRIDGE_URL && parsed.CLOUDFLARE_BRIDGE_TOKEN)) {
     throw new Error("CLOUDFLARE_BRIDGE_URL and CLOUDFLARE_BRIDGE_TOKEN must be configured together")
+  }
+  if (cloudflareEvidenceConfigured && !cloudflareConfigured) {
+    throw new Error("Cloudflare execution evidence requires the Cloudflare bridge to be configured")
   }
   if (parsed.MEANWHILE_OTEL_ENABLED && parsed.OTEL_EXPORTER_OTLP_ENDPOINT === undefined) {
     throw new Error("OTEL_EXPORTER_OTLP_ENDPOINT is required when MEANWHILE_OTEL_ENABLED=true")
@@ -137,6 +149,9 @@ export const loadConfig = (
           cloudflare: {
             bridgeUrl: parsed.CLOUDFLARE_BRIDGE_URL as string,
             token: parsed.CLOUDFLARE_BRIDGE_TOKEN as string,
+            ...(parsed.CLOUDFLARE_RUNTIME_IMAGE_REFERENCE === undefined
+              ? {}
+              : { runtimeImageReference: parsed.CLOUDFLARE_RUNTIME_IMAGE_REFERENCE }),
             ...(parsed.CLOUDFLARE_RUNTIME_IMAGE_DIGEST === undefined
               ? {}
               : { runtimeImageDigest: parsed.CLOUDFLARE_RUNTIME_IMAGE_DIGEST }),

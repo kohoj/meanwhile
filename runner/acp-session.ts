@@ -1,5 +1,4 @@
 import { realpath } from "node:fs/promises"
-import { isAbsolute, relative, resolve, sep } from "node:path"
 import * as acp from "@agentclientprotocol/sdk"
 
 import {
@@ -268,7 +267,7 @@ export async function runAcpSession(
 
   let workingDirectory: string
   try {
-    workingDirectory = await resolveAgentWorkingDirectory(spec)
+    workingDirectory = await resolveAgentWorkingDirectory()
   } catch (error) {
     return failureTerminal(normalizeError(error, "WORKSPACE_INVALID"))
   }
@@ -502,18 +501,11 @@ function buildAgentEnvironment(
   return environment
 }
 
-async function resolveAgentWorkingDirectory(spec: RunnerSpec): Promise<string> {
+async function resolveAgentWorkingDirectory(): Promise<string> {
   const workspaceRoot = await realpath(process.cwd())
-  const requested = resolve(workspaceRoot, spec.agent.workingDirectory ?? ".")
-  const workingDirectory = await realpath(requested)
-  const relation = relative(workspaceRoot, workingDirectory)
-  if (relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) {
-    throw new RunnerSessionError(
-      "WORKSPACE_INVALID",
-      "The agent working directory escapes the provider workspace",
-    )
-  }
-  return workingDirectory
+  // `workspace` is a logical policy, not a provider path. The provider has
+  // already placed the runner at its physical workspace root.
+  return workspaceRoot
 }
 
 function fileSinkWritable(sink: Bun.FileSink): WritableStream<Uint8Array> {

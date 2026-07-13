@@ -26,6 +26,10 @@ describe("CloudflareRuntimeProvider", () => {
       portExposure: true,
       processSignals: ["SIGKILL"],
     })
+    expect(provider.provenance).toMatchObject({
+      runtimeImageReference: null,
+      runtimeImageDigest: null,
+    })
 
     await provider.start(runtime)
     expect((await provider.inspect(runtime)).status).toBe("running")
@@ -103,6 +107,22 @@ describe("CloudflareRuntimeProvider", () => {
     ).toBe(true)
     expect(new Set(bridge.runtimeOperationIds).size).toBe(1)
     expect(new Set(bridge.processOperationIds).size).toBe(1)
+  })
+
+  test("records only explicitly paired custom image provenance", () => {
+    const provider = new CloudflareRuntimeProvider({
+      bridgeUrl: "https://bridge.example.test/",
+      bridgeToken: TOKEN,
+      runtimeImageReference: "registry.example.test/meanwhile/runtime@sha256:immutable",
+      runtimeImageDigest: `sha256:${"a".repeat(64)}`,
+      runnerDigest: "b".repeat(64),
+    })
+
+    expect(provider.provenance).toMatchObject({
+      runtimeImageReference: "registry.example.test/meanwhile/runtime@sha256:immutable",
+      runtimeImageDigest: `sha256:${"a".repeat(64)}`,
+      runnerDigest: "b".repeat(64),
+    })
   })
 
   test("preserves safe bridge errors and retryability without returning raw bodies", async () => {
@@ -209,6 +229,51 @@ describe("CloudflareRuntimeProvider", () => {
     await expect(pending).rejects.toBe(stopped)
     expect(request?.method).toBe("GET")
     expect(new URL(request?.url ?? "https://invalid/").pathname).toEndWith("/events")
+  })
+
+  test("retries transient event reads from the same durable cursor", async () => {
+    let attempts = 0
+    const cursors: string[] = []
+    const provider = new CloudflareRuntimeProvider({
+      bridgeUrl: "https://bridge.example.test/",
+      bridgeToken: TOKEN,
+      eventRetryDelaysMs: [1, 1],
+      fetch: async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init)
+        const url = new URL(request.url)
+        cursors.push(url.searchParams.get("cursor") ?? "")
+        attempts += 1
+        if (attempts < 3) return errorResponse(503, "PROVIDER_BUSY", true)
+        return json({
+          events: [
+            {
+              type: "output",
+              cursor: "v2.6.0.0",
+              timestamp: NOW,
+              stream: "stdout",
+              data: "frame\n",
+            },
+            {
+              type: "exit",
+              cursor: "v2.6.0.1",
+              timestamp: NOW,
+              status: "completed",
+              exitCode: 0,
+            },
+          ],
+          nextCursor: "v2.6.0.1",
+        })
+      },
+    })
+
+    const process = processHandle(
+      "cloudflare",
+      "mw-00000000-0000-4000-8000-000000000001.mp-00000000-0000-4000-8000-000000000002",
+    )
+    expect(
+      (await Array.fromAsync(provider.events(process, "v2.0.0.0"))).map(({ data }) => data),
+    ).toEqual(["frame\n"])
+    expect(cursors).toEqual(["v2.0.0.0", "v2.0.0.0", "v2.0.0.0"])
   })
 })
 

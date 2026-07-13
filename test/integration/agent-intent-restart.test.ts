@@ -73,7 +73,11 @@ describe("immutable agent launch intent", () => {
 
     await executor.start()
     const launchedSpec = await launched.promise
-    expect(launchedSpec.agent).toEqual({ executable: "accepted-agent", args: [] })
+    expect(launchedSpec.agent).toEqual({
+      executable: "accepted-agent",
+      args: [],
+      workingDirectory: "workspace",
+    })
     expect(launchedSpec.permissionPolicy).toEqual({
       mode: "allow-once",
       toolKinds: ["read", "edit", "delete", "move", "search"],

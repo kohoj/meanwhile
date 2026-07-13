@@ -212,7 +212,7 @@ The data root is one recovery unit. Backup requires quiescent durable work, seri
 
 Runs are the orchestration resource, but not the only durable product resource. The same owner-scoped HTTP/client/CLI boundary exposes artifact inspection and byte streaming, deployment history and logs, append-only audit queries, and API-key create/list/revoke. This keeps operators and upstream agents out of SQLite and local storage. Maintenance is the only intentional local-only CLI surface because it requires exclusive ownership of the data root rather than bearer authorization.
 
-The release proof exercises this boundary as a system property: a revision-bound prompt and structurally verified ACP response, agent-written artifact, deployment and preview, semantic OTLP traces/metrics with private-input exclusion, destruction audit, restart, persisted reads, hashed backup, restore, and a second boot. The credential-gated Cloudflare variant runs the same control path against real isolated compute; the provider lifecycle test remains a narrower adapter proof.
+The release proof exercises this boundary as a system property: a revision-bound prompt and structurally verified ACP response, SDK download of immutable agent output, SDK deployment and URL verification, semantic OTLP traces/metrics with private-input exclusion, destruction audit, restart, persisted reads, hashed backup, restore, and a second boot. Cloudflare has two explicit proofs: a deterministic ACP fixture isolates provider/control-plane compatibility, while the Claude proof requires a real model to create the deployed bytes inside isolated compute. The provider lifecycle test remains a narrower adapter proof.
 
 ## Evidence planes
 

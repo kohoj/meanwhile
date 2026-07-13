@@ -8,7 +8,7 @@ type PackageManifest = {
   readonly dependencies?: Readonly<Record<string, string>>
 }
 
-type DependencyScope = "control-plane-and-runner" | "cloudflare-bridge"
+type DependencyScope = "control-plane-and-runner" | "cloudflare-bridge" | "cloudflare-runtime-agent"
 
 type PackageNotice = {
   readonly id: string
@@ -39,6 +39,11 @@ const packageScopes = [
     name: "cloudflare-bridge" as const,
     packagePath: `${repositoryRoot}/providers/cloudflare-sandbox/package.json`,
     resolveFrom: `${repositoryRoot}/providers/cloudflare-sandbox`,
+  },
+  {
+    name: "cloudflare-runtime-agent" as const,
+    packagePath: `${repositoryRoot}/providers/cloudflare-sandbox/image/package.json`,
+    resolveFrom: `${repositoryRoot}/providers/cloudflare-sandbox/image`,
   },
 ]
 

@@ -3,3 +3,8 @@
 !.runner/meanwhile-demo-agent
 !.runner/LICENSE
 !.runner/THIRD_PARTY_NOTICES
+!image/
+image/*
+!image/package.json
+!image/bun.lock
+!image/claude-agent-acp

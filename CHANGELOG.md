@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-14
+
+### Added
+
+- A pinned Claude ACP toolchain in the Cloudflare custom image and `proof:release:cloudflare:claude`, which requires real remote model generation, public-SDK artifact download, public-SDK deployment, URL verification, telemetry, cleanup, restart, backup, restore, and second boot.
+- Matching custom-image reference support in execution provenance, configuration, release evidence, and documentation.
+
+### Changed
+
+- The supported Cloudflare live-agent image now uses `standard-1`; the smaller `lite` class remains unsuitable for the proven Claude ACP process set.
+- The deterministic Cloudflare proof is explicitly classified as provider/control-plane compatibility evidence rather than real-model acceptance.
+- Agent working-directory policy now resolves explicitly to the provider workspace root instead of relying on an omitted runner default.
+
+### Fixed
+
+- Retryable Cloudflare event reads now use bounded backoff and replay from the same durable cursor without duplicating or skipping accepted output.
+- Cloudflare provenance no longer pairs the upstream Sandbox base-image tag with a digest belonging to the deployed custom image.
+
+### Security
+
+- Real-agent proof credentials remain reference-only in run intent, resolve only for the agent process, and are byte-scanned for absence across the live data root, backup, artifacts, deployment output, structured logs, and telemetry.
+
 ## [0.1.0] - 2026-07-14
 
 ### Added
@@ -98,5 +120,6 @@ Version `0.1.0` is the first compatibility baseline for public HTTP schemas, run
 - released migrations are immutable and upgrades move forward through new migrations;
 - security advisories identify affected and fixed versions without exposing active credentials or tenant data.
 
-[Unreleased]: https://github.com/kohoj/meanwhile/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kohoj/meanwhile/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kohoj/meanwhile/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kohoj/meanwhile/releases/tag/v0.1.0

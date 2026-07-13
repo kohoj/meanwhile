@@ -86,6 +86,9 @@ export const createApplication = async (
           new CloudflareRuntimeProvider({
             bridgeUrl: config.cloudflare.bridgeUrl,
             bridgeToken: config.cloudflare.token,
+            ...(config.cloudflare.runtimeImageReference === undefined
+              ? {}
+              : { runtimeImageReference: config.cloudflare.runtimeImageReference }),
             ...(config.cloudflare.runtimeImageDigest === undefined
               ? {}
               : { runtimeImageDigest: config.cloudflare.runtimeImageDigest }),

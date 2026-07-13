@@ -25,7 +25,7 @@
     },
     "providers/cloudflare-sandbox": {
       "name": "@meanwhile/cloudflare-sandbox-bridge",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@cloudflare/sandbox": "0.12.3",
         "hono": "4.12.30",

@@ -431,11 +431,13 @@ The bridge:
 - owns no run, owner, artifact, or deployment business state;
 - starts the fixed runner as a background process and delivers one validated `RunnerSpec` as bounded stdin data; the pinned SDK lacks direct initial-stdin support, so the current bridge uses a random provider-private staging file, quoted redirection, and unconditional deletion without placing prompt data in argv;
 - exposes cursor-bearing live/replayed stdout frames and separate safe diagnostics;
+- retries only retryable event reads with bounded backoff from the same durable cursor;
 - advertises only the hard termination primitive the pinned SDK actually implements; control-plane cancellation then stops remaining sandbox processes through the runtime lifecycle;
 - makes stop/destroy idempotent and explicitly destroys rather than confusing sleep with cleanup;
 - exposes health without credentials;
-- pins Sandbox npm and image versions together;
-- passes the shared provider contract plus a gated real-account lifecycle test.
+- pins Sandbox npm, the custom image, standalone Bun runner, and bundled real-agent adapter together;
+- uses `standard-1` for the supported Claude proof because `lite` cannot hold the proven agent toolchain;
+- passes the shared provider contract, a gated real-account lifecycle test, and a real Claude generation/download/deployment proof.
 
 Do not import Cloudflare SDK types into core contracts. Do not use a PTY or repeated commands to emulate ACP. Do not claim same-sandbox runner files or environment variables are protected from the agent.
 
@@ -542,12 +544,14 @@ Tests must prove:
 - artifact-store implementations pass one immutable owner-scoped contract;
 - a fake and local adapter pass the same provider contract;
 - the Cloudflare client passes mock-bridge integration;
+- retryable Cloudflare event reads resume from the same cursor without duplicating accepted evidence;
 - a gated live test creates, starts, executes, reads files/logs, stops, and destroys a real Cloudflare sandbox;
 - the public client authenticates, validates contract responses, preserves structured safe errors, waits deterministically, and reconnects log streams without gaps or duplicates;
 - artifact inspection/download, deployment listing, audit queries, and API-key lifecycle are owner-scoped through API, SDK, and CLI;
 - sandbox clock skew cannot control durable log timestamps or runner timeout duration, and the ACP child timezone is UTC;
 - the no-account demo completes create → run → logs → artifact → local deployment;
-- the release proof sends a revision-bound prompt through ACP, structurally verifies the exact durable response and agent-written artifact, validates semantic OTLP signals without private run input, then proves cleanup, restart, hashed backup, restore, and a second boot;
+- the release proof sends a revision-bound prompt through ACP, downloads the immutable agent-written artifact through the public SDK, deploys it through the SDK, verifies the returned URL and semantic OTLP signals, byte-scans live and backed-up durable data for exact private values, then proves cleanup, restart, hashed backup, restore, and a second boot;
+- the Cloudflare Claude proof requires real model generation inside the sandbox; a deterministic ACP fixture, health response, or lifecycle-only test is not accepted as equivalent evidence;
 - pinned OTel SDK/exporter packages initialize and export under Bun.
 
 Assert ordering, error codes, and side effects with injected clocks and deterministic adapters. Do not sleep and hope. A mock proves replaceability; only the gated live test proves real provider integration.
@@ -569,6 +573,7 @@ bun run demo:claude
 bun run demo:claude:serve
 bun run proof:release
 bun run proof:release:cloudflare
+bun run proof:release:cloudflare:claude
 bun run doctor
 bun run runner:build
 bun run cli -- data backup --output <dir>
@@ -640,10 +645,10 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 ## 18. Current status
 
 - The Bun control plane, SQLite store/migrations and data-root lifecycle, ACP runner, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, complete owner-facing API/SDK/CLI resources, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
-- The no-account demo proves create → ACP run → durable logs/status → artifact capture → API-driven deployment → isolated preview. The release proof binds an exact prompt and response to the revision, deploys agent-written bytes, verifies telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
+- The no-account demo proves create → ACP run → durable logs/status → SDK artifact download → SDK deployment → isolated preview. The release proof binds exact agent output to the revision, verifies the immutable downloaded bytes and deployed URL, validates telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
 - Authenticated local compatibility proofs run Codex, Claude Code, and Pi through pinned ACP adapters, require agent-written output, and complete artifact promotion plus preview verification without persisting local credentials.
-- The Cloudflare package uses the real official Sandbox SDK and container image; bridge and container execution are verified locally, while the real-account lifecycle test remains explicitly credential-gated.
-- Version `0.1.0` is the first tagged compatibility baseline, not a blanket production-support promise. Current evolution limits are recorded in Section 17 and README.
+- The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner and Claude ACP adapter. The credential-gated acceptance proof requires Claude to generate a file remotely, then uses the public SDK to download, deploy, and fetch it while verifying telemetry, persistence, backup/restore, and cleanup.
+- Version `0.1.1` is the current tagged compatibility baseline, not a blanket production-support promise. Current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

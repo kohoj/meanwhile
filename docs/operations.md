@@ -42,7 +42,8 @@ Bun loads local `.env` files for development. Production should inject environme
 | `CLOUDFLARE_BRIDGE_URL` | For Cloudflare | Deployed bridge base URL |
 | `CLOUDFLARE_BRIDGE_TOKEN` | For Cloudflare | High-entropy bridge credential |
 | `CLOUDFLARE_RUNNER_DIGEST` | For complete Cloudflare provenance | Operator-verified SHA-256 of the runner installed in the deployed runtime image |
-| `CLOUDFLARE_RUNTIME_IMAGE_DIGEST` | When the platform exposes it | `sha256:` digest of the deployed runtime image |
+| `CLOUDFLARE_RUNTIME_IMAGE_REFERENCE` | For complete Cloudflare provenance | Reference naming the deployed custom runtime image paired with the digest below |
+| `CLOUDFLARE_RUNTIME_IMAGE_DIGEST` | For complete Cloudflare provenance | Platform-reported SHA-256 of that exact custom runtime image |
 
 The complete safe template is [.env.example](../.env.example). Invalid recognized values, ports, catalog entries, default-provider selection, and endpoints fail validation rather than falling back silently. An explicit unknown provider on run creation is rejected before input or run persistence.
 
@@ -214,7 +215,7 @@ Never manually delete database runtime rows to silence the backlog. Diagnose pro
 
 ## Cloudflare bridge operations
 
-The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK and container image versions are pinned as one compatibility pair.
+The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and real-agent adapter are pinned as one compatibility unit. The custom image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the proven Claude ACP toolchain requirement.
 
 Target workflow:
 
@@ -231,13 +232,14 @@ Before enabling it in the control plane:
 2. deploy the exact bridge and container image revision tested together;
 3. set `CLOUDFLARE_BRIDGE_URL` to that deployment's URL and set control-plane `CLOUDFLARE_BRIDGE_TOKEN` to the same secret value stored under bridge binding `BRIDGE_TOKEN`;
 4. after a deploy or secret rotation, poll the authenticated `/v1/health` boundary until the expected bridge protocol is stable; a successful Wrangler mutation is not edge readiness, and a fixed sleep is not evidence;
-5. record `CLOUDFLARE_RUNNER_DIGEST` and, when the platform exposes it, `CLOUDFLARE_RUNTIME_IMAGE_DIGEST`; absent evidence remains `null` rather than being guessed;
+5. record `CLOUDFLARE_RUNNER_DIGEST` plus the matching `CLOUDFLARE_RUNTIME_IMAGE_REFERENCE` and `CLOUDFLARE_RUNTIME_IMAGE_DIGEST`; absent evidence remains `null` rather than being guessed;
 6. run `doctor` and the mock-bridge integration tests;
 7. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
-8. run `bun run proof:release:cloudflare` to prove the full semantic ACP round trip, agent-written artifact, OTLP telemetry, promotion, cleanup, restart, backup/restore, and second-boot path with complete configured provenance;
-9. inspect Cloudflare for leaked test resources.
+8. run `bun run proof:release:cloudflare` to prove the deterministic ACP/provider compatibility path with complete configured provenance;
+9. run `bun run proof:release:cloudflare:claude` to require real Claude generation, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, restart, backup/restore, and second boot;
+10. inspect Cloudflare for leaked test resources.
 
-The configured runner and image digests are operator/platform assertions used to pin execution identity. They are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
+The configured runner digest and matching custom-image reference/digest are operator/platform assertions used to pin execution identity. A base-image tag is never paired with a custom-image digest. These values are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
 
 Do not confuse a sleeping container with a destroyed sandbox. Do not place Cloudflare account credentials in the agent runtime. Rotate the bridge token as a control-plane credential and ensure old revisions fail closed on protocol mismatch.
 
