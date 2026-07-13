@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run demo
+      - run: bun run runner:build
+      - run: bun run cloudflare:check
+      - run: bun run --cwd providers/cloudflare-sandbox image:check
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --check .
+      - run: docker build --tag meanwhile:ci .
+      - run: >-
+          docker run --rm --entrypoint sh meanwhile:ci -c
+          'test -r /usr/share/doc/meanwhile/LICENSE &&
+          test -r /usr/share/doc/meanwhile/THIRD_PARTY_NOTICES &&
+          test -r /usr/share/doc/git/copyright &&
+          test -r /usr/share/doc/ca-certificates/copyright'
+      - name: Boot the packaged control plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_key="$(docker run --rm --entrypoint bun meanwhile:ci -e \
+            'import { issueApiKey } from "./src/auth.ts"; process.stdout.write((await issueApiKey()).key)')"
+          container_id="$(docker run --detach \
+            --env MEANWHILE_API_KEY="$api_key" \
+            --env MEANWHILE_LOCAL_PROVIDER=enabled \
+            --env MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER=true \
+            --env MEANWHILE_PREVIEW_HOST=0.0.0.0 \
+            --env MEANWHILE_PREVIEW_PUBLIC_URL=http://127.0.0.1:7332 \
+            --publish 127.0.0.1::7331 \
+            meanwhile:ci)"
+          trap 'docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+          api_port="$(docker port "$container_id" 7331/tcp | sed 's/.*://')"
+          for _ in {1..50}; do
+            if curl --fail --silent --show-error \
+              "http://127.0.0.1:${api_port}/readyz" >/dev/null 2>&1; then
+              docker exec "$container_id" mkdir -p /app/scripts
+              docker cp scripts/container-smoke.ts "$container_id":/app/scripts/container-smoke.ts
+              docker exec "$container_id" bun scripts/container-smoke.ts
+              exit 0
+            fi
+            if [[ "$(docker inspect --format '{{.State.Running}}' "$container_id")" != true ]]; then
+              break
+            fi
+            sleep 0.1
+          done
+          docker logs "$container_id"
+          exit 1

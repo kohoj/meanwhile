@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "agents": {
+    "codex": {
+      "transport": "stdio",
+      "executable": "codex-acp",
+      "args": [],
+      "workingDirectory": "workspace",
+      "capabilities": {
+        "filesystem": true,
+        "terminal": true
+      },
+      "envNames": ["CI"],
+      "secretEnvNames": ["OPENAI_API_KEY"]
+    },
+    "claude-code": {
+      "transport": "stdio",
+      "executable": "claude-agent-acp",
+      "args": [],
+      "workingDirectory": "workspace",
+      "capabilities": {
+        "filesystem": true,
+        "terminal": true
+      },
+      "envNames": [
+        "CI",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "CLAUDE_CODE_DISABLE_AGENT_VIEW",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER",
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID"
+      ],
+      "secretEnvNames": [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CONFIG_DIR",
+        "GOOGLE_APPLICATION_CREDENTIALS"
+      ]
+    },
+    "hermes": {
+      "transport": "stdio",
+      "executable": "hermes-acp",
+      "args": [],
+      "workingDirectory": "workspace",
+      "capabilities": {
+        "filesystem": true,
+        "terminal": true
+      },
+      "envNames": ["CI"],
+      "secretEnvNames": ["OPENAI_API_KEY"]
+    }
+  }
+}

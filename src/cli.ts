@@ -1,0 +1,933 @@
+#!/usr/bin/env bun
+
+import { constants } from "node:fs"
+import { access, lstat } from "node:fs/promises"
+import { delimiter, dirname, resolve } from "node:path"
+import { AgentCatalog } from "./agents/catalog"
+import {
+  apiKeyPrefix,
+  hashApiKey,
+  issueApiKey,
+  LOCAL_BOOTSTRAP_API_KEY_ID,
+  LOCAL_BOOTSTRAP_OWNER_ID,
+} from "./auth"
+import { Meanwhile, MeanwhileError, type Wait } from "./client"
+import { loadConfig, prepareDataDirectories } from "./config"
+import { AppError } from "./errors"
+import { type BootstrapIdentityStatus, Store } from "./persistence/store"
+import { CloudflareRuntimeProvider } from "./providers/cloudflare-provider"
+import { LocalRuntimeProvider } from "./providers/local-provider"
+import { RuntimeProviderRegistry } from "./providers/registry"
+import { SERVICE_VERSION } from "./version"
+import { captureWorkspace, WorkspaceCaptureError } from "./workspace"
+
+const DEFAULT_URL = "http://127.0.0.1:7331"
+
+interface Environment extends Readonly<Record<string, string | undefined>> {
+  readonly MEANWHILE_API_KEY?: string
+  readonly MEANWHILE_DEFAULT_PROVIDER?: string
+  readonly MEANWHILE_URL?: string
+}
+type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+type Write = (text: string) => void | Promise<void>
+
+export interface CliOptions {
+  readonly environment?: Environment
+  readonly fetch?: Fetch
+  readonly cwd?: string
+  readonly stdout?: Write
+  readonly stderr?: Write
+  readonly signal?: AbortSignal
+  readonly wait?: Wait
+}
+
+interface CliContext {
+  readonly environment: Environment
+  readonly fetch: Fetch
+  readonly cwd: string
+  readonly stdout: Write
+  readonly stderr: Write
+  readonly signal: AbortSignal
+  readonly wait: Wait
+}
+
+interface CliErrorInput {
+  readonly code: string
+  readonly message: string
+  readonly exitCode?: number
+  readonly requestId?: string
+  readonly details?: Readonly<Record<string, unknown>>
+}
+
+/** A deliberately small, safe error surface for both local and API failures. */
+export class CliError extends Error {
+  readonly code: string
+  readonly exitCode: number
+  readonly requestId: string | undefined
+  readonly details: Readonly<Record<string, unknown>>
+
+  constructor(input: CliErrorInput, options?: ErrorOptions) {
+    super(input.message, options)
+    this.name = "CliError"
+    this.code = input.code
+    this.exitCode = input.exitCode ?? 1
+    this.requestId = input.requestId
+    this.details = input.details ?? {}
+  }
+}
+
+/**
+ * Runs one CLI invocation. The function never throws and writes exactly one
+ * structured error on failure, which makes it usable by humans and agents.
+ */
+export async function runCli(
+  args: readonly string[] = Bun.argv.slice(2),
+  options: CliOptions = {},
+): Promise<number> {
+  const signal = options.signal ?? new AbortController().signal
+  const context: CliContext = {
+    environment: options.environment ?? Bun.env,
+    fetch: options.fetch ?? globalThis.fetch,
+    cwd: resolve(options.cwd ?? process.cwd()),
+    stdout: options.stdout ?? fileSinkWriter(Bun.stdout),
+    stderr: options.stderr ?? fileSinkWriter(Bun.stderr),
+    signal,
+    wait: options.wait ?? abortableCliDelay,
+  }
+
+  try {
+    return await dispatch(args, context)
+  } catch (error) {
+    const normalized = normalizeCliError(error)
+    await context.stderr(
+      `${JSON.stringify({
+        error: {
+          code: normalized.code,
+          message: normalized.message,
+          ...(normalized.requestId === undefined ? {} : { requestId: normalized.requestId }),
+          details: normalized.details,
+        },
+      })}\n`,
+    )
+    return normalized.exitCode
+  }
+}
+
+async function dispatch(args: readonly string[], context: CliContext): Promise<number> {
+  const [command, ...rest] = args
+  if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+    await context.stdout(HELP)
+    return 0
+  }
+  if (command === "--version" || command === "version") {
+    await context.stdout(`${SERVICE_VERSION}\n`)
+    return 0
+  }
+
+  switch (command) {
+    case "run":
+      await createRun(rest, context)
+      return 0
+    case "list":
+      await listRuns(rest, context)
+      return 0
+    case "get":
+      await getRun(rest, context)
+      return 0
+    case "logs":
+      await runLogs(rest, context)
+      return 0
+    case "cancel":
+      await cancelRun(rest, context)
+      return 0
+    case "artifacts":
+      await listArtifacts(rest, context)
+      return 0
+    case "deploy":
+      await createDeployment(rest, context)
+      return 0
+    case "deployment":
+      await deploymentCommand(rest, context)
+      return 0
+    case "providers":
+      await providersCommand(rest, context)
+      return 0
+    case "doctor":
+      return doctor(rest, context)
+    case "key":
+      await keyCommand(rest, context)
+      return 0
+    default:
+      throw argumentError("Unknown command", { command })
+  }
+}
+
+async function createRun(args: readonly string[], context: CliContext): Promise<void> {
+  const delimiter = args.indexOf("--")
+  if (delimiter < 0) {
+    throw argumentError("Run prompt must follow a -- delimiter")
+  }
+  const parsed = parseArguments(args.slice(0, delimiter), {
+    values: [
+      "repo",
+      "files",
+      "revision",
+      "credential-ref",
+      "agent",
+      "provider",
+      "artifact",
+      "env",
+      "secret",
+      "timeout",
+      "idempotency-key",
+    ],
+  })
+  parsed.requireNoPositionals()
+  const prompt = args
+    .slice(delimiter + 1)
+    .join(" ")
+    .trim()
+  if (prompt.length === 0) throw argumentError("Run prompt must not be empty")
+
+  const repository = parsed.one("repo")
+  const directory = parsed.one("files")
+  if ((repository === undefined) === (directory === undefined)) {
+    throw argumentError("Exactly one of --repo or --files is required")
+  }
+
+  const revision = parsed.one("revision")
+  const credentialRef = parsed.one("credential-ref")
+  if (directory !== undefined && (revision !== undefined || credentialRef !== undefined)) {
+    throw argumentError("--revision and --credential-ref require --repo")
+  }
+
+  const agentType = requiredOption(parsed, "agent")
+  const provider =
+    parsed.one("provider") ?? context.environment.MEANWHILE_DEFAULT_PROVIDER ?? "local"
+  const timeoutMs = parseDuration(parsed.one("timeout") ?? "1h")
+  const env = parseAssignments(parsed.many("env"), "--env", parseEnvironmentValue)
+  const secretRefs = parseAssignments(parsed.many("secret"), "--secret", parseSecretReference)
+  for (const name of Object.keys(secretRefs)) {
+    if (Object.hasOwn(env, name)) {
+      throw argumentError("A name cannot appear in both --env and --secret", { name })
+    }
+  }
+
+  const workspace =
+    repository === undefined
+      ? {
+          type: "files" as const,
+          files: await captureWorkspace(directory as string, context.cwd),
+        }
+      : {
+          type: "repository" as const,
+          url: repository,
+          ...(revision === undefined ? {} : { revision }),
+          ...(credentialRef === undefined
+            ? {}
+            : { credentialRef: parseSecretReference(credentialRef) }),
+        }
+  const body = {
+    workspace,
+    agentType,
+    prompt,
+    env,
+    secretRefs,
+    provider,
+    artifactPaths: [...uniqueValues(parsed.many("artifact"), "--artifact")],
+    timeoutMs,
+  }
+  const idempotencyKey = parsed.one("idempotency-key")
+  const client = apiClient(context)
+  const run = await client.runs.create(body, {
+    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+    signal: context.signal,
+  })
+  await printJson(context, { run })
+}
+
+async function listRuns(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, { values: ["limit", "before"] })
+  parsed.requireNoPositionals()
+  const query = new URLSearchParams()
+  query.set("limit", String(parseInteger(parsed.one("limit") ?? "50", "--limit", 1, 100)))
+  const before = parsed.one("before")
+  if (before !== undefined) query.set("before", before)
+  await printJson(
+    context,
+    await apiClient(context).runs.list({
+      limit: Number(query.get("limit")),
+      ...(before === undefined ? {} : { before }),
+      signal: context.signal,
+    }),
+  )
+}
+
+async function getRun(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args)
+  const runId = parsed.onlyPositional()
+  await printJson(context, {
+    run: await apiClient(context).runs.get(runId, { signal: context.signal }),
+  })
+}
+
+async function cancelRun(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args)
+  const runId = parsed.onlyPositional()
+  await printJson(context, {
+    run: await apiClient(context).runs.cancel(runId, { signal: context.signal }),
+  })
+}
+
+async function listArtifacts(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args)
+  const runId = parsed.onlyPositional()
+  await printJson(context, {
+    items: await apiClient(context).runs.artifacts(runId, { signal: context.signal }),
+  })
+}
+
+async function runLogs(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, { values: ["after", "limit"], flags: ["follow"] })
+  const runId = parsed.onlyPositional()
+  const after = parseInteger(parsed.one("after") ?? "0", "--after", 0, Number.MAX_SAFE_INTEGER)
+  const limit = parseInteger(parsed.one("limit") ?? "100", "--limit", 1, 1_000)
+  if (!parsed.flag("follow")) {
+    await printJson(
+      context,
+      await apiClient(context).runs.logs(runId, { after, limit, signal: context.signal }),
+    )
+    return
+  }
+
+  const client = apiClient(context)
+  for await (const log of client.runs.followLogs(runId, {
+    after,
+    limit,
+    signal: context.signal,
+  })) {
+    await context.stdout(`${JSON.stringify(log)}\n`)
+  }
+}
+
+async function createDeployment(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, {
+    values: ["artifact", "workspace", "target", "config", "secret"],
+  })
+  const runId = parsed.onlyPositional()
+  const artifactPath = parsed.one("artifact")
+  const workspacePath = parsed.one("workspace")
+  const source = deploymentSource(artifactPath, workspacePath)
+  const config = parseAssignments(
+    parsed.many("config"),
+    "--config",
+    (value) => {
+      try {
+        return JSON.parse(value) as unknown
+      } catch {
+        throw argumentError("--config values must be JSON")
+      }
+    },
+    parseConfigName,
+  )
+  const body = {
+    runId,
+    ...source,
+    deployTarget: requiredOption(parsed, "target"),
+    config,
+    secretRefs: parseAssignments(parsed.many("secret"), "--secret", parseSecretReference),
+  }
+  const deployment = await apiClient(context).deployments.create(body, { signal: context.signal })
+  await printJson(context, { deployment })
+}
+
+function deploymentSource(
+  artifactPath: string | undefined,
+  workspacePath: string | undefined,
+): { readonly artifactPath: string } | { readonly workspacePath: string } {
+  if (artifactPath !== undefined && workspacePath === undefined) return { artifactPath }
+  if (workspacePath !== undefined && artifactPath === undefined) return { workspacePath }
+  throw argumentError("Exactly one of --artifact or --workspace is required")
+}
+
+async function deploymentCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  if (subcommand === "logs") {
+    const parsed = parseArguments(rest, { values: ["after", "limit"] })
+    const deploymentId = parsed.onlyPositional()
+    const query = new URLSearchParams({
+      after: String(
+        parseInteger(parsed.one("after") ?? "0", "--after", 0, Number.MAX_SAFE_INTEGER),
+      ),
+      limit: String(parseInteger(parsed.one("limit") ?? "100", "--limit", 1, 1_000)),
+    })
+    await printJson(
+      context,
+      await apiClient(context).deployments.logs(deploymentId, {
+        after: Number(query.get("after")),
+        limit: Number(query.get("limit")),
+        signal: context.signal,
+      }),
+    )
+    return
+  }
+  const tokens = subcommand === "get" ? rest : args
+  const parsed = parseArguments(tokens)
+  const deploymentId = parsed.onlyPositional()
+  await printJson(context, {
+    deployment: await apiClient(context).deployments.get(deploymentId, {
+      signal: context.signal,
+    }),
+  })
+}
+
+async function providersCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  if (subcommand !== "test") throw argumentError("Expected: providers test <provider>")
+  const parsed = parseArguments(rest)
+  const provider = parsed.onlyPositional()
+  await printJson(
+    context,
+    await apiClient(context).providers.test(provider, { signal: context.signal }),
+  )
+}
+
+async function keyCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args)
+  const [subcommand] = parsed.requirePositionals(1)
+  if (subcommand !== "generate") throw argumentError("Expected: key generate")
+  const issued = await issueApiKey()
+  await printJson(context, {
+    key: issued.key,
+    prefix: issued.prefix,
+    warning:
+      "This key is shown once, generated locally, and not registered or persisted; use it only for initial local bootstrap.",
+  })
+}
+
+interface DoctorCheck {
+  readonly name: string
+  readonly status: "healthy" | "degraded" | "unavailable"
+  readonly message?: string
+  readonly details?: Readonly<Record<string, unknown>>
+}
+
+async function doctor(args: readonly string[], context: CliContext): Promise<number> {
+  parseArguments(args).requireNoPositionals()
+  const checks: DoctorCheck[] = []
+  let config: ReturnType<typeof loadConfig>
+  try {
+    config = loadConfig({ ...context.environment })
+    checks.push({ name: "configuration", status: "healthy" })
+  } catch {
+    checks.push({
+      name: "configuration",
+      status: "unavailable",
+      message: "Environment configuration is invalid",
+    })
+    await printDoctor(context, checks)
+    return 1
+  }
+
+  checks.push({
+    name: "secret-source-catalog",
+    status: "healthy",
+    message:
+      config.secretSourceCatalog.length === 0
+        ? "Public secret references are deny-all"
+        : "Public secret references are restricted to the configured catalog",
+    details: { sourceCount: config.secretSourceCatalog.length },
+  })
+  checks.push({
+    name: "local-provider-policy",
+    status: "healthy",
+    details: {
+      enabled: config.localProvider.enabled,
+      unsafeHostExecution: config.localProvider.unsafeHostExecution,
+    },
+  })
+
+  try {
+    await prepareDataDirectories(config)
+    const store = new Store(config.databasePath)
+    try {
+      store.assertHealthyWriter()
+      const prefix = config.apiKey === undefined ? null : apiKeyPrefix(config.apiKey)
+      let bootstrapStatus: BootstrapIdentityStatus
+      if (config.apiKey === undefined) {
+        bootstrapStatus = store.inspectBootstrapIdentity()
+      } else if (prefix === null) {
+        bootstrapStatus = "conflict" as const
+      } else {
+        bootstrapStatus = store.inspectBootstrapIdentity({
+          ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
+          ownerName: "Local owner",
+          apiKeyId: LOCAL_BOOTSTRAP_API_KEY_ID,
+          apiKeyPrefix: prefix,
+          apiKeyHash: await hashApiKey(config.apiKey),
+          apiKeyName: "Local bootstrap key",
+          createdAt: new Date().toISOString(),
+        })
+      }
+      checks.push(
+        bootstrapStatus === "required" || bootstrapStatus === "conflict"
+          ? {
+              name: "bootstrap-identity",
+              status: "unavailable",
+              message:
+                bootstrapStatus === "required"
+                  ? "MEANWHILE_API_KEY is required to initialize the empty database"
+                  : "Configured bootstrap key conflicts with the initialized database",
+            }
+          : {
+              name: "bootstrap-identity",
+              status: "healthy",
+              details: { state: bootstrapStatus },
+            },
+      )
+    } finally {
+      store.close()
+    }
+    checks.push({ name: "persistence", status: "healthy" })
+  } catch (error) {
+    checks.push(
+      error instanceof AppError
+        ? {
+            name: "persistence",
+            status: "unavailable",
+            message: error.message,
+            details: { code: error.code },
+          }
+        : {
+            name: "persistence",
+            status: "unavailable",
+            message: "SQLite could not be opened or written",
+          },
+    )
+  }
+
+  let catalog: AgentCatalog | undefined
+  try {
+    catalog = await AgentCatalog.load(config.agentCatalogPath)
+    checks.push({
+      name: "agent-catalog",
+      status: "healthy",
+      details: { agents: catalog.list() },
+    })
+  } catch {
+    checks.push({
+      name: "agent-catalog",
+      status: "unavailable",
+      message: "Agent catalog is invalid or unreadable",
+    })
+  }
+
+  if (catalog !== undefined && config.localProvider.enabled) {
+    const unavailable: string[] = []
+    const executablePath = `${dirname(config.runnerPath)}${delimiter}${context.environment["PATH"] ?? ""}`
+    for (const name of catalog.list()) {
+      const executable = catalog.resolve(name).executable
+      if (!(await executableExists(executable, false, executablePath))) unavailable.push(name)
+    }
+    checks.push(
+      unavailable.length === 0
+        ? { name: "agent-executables", status: "healthy" }
+        : {
+            name: "agent-executables",
+            status: "degraded",
+            message: "Some configured agents are not installed",
+            details: { unavailable },
+          },
+    )
+  }
+
+  checks.push(
+    (await executableExists(config.runnerPath, true))
+      ? { name: "runner", status: "healthy" }
+      : {
+          name: "runner",
+          status: "unavailable",
+          message: "Runner executable is missing or not executable",
+        },
+  )
+
+  const providers = [
+    ...(config.localProvider.enabled
+      ? [
+          new LocalRuntimeProvider({
+            rootDirectory: config.runtimeDir,
+            runnerExecutable: config.runnerPath,
+          }),
+        ]
+      : []),
+    ...(config.cloudflare === undefined
+      ? []
+      : [
+          new CloudflareRuntimeProvider({
+            bridgeUrl: config.cloudflare.bridgeUrl,
+            bridgeToken: config.cloudflare.token,
+            requestTimeoutMs: 3_000,
+          }),
+        ]),
+  ]
+  const providerRegistry = new RuntimeProviderRegistry(providers)
+  checks.push(
+    providerRegistry.has(config.defaultProvider)
+      ? {
+          name: "default-provider",
+          status: "healthy",
+          details: { provider: config.defaultProvider },
+        }
+      : {
+          name: "default-provider",
+          status: "unavailable",
+          message: "The configured default provider is not registered",
+          details: { provider: config.defaultProvider },
+        },
+  )
+  for (const provider of providers) {
+    const health = await provider.health()
+    checks.push({
+      name: `provider:${provider.name}`,
+      status: health.status,
+      ...(health.message === undefined ? {} : { message: health.message }),
+    })
+  }
+
+  checks.push({ name: "deployment:local-static", status: "healthy" })
+  if (context.environment.MEANWHILE_URL !== undefined) {
+    try {
+      const url = parseBaseUrl(context.environment.MEANWHILE_URL)
+      const response = await context.fetch(new URL("readyz", url), {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(2_000),
+      })
+      checks.push(
+        response.ok
+          ? { name: "control-plane", status: "healthy" }
+          : {
+              name: "control-plane",
+              status: "degraded",
+              message: "Control-plane readiness check failed",
+            },
+      )
+    } catch {
+      checks.push({
+        name: "control-plane",
+        status: "degraded",
+        message: "Configured control plane is unreachable",
+      })
+    }
+  }
+
+  await printDoctor(context, checks)
+  return checks.some((check) => check.status === "unavailable") ? 1 : 0
+}
+
+async function printDoctor(context: CliContext, checks: readonly DoctorCheck[]): Promise<void> {
+  const status = checks.some((check) => check.status === "unavailable")
+    ? "unavailable"
+    : checks.some((check) => check.status === "degraded")
+      ? "degraded"
+      : "healthy"
+  await printJson(context, { status, checks })
+}
+
+function apiClient(context: CliContext): Meanwhile {
+  const key = context.environment.MEANWHILE_API_KEY
+  if (key === undefined || apiKeyPrefix(key) === null) {
+    throw new CliError({
+      code: "AUTHENTICATION_REQUIRED",
+      message: "MEANWHILE_API_KEY must contain a valid Meanwhile API key",
+      exitCode: 2,
+    })
+  }
+  return new Meanwhile({
+    baseUrl: parseBaseUrl(context.environment.MEANWHILE_URL ?? DEFAULT_URL),
+    apiKey: key,
+    fetch: context.fetch,
+    wait: context.wait,
+  })
+}
+
+function parseBaseUrl(value: string): URL {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw argumentError("MEANWHILE_URL must be an absolute HTTP URL")
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    (url.pathname !== "" && url.pathname !== "/")
+  ) {
+    throw argumentError("MEANWHILE_URL must be an origin without credentials, query, or path")
+  }
+  url.pathname = "/"
+  return url
+}
+
+function abortableCliDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || milliseconds <= 0) return Promise.resolve()
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timeout)
+      signal.removeEventListener("abort", finish)
+      resolve()
+    }
+    const timeout = setTimeout(finish, milliseconds)
+    signal.addEventListener("abort", finish, { once: true })
+  })
+}
+
+class ParsedArguments {
+  constructor(
+    readonly positionals: readonly string[],
+    private readonly options: ReadonlyMap<string, readonly string[]>,
+    private readonly flags: ReadonlySet<string>,
+  ) {}
+
+  one(name: string): string | undefined {
+    const values = this.options.get(name) ?? []
+    if (values.length > 1) throw argumentError(`--${name} may be provided only once`)
+    return values[0]
+  }
+
+  many(name: string): readonly string[] {
+    return this.options.get(name) ?? []
+  }
+
+  flag(name: string): boolean {
+    return this.flags.has(name)
+  }
+
+  requirePositionals(count: number): string[] {
+    if (this.positionals.length !== count) {
+      throw argumentError(`Expected ${count} positional argument${count === 1 ? "" : "s"}`)
+    }
+    return [...this.positionals]
+  }
+
+  requireNoPositionals(): void {
+    this.requirePositionals(0)
+  }
+
+  onlyPositional(): string {
+    this.requirePositionals(1)
+    return this.positionals[0] as string
+  }
+}
+
+function parseArguments(
+  args: readonly string[],
+  specification: { readonly values?: readonly string[]; readonly flags?: readonly string[] } = {},
+): ParsedArguments {
+  const valueNames = new Set(specification.values ?? [])
+  const flagNames = new Set(specification.flags ?? [])
+  const values = new Map<string, string[]>()
+  const flags = new Set<string>()
+  const positionals: string[] = []
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index] as string
+    if (!token.startsWith("--") || token === "--") {
+      positionals.push(token)
+      continue
+    }
+    const assignment = token.indexOf("=")
+    const name = token.slice(2, assignment < 0 ? undefined : assignment)
+    if (flagNames.has(name)) {
+      if (assignment >= 0) throw argumentError(`--${name} does not accept a value`)
+      if (flags.has(name)) throw argumentError(`--${name} may be provided only once`)
+      flags.add(name)
+      continue
+    }
+    if (!valueNames.has(name)) throw argumentError("Unknown option", { option: `--${name}` })
+    const value = assignment < 0 ? args[++index] : token.slice(assignment + 1)
+    if (value === undefined || value.startsWith("--")) {
+      throw argumentError(`--${name} requires a value`)
+    }
+    const existing = values.get(name) ?? []
+    existing.push(value)
+    values.set(name, existing)
+  }
+  return new ParsedArguments(positionals, values, flags)
+}
+
+function requiredOption(parsed: ParsedArguments, name: string): string {
+  const value = parsed.one(name)
+  if (value === undefined || value.length === 0) throw argumentError(`--${name} is required`)
+  return value
+}
+
+function parseAssignments<Value>(
+  inputs: readonly string[],
+  option: string,
+  parseValue: (value: string) => Value,
+  parseName: (value: string) => string = parseEnvironmentName,
+): Record<string, Value> {
+  const result: Record<string, Value> = {}
+  for (const input of inputs) {
+    const separator = input.indexOf("=")
+    if (separator < 1) throw argumentError(`${option} requires NAME=VALUE`)
+    const name = parseName(input.slice(0, separator))
+    if (Object.hasOwn(result, name))
+      throw argumentError(`${option} contains a duplicate name`, { name })
+    result[name] = parseValue(input.slice(separator + 1))
+  }
+  return result
+}
+
+function parseEnvironmentName(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw argumentError("Environment variable name is invalid", { name: value })
+  }
+  return value
+}
+
+function parseEnvironmentValue(value: string): string {
+  if (value.length > 32_768 || value.includes("\0")) {
+    throw argumentError("Environment value is invalid or too large")
+  }
+  return value
+}
+
+function parseConfigName(value: string): string {
+  if (!/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/.test(value)) {
+    throw argumentError("Deployment configuration name is invalid", { name: value })
+  }
+  return value
+}
+
+function parseSecretReference(value: string): string {
+  if (!/^env:\/\/[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw argumentError("Secret references must use env://NAME")
+  }
+  return value
+}
+
+function uniqueValues(values: readonly string[], option: string): readonly string[] {
+  const result = new Set<string>()
+  for (const value of values) {
+    if (result.has(value)) throw argumentError(`${option} must not contain duplicates`, { value })
+    result.add(value)
+  }
+  return [...result]
+}
+
+function parseInteger(value: string, option: string, minimum: number, maximum: number): number {
+  if (!/^\d+$/.test(value)) throw argumentError(`${option} must be an integer`)
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw argumentError(`${option} is outside its allowed range`, { minimum, maximum })
+  }
+  return parsed
+}
+
+function parseDuration(value: string): number {
+  const match = /^(\d+)(ms|s|m|h)?$/.exec(value)
+  if (match === null) throw argumentError("--timeout must be an integer with ms, s, m, or h")
+  const number = Number(match[1])
+  const multiplier: number = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[
+    (match[2] ?? "ms") as "ms" | "s" | "m" | "h"
+  ]
+  const milliseconds = number * multiplier
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < 1_000 || milliseconds > 86_400_000) {
+    throw argumentError("--timeout must be between 1s and 24h")
+  }
+  return milliseconds
+}
+
+async function executableExists(
+  executable: string,
+  requireExecutable = false,
+  searchPath?: string,
+): Promise<boolean> {
+  const path = executable.includes("/")
+    ? executable
+    : Bun.which(executable, searchPath === undefined ? undefined : { PATH: searchPath })
+  if (path === null) return false
+  try {
+    const info = await lstat(path)
+    if (!info.isFile() || info.isSymbolicLink()) return false
+    if (requireExecutable) await access(path, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function normalizeCliError(error: unknown): CliError {
+  if (error instanceof CliError) return error
+  if (error instanceof MeanwhileError || error instanceof WorkspaceCaptureError) {
+    return new CliError({
+      code: error.code,
+      message: error.message,
+      ...(error instanceof MeanwhileError && error.requestId !== undefined
+        ? { requestId: error.requestId }
+        : {}),
+      details: error.details,
+      ...(error.code === "INVALID_ARGUMENT" ? { exitCode: 2 } : {}),
+    })
+  }
+  return new CliError(
+    { code: "INTERNAL", message: "Command failed unexpectedly" },
+    { cause: error },
+  )
+}
+
+function argumentError(message: string, details: Readonly<Record<string, unknown>> = {}): CliError {
+  return new CliError({ code: "INVALID_ARGUMENT", message, exitCode: 2, details })
+}
+
+async function printJson(context: CliContext, value: unknown): Promise<void> {
+  await context.stdout(`${JSON.stringify(value, null, 2)}\n`)
+}
+
+function fileSinkWriter(file: Bun.BunFile): Write {
+  const writer = file.writer()
+  return async (text) => {
+    writer.write(text)
+    await writer.flush()
+  }
+}
+
+const HELP = `Meanwhile ${SERVICE_VERSION} — run any ACP coding agent in any isolated runtime.
+
+Usage:
+  meanwhile run (--repo URL | --files DIR) --agent NAME [options] -- TASK
+  meanwhile list [--limit N] [--before CURSOR]
+  meanwhile get RUN_ID
+  meanwhile logs RUN_ID [--follow] [--after N] [--limit N]
+  meanwhile cancel RUN_ID
+  meanwhile artifacts RUN_ID
+  meanwhile deploy RUN_ID (--artifact PATH | --workspace PATH) --target NAME
+  meanwhile deployment [get] DEPLOYMENT_ID
+  meanwhile deployment logs DEPLOYMENT_ID [--after N] [--limit N]
+  meanwhile providers test PROVIDER
+  meanwhile doctor
+  meanwhile key generate
+
+Run options:
+  --provider NAME             Runtime provider (default: MEANWHILE_DEFAULT_PROVIDER or local)
+  --revision REVISION         Repository revision
+  --credential-ref env://VAR  Repository credential reference
+  --artifact PATH             Declared output path; repeatable
+  --env NAME=VALUE            Persisted non-secret environment; repeatable
+  --secret NAME=env://VAR     Secret reference; repeatable
+  --timeout 30s|10m|1h        Provisioning-through-agent deadline
+  --idempotency-key KEY       Safe retry identity
+
+Deployment options:
+  --config NAME=JSON          Target configuration; repeatable
+  --secret NAME=env://VAR     Deployment secret reference; repeatable
+
+API commands read MEANWHILE_URL (default ${DEFAULT_URL}) and MEANWHILE_API_KEY.
+The local provider executes on this host and is not a security sandbox.
+`
+
+if (import.meta.main) process.exitCode = await runCli()

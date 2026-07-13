@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "agents": {
+    "demo": {
+      "transport": "stdio",
+      "executable": "meanwhile-demo-agent",
+      "args": [],
+      "workingDirectory": "workspace",
+      "capabilities": {
+        "filesystem": true,
+        "terminal": false
+      },
+      "envNames": [
+        "FIXTURE_DELAY_MS",
+        "FIXTURE_REQUEST_PERMISSION",
+        "FIXTURE_MALFORMED_OUTPUT",
+        "FIXTURE_OVERSIZED_BYTES"
+      ],
+      "secretEnvNames": ["TEST_RUNNER_SECRET"]
+    }
+  }
+}

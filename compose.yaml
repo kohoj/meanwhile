@@ -1,0 +1,26 @@
+services:
+  meanwhile:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: ${MEANWHILE_ENV_FILE:-./compose.env}
+        required: false
+    environment:
+      MEANWHILE_HOST: 0.0.0.0
+      MEANWHILE_PORT: 7331
+      MEANWHILE_PREVIEW_HOST: 0.0.0.0
+      MEANWHILE_PREVIEW_PORT: 7332
+      MEANWHILE_PREVIEW_PUBLIC_URL: "${MEANWHILE_PREVIEW_PUBLIC_URL:-http://127.0.0.1:7332}"
+      MEANWHILE_DATA_DIR: /data
+      MEANWHILE_LOCAL_PROVIDER: "${MEANWHILE_LOCAL_PROVIDER:-enabled}"
+      MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER: "${MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER:-true}"
+      MEANWHILE_API_KEY: ${MEANWHILE_API_KEY:?set MEANWHILE_API_KEY}
+    ports:
+      - "127.0.0.1:7331:7331"
+      - "127.0.0.1:7332:7332"
+    volumes:
+      - meanwhile-data:/data
+
+volumes:
+  meanwhile-data:

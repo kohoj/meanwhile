@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+compose.env
+bun.lockb
+node_modules/
+dist/
+coverage/
+data/
+*.db
+*.db-shm
+*.db-wal
+.wrangler/
+providers/cloudflare-sandbox/.dev.vars
