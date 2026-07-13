@@ -431,7 +431,7 @@ The bridge:
 - owns no run, owner, artifact, or deployment business state;
 - starts the fixed runner as a background process and delivers one validated `RunnerSpec` as bounded stdin data; the pinned SDK lacks direct initial-stdin support, so the current bridge uses a random provider-private staging file, quoted redirection, and unconditional deletion without placing prompt data in argv;
 - exposes cursor-bearing live/replayed stdout frames and separate safe diagnostics;
-- retries only retryable event reads with bounded backoff from the same durable cursor;
+- retries only retryable transport failures with bounded, abortable backoff while preserving operation identity and, for events, the same durable cursor;
 - advertises only the hard termination primitive the pinned SDK actually implements; control-plane cancellation then stops remaining sandbox processes through the runtime lifecycle;
 - makes stop/destroy idempotent and explicitly destroys rather than confusing sleep with cleanup;
 - exposes health without credentials;
@@ -544,7 +544,7 @@ Tests must prove:
 - artifact-store implementations pass one immutable owner-scoped contract;
 - a fake and local adapter pass the same provider contract;
 - the Cloudflare client passes mock-bridge integration;
-- retryable Cloudflare event reads resume from the same cursor without duplicating accepted evidence;
+- retryable Cloudflare transport operations preserve request identity, and event reads resume from the same cursor without duplicating accepted evidence;
 - a gated live test creates, starts, executes, reads files/logs, stops, and destroys a real Cloudflare sandbox;
 - the public client authenticates, validates contract responses, preserves structured safe errors, waits deterministically, and reconnects log streams without gaps or duplicates;
 - artifact inspection/download, deployment listing, audit queries, and API-key lifecycle are owner-scoped through API, SDK, and CLI;

@@ -129,6 +129,7 @@ describe("CloudflareRuntimeProvider", () => {
     const provider = new CloudflareRuntimeProvider({
       bridgeUrl: "https://bridge.example.test/",
       bridgeToken: TOKEN,
+      retryDelaysMs: [],
       fetch: async () =>
         Response.json(
           {
@@ -234,14 +235,16 @@ describe("CloudflareRuntimeProvider", () => {
   test("retries transient event reads from the same durable cursor", async () => {
     let attempts = 0
     const cursors: string[] = []
+    const requestIds: string[] = []
     const provider = new CloudflareRuntimeProvider({
       bridgeUrl: "https://bridge.example.test/",
       bridgeToken: TOKEN,
-      eventRetryDelaysMs: [1, 1],
+      retryDelaysMs: [1, 1],
       fetch: async (input, init) => {
         const request = input instanceof Request ? input : new Request(input, init)
         const url = new URL(request.url)
         cursors.push(url.searchParams.get("cursor") ?? "")
+        requestIds.push(request.headers.get("x-request-id") ?? "")
         attempts += 1
         if (attempts < 3) return errorResponse(503, "PROVIDER_BUSY", true)
         return json({
@@ -274,6 +277,7 @@ describe("CloudflareRuntimeProvider", () => {
       (await Array.fromAsync(provider.events(process, "v2.0.0.0"))).map(({ data }) => data),
     ).toEqual(["frame\n"])
     expect(cursors).toEqual(["v2.0.0.0", "v2.0.0.0", "v2.0.0.0"])
+    expect(new Set(requestIds).size).toBe(1)
   })
 })
 

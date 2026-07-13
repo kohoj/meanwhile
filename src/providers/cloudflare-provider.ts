@@ -46,7 +46,7 @@ const MAX_FILE_RESPONSE_BYTES = 64 * 1024 * 1024
 const MAX_FILE_ENCODED_BYTES = 8 * 1024 * 1024
 const MAX_WRITE_ENCODED_BYTES = 16 * 1024 * 1024
 const MAX_FILES_PER_WRITE = 32
-const DEFAULT_EVENT_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1_000, 2_000])
+const DEFAULT_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1_000, 2_000])
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -62,7 +62,7 @@ export interface CloudflareRuntimeProviderOptions {
   readonly requestTimeoutMs?: number
   readonly eventPollIntervalMs?: number
   readonly eventPageCharacters?: number
-  readonly eventRetryDelaysMs?: readonly number[]
+  readonly retryDelaysMs?: readonly number[]
   readonly waitRequestMs?: number
   readonly runtimeImageReference?: string
   readonly runtimeImageDigest?: string
@@ -92,7 +92,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
   readonly #requestTimeoutMs: number
   readonly #eventPollIntervalMs: number
   readonly #eventPageCharacters: number
-  readonly #eventRetryDelaysMs: readonly number[]
+  readonly #retryDelaysMs: readonly number[]
   readonly #waitRequestMs: number
 
   constructor(options: CloudflareRuntimeProviderOptions) {
@@ -136,10 +136,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     if (this.#eventPageCharacters > 262_144) {
       throw new TypeError("eventPageCharacters must not exceed the bridge limit")
     }
-    this.#eventRetryDelaysMs = retryDelays(
-      options.eventRetryDelaysMs ?? DEFAULT_EVENT_RETRY_DELAYS_MS,
-      "eventRetryDelaysMs",
-    )
+    this.#retryDelaysMs = retryDelays(options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS)
     this.#waitRequestMs = positiveInteger(options.waitRequestMs ?? 20_000, "waitRequestMs")
     if (this.#waitRequestMs > 25_000) {
       throw new TypeError("waitRequestMs must not exceed the bridge limit")
@@ -308,17 +305,13 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
         cursor: position,
         limitChars: String(this.#eventPageCharacters),
       })
-      const response = await this.#retryEventRead(
-        () =>
-          this.#validatedJsonRequest(
-            "events",
-            "GET",
-            `${this.#processPath(identity)}/events?${query}`,
-            undefined,
-            processEventsResponseSchema,
-            undefined,
-            signal,
-          ),
+      const response = await this.#validatedJsonRequest(
+        "events",
+        "GET",
+        `${this.#processPath(identity)}/events?${query}`,
+        undefined,
+        processEventsResponseSchema,
+        undefined,
         signal,
       )
       position = response.nextCursor
@@ -339,19 +332,15 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       if (terminal) return
       if (response.events.length > 0) continue
 
-      const snapshot = await this.#retryEventRead(
-        () =>
-          this.#snapshotRequest(
-            "events",
-            "GET",
-            this.#processPath(identity),
-            undefined,
-            "process",
-            processSnapshotSchema,
-            true,
-            undefined,
-            signal,
-          ),
+      const snapshot = await this.#snapshotRequest(
+        "events",
+        "GET",
+        this.#processPath(identity),
+        undefined,
+        "process",
+        processSnapshotSchema,
+        true,
+        undefined,
         signal,
       )
       if (snapshot === null || (snapshot.status !== "starting" && snapshot.status !== "running")) {
@@ -587,23 +576,6 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     }
   }
 
-  async #retryEventRead<Output>(
-    read: () => Promise<Output>,
-    signal?: AbortSignal,
-  ): Promise<Output> {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        return await read()
-      } catch (error) {
-        const delay = this.#eventRetryDelaysMs[attempt]
-        if (!(error instanceof RuntimeProviderError) || !error.retryable || delay === undefined) {
-          throw error
-        }
-        await abortableDelay(delay, signal)
-      }
-    }
-  }
-
   async #snapshotRequest<Output>(
     operation: RuntimeProviderOperation,
     method: string,
@@ -691,13 +663,46 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     timeoutMs = this.#requestTimeoutMs,
     signal?: AbortSignal,
   ): Promise<Response | null> {
+    const requestId = randomUuid()
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.#requestOnce(
+          operation,
+          method,
+          path,
+          body,
+          allowNotFound,
+          timeoutMs,
+          requestId,
+          signal,
+        )
+      } catch (error) {
+        const delay = this.#retryDelaysMs[attempt]
+        if (!(error instanceof RuntimeProviderError) || !error.retryable || delay === undefined) {
+          throw error
+        }
+        await abortableDelay(delay, signal)
+      }
+    }
+  }
+
+  async #requestOnce(
+    operation: RuntimeProviderOperation,
+    method: string,
+    path: string,
+    body: unknown,
+    allowNotFound: boolean,
+    timeoutMs: number,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<Response | null> {
     throwIfAborted(signal)
     const url = new URL(path, this.#bridgeUrl)
     const headers = new Headers({
       accept: "application/json",
       authorization: `Bearer ${this.#bridgeToken}`,
       "x-meanwhile-protocol-version": String(BRIDGE_PROTOCOL_VERSION),
-      "x-request-id": randomUuid(),
+      "x-request-id": requestId,
     })
     if (body !== undefined) headers.set("content-type", "application/json")
 
@@ -925,9 +930,11 @@ function positiveInteger(value: number, name: string): number {
   return value
 }
 
-function retryDelays(values: readonly number[], name: string): readonly number[] {
-  if (values.length > 8) throw new TypeError(`${name} supports at most eight delays`)
-  return Object.freeze(values.map((value, index) => positiveInteger(value, `${name}[${index}]`)))
+function retryDelays(values: readonly number[]): readonly number[] {
+  if (values.length > 8) throw new TypeError("retryDelaysMs supports at most eight delays")
+  return Object.freeze(
+    values.map((value, index) => positiveInteger(value, `retryDelaysMs[${index}]`)),
+  )
 }
 
 async function readBoundedResponse(
