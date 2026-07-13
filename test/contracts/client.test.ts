@@ -1,6 +1,17 @@
 import { describe, expect, test } from "bun:test"
 import { Meanwhile, MeanwhileError } from "../../src/client"
-import { API_DEPLOYMENT_ID, API_RUN_ID, apiDeployment, apiRun, apiRunLog } from "../fixtures/api"
+import {
+  API_DEPLOYMENT_ID,
+  API_RUN_ID,
+  API_SESSION_ID,
+  API_TURN_ID,
+  apiDeployment,
+  apiRun,
+  apiRunEvent,
+  apiRunLog,
+  apiSessionEvent,
+  apiTurn,
+} from "../fixtures/api"
 
 describe("Meanwhile client contract", () => {
   test("creates a typed run with authentication, idempotency, validation, and response evidence", async () => {
@@ -103,6 +114,20 @@ describe("Meanwhile client contract", () => {
     expect(delays).toEqual([100])
   })
 
+  test("follows the durable run timeline through the same replay-safe transport", async () => {
+    const event = apiRunEvent(1)
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async () =>
+        eventStream(
+          `event: event\nid: 1\ndata: ${JSON.stringify(event)}\n\nevent: end\ndata: {}\n\n`,
+        ),
+    })
+
+    expect(await Array.fromAsync(client.runs.followEvents(API_RUN_ID))).toEqual([event])
+  })
+
   test("promotes immutable output through the deployment namespace", async () => {
     let requestBody: unknown
     const client = new Meanwhile({
@@ -128,6 +153,60 @@ describe("Meanwhile client contract", () => {
       config: {},
       secretRefs: {},
     })
+  })
+
+  test("sends a natural-language session turn and waits through the typed namespace", async () => {
+    let requestBody: unknown
+    const requestIdempotency: (string | null)[] = []
+    const statuses = [apiTurn("queued"), apiTurn("succeeded")]
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async (input, init) => {
+        const path = new URL(String(input)).pathname
+        if (init?.method === "POST") {
+          requestBody = JSON.parse(String(init.body)) as unknown
+          requestIdempotency.push(new Headers(init.headers).get("Idempotency-Key"))
+          return Response.json({ turn: apiTurn() }, { status: 201 })
+        }
+        expect(path).toBe(`/sessions/${API_SESSION_ID}/turns`)
+        return Response.json({ items: [statuses.shift() ?? apiTurn("succeeded")] })
+      },
+      wait: async () => {},
+    })
+
+    const created = await client.sessions.send(API_SESSION_ID, "inspect the failure", {
+      conflictPolicy: "enqueue",
+      timeoutMs: 60_000,
+      idempotencyKey: "turn-once",
+    })
+    const terminal = await client.sessions.waitForTurn(API_SESSION_ID, created.id, {
+      timeoutMs: 1_000,
+      pollIntervalMs: 1,
+    })
+
+    expect(requestBody).toEqual({
+      prompt: "inspect the failure",
+      conflictPolicy: "enqueue",
+      timeoutMs: 60_000,
+    })
+    expect(requestIdempotency).toEqual(["turn-once"])
+    expect(created.id).toBe(API_TURN_ID)
+    expect(terminal.status).toBe("succeeded")
+  })
+
+  test("follows the durable cross-turn session stream from its cursor", async () => {
+    const event = apiSessionEvent(1)
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async () =>
+        eventStream(
+          `event: event\nid: 1\ndata: ${JSON.stringify(event)}\n\nevent: end\ndata: {}\n\n`,
+        ),
+    })
+
+    expect(await Array.fromAsync(client.sessions.followEvents(API_SESSION_ID))).toEqual([event])
   })
 
   test("preserves structured failures and never includes credentials in diagnostics", async () => {

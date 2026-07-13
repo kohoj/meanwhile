@@ -15,6 +15,7 @@
   "exports": {
     ".": "./src/client.ts",
     "./contracts": "./src/api/contracts.ts",
+    "./timeline": "./src/timeline.ts",
     "./workspace": "./src/workspace.ts"
   },
   "bin": {

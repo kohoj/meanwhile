@@ -7,6 +7,7 @@ import type {
   ProcessEvent,
   ProcessExit,
   ProcessHandle,
+  ProcessInput,
   ProcessSignal,
   ProcessSpec,
   ProcessState,
@@ -120,6 +121,12 @@ export function observeRuntimeProvider(
       observe("signal", () => provider.signal(process, signal)),
     wait: (process: ProcessHandle): Promise<ProcessExit> =>
       observe("wait", () => provider.wait(process)),
+    ...(provider.send === undefined
+      ? {}
+      : {
+          send: (process: ProcessHandle, input: ProcessInput): Promise<void> =>
+            observe("send", () => provider.send?.(process, input) as Promise<void>),
+        }),
     writeFiles: (runtime: RuntimeHandle, files: readonly RuntimeFile[]): Promise<void> =>
       observe("writeFiles", () => provider.writeFiles(runtime, files)),
     listFiles: (

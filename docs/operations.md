@@ -1,6 +1,6 @@
 # Operations
 
-This document defines the implemented operating contract for Meanwhile's single-control-plane topology. The repository is pre-release; run the referenced checks on the exact revision before operating it. [AGENTS.md](../AGENTS.md) remains the source of architectural invariants.
+This document defines the implemented operating contract for Meanwhile's single-control-plane topology. Run the referenced checks on the exact revision before operating it. [AGENTS.md](../AGENTS.md) remains the source of architectural invariants.
 
 ## Supported topology
 
@@ -58,7 +58,7 @@ Properties:
 - SQLite contains relational state and artifact references, never artifact bodies or resolved secret values.
 - Artifact objects are immutable and content-addressed.
 - Runtime working directories are disposable even when located beneath the data root.
-- Audit, run logs, status history, deployments, and cleanup state survive service restart.
+- Audit, run/session event journals, run logs, status history, deployments, and both runtime cleanup lifecycles survive service restart.
 - Preview output is derived from immutable artifacts; it is not a second source of truth.
 - An adjacent lease directory keyed by physical data-root identity is the single-writer authority for both the service and maintenance commands; a symlink alias cannot acquire a second lease.
 
@@ -110,8 +110,9 @@ After an unclean restart:
 - queued runs remain eligible;
 - terminal runs remain immutable;
 - provisioning/running runs are inspected and replayed from persisted cursors;
-- active sessions reconnect where supported;
-- exited sessions finalize from accepted runner evidence and process facts;
+- active one-shot runner sessions reconnect where supported;
+- durable agent sessions reconnect to the same process and ACP identity where provider input/replay/recovery capabilities permit;
+- exited one-shot and durable sessions finalize from accepted runner evidence and process facts; an unrecoverable durable session becomes `continuity_lost`;
 - missing or irrecoverable compute becomes `RUNTIME_LOST` after bounded reconciliation;
 - pending deployments and runtime cleanup resume from durable state.
 
@@ -136,17 +137,17 @@ The existing public run status remains authoritative while reconciliation is unc
 
 Meanwhile emits three distinct evidence products:
 
-1. durable owner-visible run logs;
+1. durable owner-visible run logs plus run/session event journals;
 2. operational JSON logs, manual OpenTelemetry spans, metrics, and diagnostics;
 3. append-only audit records.
 
 Never route all three through one logging sink and call that observability.
 
-Operational log records use a stable event name, level, timestamp, and applicable request/trace/owner/run/runtime/process/deployment/provider identifiers. Prompts, process output, repository credentials, file contents, resolved secrets, raw provider bodies, and signed URLs are forbidden fields. Process and workspace output is redacted and persisted only as owner-visible sequenced run logs; operational records carry byte counts, stream identity, cursors, and stable codes instead.
+Operational log records use a stable event name, level, timestamp, and applicable request/trace/owner/run/session/turn/runtime/process/deployment/provider identifiers. Prompts, process output, repository credentials, file contents, resolved secrets, raw provider bodies, and signed URLs are forbidden fields. Process and workspace output is redacted and persisted only as owner-visible product evidence; operational records carry byte counts, stream identity, cursors, and stable codes instead.
 
-Meanwhile passes trace parentage explicitly between operation scopes because it does not depend on Node async-context propagation under Bun. The restricted span facade enforces the attribute allowlist and outcome semantics; it never exposes a raw OpenTelemetry span. Observable queue, active-run/runtime, cleanup-backlog, and deployment gauges are read from durable SQLite state, so a control-plane restart cannot produce negative in-memory deltas.
+Meanwhile passes trace parentage explicitly between operation scopes because it does not depend on Node async-context propagation under Bun. The restricted span facade enforces the attribute allowlist and outcome semantics; it never exposes a raw OpenTelemetry span. Observable run/session queues, active-run/session/runtime state, both cleanup backlogs, and deployment gauges are read from durable SQLite state, so a control-plane restart cannot produce negative in-memory deltas.
 
-Metric labels are bounded: provider, agent, operation, status, and stable error code are reasonable; owner IDs, run IDs, URLs, messages, and prompts are not.
+Metric labels are bounded: provider, agent, operation, status, and stable error code are reasonable; owner, run, session, turn, and process IDs, URLs, messages, and prompts are not.
 
 OTLP export is optional and must remain disabled until the pinned OTel base SDK and exporter pass `test/contracts/telemetry.test.ts` under Bun. An exporter outage is visible locally and in health diagnostics but cannot block state transactions or change a run result.
 
@@ -177,7 +178,7 @@ bun run cli -- data backup --output /backups/meanwhile-2026-07-14
 bun run cli -- data verify /backups/meanwhile-2026-07-14
 ```
 
-The adjacent data-root lease rejects the command if a control plane or another maintenance process is active. Backup also rejects queued, provisioning, running, or in-progress deployment/cleanup work. It serializes SQLite into a standalone non-WAL snapshot, walks the referenced immutable object graph, copies previews, hashes every file, and atomically publishes the manifest. Physical paths are canonicalized, so the output must be outside the live root even through symlink aliases.
+The adjacent data-root lease rejects the command if a control plane or another maintenance process is active. Backup also rejects queued/provisioning/running runs, operational agent sessions, or in-progress deployment/cleanup work. It serializes SQLite into a standalone non-WAL snapshot, walks the referenced immutable object graph, copies previews, hashes every file, and atomically publishes the manifest. Physical paths are canonicalized, so the output must be outside the live root even through symlink aliases.
 
 Restore only into an absent or empty configured data root:
 
@@ -208,14 +209,16 @@ Monitor:
 - cleanup backlog and oldest eligible age;
 - attempts and explicit bounded backoff;
 - destroy latency and failure count by provider/error code;
-- active runtimes versus active runs;
-- terminal runs that still own an uncleared runtime.
+- active runtimes versus active runs and agent sessions;
+- terminal runs or closed sessions that still own an uncleared runtime.
 
-Never manually delete database runtime rows to silence the backlog. Diagnose provider reachability and handle validity, destroy the resource through the adapter, and preserve audit evidence. Cleanup never targets an authoritative `running` run.
+Never manually delete database runtime rows to silence the backlog. Diagnose provider reachability and handle validity, destroy the resource through the adapter, and preserve audit evidence. Cleanup never targets an authoritative `running` run or operational agent session.
 
 ## Cloudflare bridge operations
 
 The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and real-agent adapter are pinned as one compatibility unit. The custom image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the proven Claude ACP toolchain requirement.
+
+The pinned SDK has no ongoing process-stdin primitive. Durable sessions therefore use a bridge-owned sequential mailbox: Durable Object state binds each `(process, sequence)` to one command fingerprint before sandbox publication. Treat mailbox support as a versioned provider capability, not generic shell input or remote ACP.
 
 Target workflow:
 
@@ -322,9 +325,10 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 - [ ] Every configured ACP agent is pinned and catalog-validated.
 - [ ] Local provider is disabled for untrusted tenants.
 - [ ] Remote provider shared contract and live lifecycle tests pass.
+- [ ] Any provider admitting durable sessions has a live proof for ordered input, replay, reconnect, interrupt, close, and cleanup on the exact bridge/image revision.
 - [ ] The release proof passes on the exact revision, including telemetry export and backup restore; remote release requires complete configured runner/image provenance.
 - [ ] Bridge credentials are scoped, stored outside images, and rotatable.
-- [ ] Cleanup backlog, queue latency, run outcomes, and storage capacity are monitored.
+- [ ] Both cleanup backlogs, run/session queue latency, run/turn outcomes, continuity loss, and storage capacity are monitored.
 - [ ] OTLP compatibility is proven under Bun before export is enabled.
 - [ ] Preview origin, headers, routing, and public exposure are reviewed.
 - [ ] Threat model and security reporting route are current.

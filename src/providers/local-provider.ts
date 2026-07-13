@@ -18,6 +18,7 @@ import {
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { SERVICE_VERSION } from "../version"
 import {
+  assertProcessInput,
   assertRuntimeId,
   type CreateRuntimeInput,
   type EventCursor,
@@ -25,6 +26,7 @@ import {
   type ListRuntimeFilesOptions,
   type ProcessExit,
   type ProcessHandle,
+  type ProcessInput,
   type ProcessSignal,
   type ProcessSpec,
   type ProcessState,
@@ -115,6 +117,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     isolation: "none" as const,
     processRecovery: globalThis.process.platform !== "win32",
     eventReplay: true,
+    processInput: true,
     portExposure: true,
     processSignals: Object.freeze(["SIGINT", "SIGTERM", "SIGKILL"] as const),
   })
@@ -295,6 +298,9 @@ export class LocalRuntimeProvider implements RuntimeProvider {
       return processHandle(this.name, encodeProcessIdentity(identity))
     }
     await mkdir(directory, { recursive: false, mode: 0o700 })
+    if (spec.input === "mailbox") {
+      await mkdir(this.#inputDirectory(identity), { mode: 0o700 })
+    }
     const stdoutPath = this.#outputPath(identity, "stdout")
     const stderrPath = this.#outputPath(identity, "stderr")
     let stdoutDescriptor: number | null = null
@@ -322,6 +328,9 @@ export class LocalRuntimeProvider implements RuntimeProvider {
           ...spec.env,
           HOME: this.#homeDirectory(runtimeId),
           TMPDIR: this.#temporaryDirectory(runtimeId),
+          ...(spec.input === "mailbox"
+            ? { MEANWHILE_PROCESS_INBOX: this.#inputDirectory(identity) }
+            : {}),
         },
         stdin: spec.initialStdin === undefined ? "ignore" : "pipe",
         stdout: stdoutDescriptor,
@@ -560,6 +569,55 @@ export class LocalRuntimeProvider implements RuntimeProvider {
       }
       if (state.status === "exited" && state.exit !== undefined) return state.exit
       await Bun.sleep(this.#pollIntervalMs)
+    }
+  }
+
+  async send(process: ProcessHandle, input: ProcessInput): Promise<void> {
+    const identity = this.#processIdentity(process, "send")
+    const metadata = await this.#requireProcess(identity, "send")
+    if (
+      (await this.#readProcessExit(identity, "send", true)) !== null ||
+      !this.#isLive(identity, metadata)
+    ) {
+      throw this.#error("send", "PROCESS_NOT_RUNNING", "Local process is not running")
+    }
+    try {
+      assertProcessInput(input)
+    } catch (cause) {
+      throw this.#error("send", "INVALID_PROCESS_INPUT", "Process input is invalid", cause)
+    }
+    const directory = this.#inputDirectory(identity)
+    if ((await safeLstat(directory))?.isDirectory() !== true) {
+      throw this.#error("send", "PROCESS_INPUT_UNAVAILABLE", "Process does not accept input")
+    }
+    const data = `${JSON.stringify(input)}\n`
+    const destination = join(directory, inputFileName(input.sequence))
+    const temporary = join(directory, `.${randomUUID()}.tmp`)
+    try {
+      await writeFile(temporary, data, { flag: "wx", mode: 0o600 })
+      try {
+        await link(temporary, destination)
+      } catch (cause) {
+        if (!isErrno(cause, "EEXIST")) throw cause
+        if ((await Bun.file(destination).text()) !== data) {
+          throw this.#error(
+            "send",
+            "PROCESS_INPUT_CONFLICT",
+            "Process input sequence is already bound to different data",
+          )
+        }
+      }
+    } catch (cause) {
+      if (cause instanceof RuntimeProviderError) throw cause
+      throw this.#error(
+        "send",
+        "PROCESS_INPUT_FAILED",
+        "Process input could not be delivered",
+        cause,
+        true,
+      )
+    } finally {
+      await unlink(temporary).catch(() => undefined)
     }
   }
 
@@ -957,7 +1015,10 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     const state = await this.inspectProcess(handle)
     if (state.status !== "running") return
     await this.signal(handle, "SIGTERM")
-    if (await this.#waitUntilExited(handle, this.#stopGraceMs)) return
+    if (await this.#waitUntilExited(handle, this.#stopGraceMs)) {
+      await this.wait(handle)
+      return
+    }
     await this.signal(handle, "SIGKILL")
     if (!(await this.#waitUntilExited(handle, Math.max(1_000, this.#pollIntervalMs * 4)))) {
       throw this.#error(
@@ -966,6 +1027,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         "Local process did not stop after SIGKILL",
       )
     }
+    await this.wait(handle)
   }
 
   async #waitUntilExited(handle: ProcessHandle, timeoutMs: number): Promise<boolean> {
@@ -1022,6 +1084,10 @@ export class LocalRuntimeProvider implements RuntimeProvider {
 
   #processDirectory(identity: ProcessIdentity): string {
     return join(this.#processesDirectory(identity.runtimeId), identity.processId)
+  }
+
+  #inputDirectory(identity: ProcessIdentity): string {
+    return join(this.#processDirectory(identity), "input")
   }
 
   #processMetadataPath(identity: ProcessIdentity): string {
@@ -1104,12 +1170,22 @@ function validateProcessSpec(
   if (spec.initialStdin?.includes("\0")) {
     throw error("INVALID_PROCESS_SPEC", "Initial process input must not contain NUL bytes")
   }
+  if (spec.input !== undefined && spec.input !== "closed" && spec.input !== "mailbox") {
+    throw error("INVALID_PROCESS_SPEC", "Process input mode is invalid")
+  }
+  if (Object.hasOwn(spec.env ?? {}, "MEANWHILE_PROCESS_INBOX")) {
+    throw error("INVALID_PROCESS_SPEC", "Process environment contains a reserved name")
+  }
   if (
     spec.timeoutMs !== undefined &&
     (!Number.isSafeInteger(spec.timeoutMs) || spec.timeoutMs <= 0)
   ) {
     throw error("INVALID_PROCESS_SPEC", "Process timeout must be a positive safe integer")
   }
+}
+
+function inputFileName(sequence: number): string {
+  return `${String(sequence).padStart(16, "0")}.json`
 }
 
 function validateMode(

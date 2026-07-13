@@ -50,6 +50,7 @@ class DestroyProvider implements RuntimeProvider {
     isolation: "container",
     processRecovery: true,
     eventReplay: true,
+    processInput: false,
     portExposure: false,
     processSignals: ["SIGINT", "SIGTERM", "SIGKILL"] as const,
   } as const

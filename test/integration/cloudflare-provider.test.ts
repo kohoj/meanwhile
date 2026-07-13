@@ -23,6 +23,7 @@ describe("CloudflareRuntimeProvider", () => {
       isolation: "container",
       processRecovery: true,
       eventReplay: true,
+      processInput: true,
       portExposure: true,
       processSignals: ["SIGKILL"],
     })
@@ -57,6 +58,7 @@ describe("CloudflareRuntimeProvider", () => {
       argv: ["meanwhile-runner"],
       cwd: relativePath("."),
       initialStdin: '{"version":1}\n',
+      input: "mailbox",
       timeoutMs: 1_000,
       terminationGraceMs: 500,
     })
@@ -65,10 +67,23 @@ describe("CloudflareRuntimeProvider", () => {
       argv: ["meanwhile-runner"],
       cwd: relativePath("."),
       initialStdin: '{"version":1}\n',
+      input: "mailbox",
       timeoutMs: 1_000,
       terminationGraceMs: 500,
     })
     expect(duplicateProcess).toEqual(process)
+    await provider.send?.(process, {
+      sequence: 1,
+      id: "70c78f7e-a915-4a4b-a9cb-e805f534f606",
+      data: '{"type":"turn.start"}',
+    })
+    expect(bridge.processInputs).toEqual([
+      {
+        sequence: 1,
+        id: "70c78f7e-a915-4a4b-a9cb-e805f534f606",
+        data: '{"type":"turn.start"}',
+      },
+    ])
     await expect(provider.signal(process, "SIGTERM")).rejects.toMatchObject({
       code: "PROCESS_SIGNAL_UNSUPPORTED",
     })
@@ -296,6 +311,7 @@ class BridgeStub {
   readonly runtimeOperationIds: string[] = []
   readonly processOperationIds: string[] = []
   readonly fileModes = new Map<string, number>()
+  readonly processInputs: unknown[] = []
   readonly #token: string
   readonly #files = new Map<string, Uint8Array>()
   runtimeId: string | null = null
@@ -354,6 +370,10 @@ class BridgeStub {
       return json({ process: this.#processSnapshot("running") }, 201)
     }
     if (this.processId !== null && path.includes(`/processes/${this.processId}`)) {
+      if (request.method === "POST" && path.endsWith("/input")) {
+        this.processInputs.push(await request.json())
+        return json({ accepted: true })
+      }
       if (request.method === "GET" && path.endsWith("/events")) {
         return json({
           events: [

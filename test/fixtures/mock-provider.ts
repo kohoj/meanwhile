@@ -63,6 +63,7 @@ export class MockRuntimeProvider implements RuntimeProvider {
     isolation: "none" as const,
     processRecovery: true,
     eventReplay: true,
+    processInput: false,
     portExposure: true,
     processSignals: Object.freeze(["SIGINT", "SIGTERM", "SIGKILL"] as const),
   })

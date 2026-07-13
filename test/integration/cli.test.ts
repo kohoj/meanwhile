@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { issueApiKey } from "../../src/auth"
 import { type CliOptions, runCli } from "../../src/cli"
-import { API_RUN_ID, apiRun, apiRunLog } from "../fixtures/api"
+import { API_RUN_ID, API_SESSION_ID, apiRun, apiRunLog, apiSession, apiTurn } from "../fixtures/api"
 
 const temporaryDirectories: string[] = []
 
@@ -91,6 +91,91 @@ describe("Meanwhile CLI", () => {
         error: { code: "INVALID_ARGUMENT", message: expect.stringContaining("symbolic links") },
       })
       expect(requestCount).toBe(1)
+    } finally {
+      await server.stop(true)
+    }
+  })
+
+  test("keeps durable session creation and turns on the same typed HTTP surface", async () => {
+    const root = await temporaryDirectory()
+    const workspace = join(root, "workspace")
+    await mkdir(workspace)
+    await Bun.write(join(workspace, "README.md"), "session\n")
+    const requests: Array<{ path: string; body: unknown; idempotency: string | null }> = []
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests.push({
+          path: new URL(request.url).pathname,
+          body: await request.json(),
+          idempotency: request.headers.get("Idempotency-Key"),
+        })
+        return new URL(request.url).pathname.endsWith("/turns")
+          ? Response.json({ turn: apiTurn() }, { status: 201 })
+          : Response.json({ session: apiSession("queued") }, { status: 201 })
+      },
+    })
+    const key = await issueApiKey()
+    const environment = { MEANWHILE_URL: server.url.origin, MEANWHILE_API_KEY: key.key }
+    try {
+      const created = capture()
+      expect(
+        await runCli(
+          [
+            "sessions",
+            "create",
+            "--files",
+            workspace,
+            "--agent",
+            "demo",
+            "--idle-timeout",
+            "10m",
+            "--idempotency-key",
+            "session-once",
+          ],
+          created.options(environment),
+        ),
+      ).toBe(0)
+      expect(JSON.parse(created.stdout)).toEqual({ session: apiSession("queued") })
+
+      const sent = capture()
+      expect(
+        await runCli(
+          [
+            "sessions",
+            "send",
+            API_SESSION_ID,
+            "--conflict",
+            "interrupt_and_send",
+            "--timeout",
+            "2m",
+            "--idempotency-key",
+            "turn-once",
+            "--",
+            "change",
+            "direction",
+          ],
+          sent.options(environment),
+        ),
+      ).toBe(0)
+      expect(JSON.parse(sent.stdout)).toEqual({ turn: apiTurn() })
+      expect(requests).toMatchObject([
+        {
+          path: "/sessions",
+          idempotency: "session-once",
+          body: { agentType: "demo", idleTimeoutMs: 600_000, workspace: { type: "files" } },
+        },
+        {
+          path: `/sessions/${API_SESSION_ID}/turns`,
+          idempotency: "turn-once",
+          body: {
+            prompt: "change direction",
+            conflictPolicy: "interrupt_and_send",
+            timeoutMs: 120_000,
+          },
+        },
+      ])
     } finally {
       await server.stop(true)
     }

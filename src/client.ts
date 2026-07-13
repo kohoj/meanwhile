@@ -1,5 +1,9 @@
 import type { z } from "zod"
 import {
+  type AgentSession,
+  type AgentSessionPage,
+  AgentSessionPageSchema,
+  AgentSessionResponseSchema,
   type ApiKey,
   ApiKeyPageSchema,
   ApiKeyResponseSchema,
@@ -16,6 +20,10 @@ import {
   CreatedApiKeyResponseSchema,
   type CreateRunRequest,
   CreateRunRequestSchema,
+  type CreateSessionRequest,
+  CreateSessionRequestSchema,
+  type CreateSessionTurnRequest,
+  CreateSessionTurnRequestSchema,
   type Deployment,
   type DeploymentLogPage,
   DeploymentLogPageSchema,
@@ -28,6 +36,10 @@ import {
   ProviderDiagnosticsSchema,
   ProviderTestRequestSchema,
   type Run,
+  type RunEvent,
+  type RunEventPage,
+  RunEventPageSchema,
+  RunEventSchema,
   type RunLog,
   type RunLogPage,
   RunLogPageSchema,
@@ -35,6 +47,14 @@ import {
   type RunPage,
   RunPageSchema,
   RunResponseSchema,
+  type SessionEvent,
+  type SessionEventPage,
+  SessionEventPageSchema,
+  SessionEventSchema,
+  type SessionTurn,
+  type SessionTurnPage,
+  SessionTurnPageSchema,
+  SessionTurnResponseSchema,
 } from "./api/contracts"
 
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -47,6 +67,7 @@ const MIN_SSE_RETRY_MS = 100
 const MAX_SSE_RETRY_MS = 10_000
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"])
 const TERMINAL_DEPLOYMENT_STATUSES = new Set(["succeeded", "failed"])
+const TERMINAL_TURN_STATUSES = new Set(["succeeded", "failed", "interrupted", "timed_out"])
 
 export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 export type Wait = (milliseconds: number, signal: AbortSignal) => Promise<void>
@@ -92,10 +113,16 @@ export interface ListLogsOptions extends RequestOptions {
 }
 
 export interface FollowLogsOptions extends ListLogsOptions {}
+export interface FollowEventsOptions extends ListLogsOptions {}
 
 export interface WaitOptions extends RequestOptions {
   readonly timeoutMs?: number
   readonly pollIntervalMs?: number
+}
+
+export interface SendSessionTurnOptions extends CreateRunOptions {
+  readonly timeoutMs?: number
+  readonly conflictPolicy?: "reject" | "enqueue" | "interrupt_and_send"
 }
 
 export interface RunsClient {
@@ -105,7 +132,30 @@ export interface RunsClient {
   cancel(id: string, options?: RequestOptions): Promise<Run>
   logs(id: string, options?: ListLogsOptions): Promise<RunLogPage>
   followLogs(id: string, options?: FollowLogsOptions): AsyncIterable<RunLog>
+  events(id: string, options?: ListLogsOptions): Promise<RunEventPage>
+  followEvents(id: string, options?: FollowEventsOptions): AsyncIterable<RunEvent>
   wait(id: string, options?: WaitOptions): Promise<Run>
+}
+
+export interface SessionsClient {
+  create(input: CreateSessionRequest, options?: CreateRunOptions): Promise<AgentSession>
+  list(options?: {
+    readonly limit?: number
+    readonly signal?: AbortSignal
+  }): Promise<AgentSessionPage>
+  get(id: string, options?: RequestOptions): Promise<AgentSession>
+  send(id: string, prompt: string, options?: SendSessionTurnOptions): Promise<SessionTurn>
+  send(
+    id: string,
+    input: CreateSessionTurnRequest,
+    options?: CreateRunOptions,
+  ): Promise<SessionTurn>
+  turns(id: string, options?: RequestOptions): Promise<SessionTurnPage>
+  waitForTurn(id: string, turnId: string, options?: WaitOptions): Promise<SessionTurn>
+  events(id: string, options?: ListLogsOptions): Promise<SessionEventPage>
+  followEvents(id: string, options?: FollowEventsOptions): AsyncIterable<SessionEvent>
+  interrupt(id: string, options?: RequestOptions): Promise<AgentSession>
+  close(id: string, options?: RequestOptions): Promise<AgentSession>
 }
 
 export interface ArtifactDownload {
@@ -135,7 +185,15 @@ export interface DeploymentsClient {
 export interface AuditClient {
   list(
     options?: ListCreatedOptions & {
-      readonly resourceType?: "owner" | "api_key" | "run" | "runtime" | "artifact" | "deployment"
+      readonly resourceType?:
+        | "owner"
+        | "api_key"
+        | "run"
+        | "session"
+        | "turn"
+        | "runtime"
+        | "artifact"
+        | "deployment"
       readonly resourceId?: string
       readonly action?: string
     },
@@ -183,6 +241,7 @@ export class MeanwhileError extends Error {
 /** A Web-standard client for the complete public Meanwhile control-plane contract. */
 export class Meanwhile {
   readonly runs: RunsClient
+  readonly sessions: SessionsClient
   readonly artifacts: ArtifactsClient
   readonly deployments: DeploymentsClient
   readonly providers: ProvidersClient
@@ -192,6 +251,7 @@ export class Meanwhile {
   constructor(options: MeanwhileOptions) {
     const transport = new Transport(options)
     this.runs = new Runs(transport)
+    this.sessions = new Sessions(transport)
     this.artifacts = new Artifacts(transport)
     this.deployments = new Deployments(transport)
     this.providers = new Providers(transport)
@@ -252,76 +312,35 @@ class Runs implements RunsClient {
   }
 
   async *followLogs(id: string, options: FollowLogsOptions = {}): AsyncIterable<RunLog> {
-    const signal = options.signal ?? new AbortController().signal
-    const after = boundedInteger(options.after ?? 0, 0, Number.MAX_SAFE_INTEGER, "after")
-    const limit = boundedInteger(options.limit ?? 100, 1, 1_000, "limit")
-    const query = new URLSearchParams({
-      after: String(after),
-      limit: String(limit),
-      follow: "true",
-    })
-    const path = `${runPath(id)}/logs?${query}`
-    let cursor = after
-    let retryMilliseconds = DEFAULT_SSE_RETRY_MS
-    let consecutiveEmptyConnections = 0
+    yield* followEventStream(
+      this.transport,
+      id,
+      "logs",
+      "log",
+      RunLogSchema,
+      "Invalid run log event",
+      options,
+    )
+  }
 
-    while (!signal.aborted) {
-      let response: Response
-      try {
-        response = await this.transport.response(path, {
-          headers: new Headers({ Accept: "text/event-stream", "Last-Event-ID": String(cursor) }),
-          signal,
-          timeout: false,
-        })
-      } catch (error) {
-        if (signal.aborted) return
-        throw error
-      }
-      if (!isEventStreamResponse(response)) {
-        await response.body?.cancel().catch(() => undefined)
-        throw protocolError("Log stream has an invalid content type", {
-          path,
-          status: response.status,
-        })
-      }
-      if (response.body === null) {
-        throw protocolError("Log stream has no body", { path, status: response.status })
-      }
+  events(id: string, options: ListLogsOptions = {}): Promise<RunEventPage> {
+    return this.transport.json(
+      eventPath(id, options),
+      RunEventPageSchema,
+      signalInput(options.signal),
+    )
+  }
 
-      let madeProgress = false
-      for await (const event of sseEvents(response.body, signal)) {
-        if (event.retryMilliseconds !== undefined) {
-          retryMilliseconds = boundedSseRetry(event.retryMilliseconds)
-        }
-        if (event.type === "end") return
-        if (event.type === "error") throw errorFromEnvelope(parseJson(event.data), response.status)
-        if (event.type !== "log") continue
-
-        const sequence = parseSseSequence(event.id)
-        const value = parseProtocol(RunLogSchema, parseJson(event.data), "Invalid run log event")
-        if (value.sequence !== sequence) {
-          throw protocolError("Log stream event identity is inconsistent")
-        }
-        if (sequence <= cursor) continue
-        if (sequence !== cursor + 1) {
-          throw protocolError("Log stream sequence is not contiguous", {
-            expected: cursor + 1,
-            received: sequence,
-          })
-        }
-        cursor = sequence
-        madeProgress = true
-        yield value
-      }
-      if (signal.aborted) return
-
-      consecutiveEmptyConnections = madeProgress ? 0 : consecutiveEmptyConnections + 1
-      const delay = Math.min(
-        retryMilliseconds * 2 ** Math.min(Math.max(consecutiveEmptyConnections - 1, 0), 10),
-        MAX_SSE_RETRY_MS,
-      )
-      await this.transport.delay(delay, signal)
-    }
+  async *followEvents(id: string, options: FollowEventsOptions = {}): AsyncIterable<RunEvent> {
+    yield* followEventStream(
+      this.transport,
+      id,
+      "events",
+      "event",
+      RunEventSchema,
+      "Invalid run event",
+      options,
+    )
   }
 
   wait(id: string, options: WaitOptions = {}): Promise<Run> {
@@ -333,6 +352,213 @@ class Runs implements RunsClient {
       this.transport,
       options,
     )
+  }
+}
+
+class Sessions implements SessionsClient {
+  constructor(private readonly transport: Transport) {}
+
+  async create(input: CreateSessionRequest, options: CreateRunOptions = {}): Promise<AgentSession> {
+    const body = parseInput(CreateSessionRequestSchema, input)
+    const headers = idempotencyHeaders(options.idempotencyKey)
+    const result = await this.transport.json("sessions", AgentSessionResponseSchema, {
+      method: "POST",
+      headers,
+      body,
+      ...signalInput(options.signal),
+    })
+    return result.session
+  }
+
+  list(
+    options: { readonly limit?: number; readonly signal?: AbortSignal } = {},
+  ): Promise<AgentSessionPage> {
+    const limit = boundedInteger(options.limit ?? 50, 1, 100, "limit")
+    return this.transport.json(
+      `sessions?${new URLSearchParams({ limit: String(limit) })}`,
+      AgentSessionPageSchema,
+      signalInput(options.signal),
+    )
+  }
+
+  async get(id: string, options: RequestOptions = {}): Promise<AgentSession> {
+    const result = await this.transport.json(
+      sessionPath(id),
+      AgentSessionResponseSchema,
+      signalInput(options.signal),
+    )
+    return result.session
+  }
+
+  send(id: string, prompt: string, options?: SendSessionTurnOptions): Promise<SessionTurn>
+  send(
+    id: string,
+    input: CreateSessionTurnRequest,
+    options?: CreateRunOptions,
+  ): Promise<SessionTurn>
+  async send(
+    id: string,
+    input: string | CreateSessionTurnRequest,
+    options: SendSessionTurnOptions = {},
+  ): Promise<SessionTurn> {
+    const body =
+      typeof input === "string"
+        ? {
+            prompt: input,
+            ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+            ...(options.conflictPolicy === undefined
+              ? {}
+              : { conflictPolicy: options.conflictPolicy }),
+          }
+        : input
+    const result = await this.transport.json(
+      `${sessionPath(id)}/turns`,
+      SessionTurnResponseSchema,
+      {
+        method: "POST",
+        headers: idempotencyHeaders(options.idempotencyKey),
+        body: parseInput(CreateSessionTurnRequestSchema, body),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.turn
+  }
+
+  turns(id: string, options: RequestOptions = {}): Promise<SessionTurnPage> {
+    return this.transport.json(
+      `${sessionPath(id)}/turns`,
+      SessionTurnPageSchema,
+      signalInput(options.signal),
+    )
+  }
+
+  async waitForTurn(id: string, turnId: string, options: WaitOptions = {}): Promise<SessionTurn> {
+    const validTurnId = validId(turnId)
+    const turn = await waitForTerminal(
+      "turn",
+      validTurnId,
+      async () =>
+        (await this.turns(id, signalInput(options.signal))).items.find(
+          (candidate) => candidate.id === validTurnId,
+        ) ?? null,
+      (candidate) => candidate !== null && TERMINAL_TURN_STATUSES.has(candidate.status),
+      this.transport,
+      options,
+    )
+    if (turn === null) throw protocolError("A terminal turn disappeared from its session")
+    return turn
+  }
+
+  events(id: string, options: ListLogsOptions = {}): Promise<SessionEventPage> {
+    return this.transport.json(
+      `${sessionPath(id)}/events?${cursorQuery(options)}`,
+      SessionEventPageSchema,
+      signalInput(options.signal),
+    )
+  }
+
+  async *followEvents(id: string, options: FollowEventsOptions = {}): AsyncIterable<SessionEvent> {
+    yield* followEventStream(
+      this.transport,
+      id,
+      "session-events",
+      "event",
+      SessionEventSchema,
+      "Invalid session event",
+      options,
+    )
+  }
+
+  async interrupt(id: string, options: RequestOptions = {}): Promise<AgentSession> {
+    const result = await this.transport.json(
+      `${sessionPath(id)}/interrupt`,
+      AgentSessionResponseSchema,
+      { method: "POST", ...signalInput(options.signal) },
+    )
+    return result.session
+  }
+
+  async close(id: string, options: RequestOptions = {}): Promise<AgentSession> {
+    const result = await this.transport.json(
+      `${sessionPath(id)}/close`,
+      AgentSessionResponseSchema,
+      { method: "POST", ...signalInput(options.signal) },
+    )
+    return result.session
+  }
+}
+
+async function* followEventStream<Value extends { readonly sequence: number }>(
+  transport: Transport,
+  id: string,
+  resource: "logs" | "events" | "session-events",
+  eventType: "log" | "event",
+  schema: z.ZodType<Value>,
+  invalidEventMessage: string,
+  options: FollowLogsOptions,
+): AsyncIterable<Value> {
+  const signal = options.signal ?? new AbortController().signal
+  const after = boundedInteger(options.after ?? 0, 0, Number.MAX_SAFE_INTEGER, "after")
+  const limit = boundedInteger(options.limit ?? 100, 1, 1_000, "limit")
+  const query = new URLSearchParams({ after: String(after), limit: String(limit), follow: "true" })
+  const path =
+    resource === "session-events"
+      ? `${sessionPath(id)}/events?${query}`
+      : `${runPath(id)}/${resource}?${query}`
+  let cursor = after
+  let retryMilliseconds = DEFAULT_SSE_RETRY_MS
+  let consecutiveEmptyConnections = 0
+
+  while (!signal.aborted) {
+    let response: Response
+    try {
+      response = await transport.response(path, {
+        headers: new Headers({ Accept: "text/event-stream", "Last-Event-ID": String(cursor) }),
+        signal,
+        timeout: false,
+      })
+    } catch (error) {
+      if (signal.aborted) return
+      throw error
+    }
+    if (!isEventStreamResponse(response)) {
+      await response.body?.cancel().catch(() => undefined)
+      throw protocolError("Event stream has an invalid content type", {
+        path,
+        status: response.status,
+      })
+    }
+    if (response.body === null)
+      throw protocolError("Event stream has no body", { path, status: response.status })
+
+    let madeProgress = false
+    for await (const event of sseEvents(response.body, signal)) {
+      if (event.retryMilliseconds !== undefined)
+        retryMilliseconds = boundedSseRetry(event.retryMilliseconds)
+      if (event.type === "end") return
+      if (event.type === "error") throw errorFromEnvelope(parseJson(event.data), response.status)
+      if (event.type !== eventType) continue
+      const sequence = parseSseSequence(event.id)
+      const value = parseProtocol(schema, parseJson(event.data), invalidEventMessage)
+      if (value.sequence !== sequence) throw protocolError("Event stream identity is inconsistent")
+      if (sequence <= cursor) continue
+      if (sequence !== cursor + 1) {
+        throw protocolError("Event stream sequence is not contiguous", {
+          expected: cursor + 1,
+          received: sequence,
+        })
+      }
+      cursor = sequence
+      madeProgress = true
+      yield value
+    }
+    if (signal.aborted) return
+    consecutiveEmptyConnections = madeProgress ? 0 : consecutiveEmptyConnections + 1
+    const delay = Math.min(
+      retryMilliseconds * 2 ** Math.min(Math.max(consecutiveEmptyConnections - 1, 0), 10),
+      MAX_SSE_RETRY_MS,
+    )
+    await transport.delay(delay, signal)
   }
 }
 
@@ -622,7 +848,7 @@ class Transport {
 }
 
 async function waitForTerminal<Value>(
-  resource: "run" | "deployment",
+  resource: "run" | "deployment" | "turn",
   id: string,
   read: () => Promise<Value>,
   terminal: (value: Value) => boolean,
@@ -734,6 +960,22 @@ function runPath(id: string): string {
   return `runs/${encodeURIComponent(validId(id))}`
 }
 
+function sessionPath(id: string): string {
+  return `sessions/${encodeURIComponent(validId(id))}`
+}
+
+function idempotencyHeaders(key: string | undefined): Headers {
+  const headers = new Headers()
+  if (key === undefined) return headers
+  if (key.length < 1 || key.length > 255) {
+    throw invalidArgument("Idempotency key must contain between 1 and 255 characters", {
+      field: "idempotencyKey",
+    })
+  }
+  headers.set("Idempotency-Key", key)
+  return headers
+}
+
 function deploymentPath(id: string): string {
   return `deployments/${encodeURIComponent(validId(id))}`
 }
@@ -753,6 +995,10 @@ function validId(id: string): string {
 
 function logPath(id: string, options: ListLogsOptions): string {
   return `${runPath(id)}/logs?${cursorQuery(options)}`
+}
+
+function eventPath(id: string, options: ListLogsOptions): string {
+  return `${runPath(id)}/events?${cursorQuery(options)}`
 }
 
 function cursorQuery(options: ListLogsOptions): URLSearchParams {

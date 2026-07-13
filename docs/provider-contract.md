@@ -1,10 +1,10 @@
 # Runtime provider contract
 
-This guide is for authors adding an isolated compute backend to Meanwhile. The implemented TypeScript source in `src/providers/runtime-provider.ts` is authoritative; [AGENTS.md](../AGENTS.md) defines the architectural invariants. This repository is pre-release, so verify the current versioned contract and shared test suite before building against it.
+This guide is for authors adding an isolated compute backend to Meanwhile. The implemented TypeScript source in `src/providers/runtime-provider.ts` is authoritative; [AGENTS.md](../AGENTS.md) defines the architectural invariants. The public contract remains pre-1.0, so verify the current versioned contract and shared test suite before building against it.
 
 ## Purpose
 
-A runtime provider translates a small set of compute, process, event, file, and exposure primitives. It does not implement a run, understand an agent, or decide policy.
+A runtime provider translates a small set of compute, process, event, optional ordered-input, file, and exposure primitives. It does not implement a run or session, understand an agent, or decide policy.
 
 ```text
 run executor
@@ -16,14 +16,14 @@ RuntimeProvider
 isolated compute
 ```
 
-The boundary is process-aware rather than a one-shot command runner because cancellation, timeout, event replay, restart recovery, artifact capture, and cleanup all require durable identity beyond `exec(command)`.
+The boundary is process-aware rather than a one-shot command runner because cancellation, timeout, event replay, restart recovery, interactive turns, artifact capture, and cleanup all require durable identity beyond `exec(command)`.
 
 ## Ownership
 
 The adapter owns:
 
 - create, start, inspect, stop, and destroy of isolated compute;
-- spawn, inspect, signal, wait, and sequenced events for a process;
+- spawn, inspect, signal, wait, sequenced events, and optional ordered/idempotent input for a process;
 - relative workspace file write, list, and read;
 - optional port exposure;
 - health and provider-native diagnostics;
@@ -34,7 +34,7 @@ The adapter never owns:
 
 - authentication or owner authorization;
 - agent selection, prompts, ACP, or permission policy;
-- public run/deployment status;
+- public run/session/turn/deployment status;
 - idempotency, timeout policy, or cleanup eligibility;
 - audit policy, artifact retention, or deployment;
 - API schemas or database access.
@@ -60,6 +60,7 @@ interface RuntimeProvider {
   spawn(runtime: RuntimeHandle, process: ProcessSpec): Promise<ProcessHandle>
   inspectProcess(process: ProcessHandle): Promise<ProcessState>
   events(process: ProcessHandle, cursor: EventCursor, signal?: AbortSignal): AsyncIterable<ProcessEvent>
+  send?(process: ProcessHandle, input: ProcessInput): Promise<void>
   signal(process: ProcessHandle, signal: ProcessSignal): Promise<void>
   wait(process: ProcessHandle): Promise<ProcessExit>
 
@@ -76,7 +77,7 @@ Do not widen this interface with provider settings that belong in adapter constr
 
 ## Provenance and capabilities
 
-Capabilities are provider-neutral behavioral facts used by policy: isolation class, process recovery, event replay, port exposure, and exact signal semantics. Provenance identifies the accepted implementation: adapter version, runner digest when known, pinned runtime image reference/digest when known, and bridge protocol version.
+Capabilities are provider-neutral behavioral facts used by policy: isolation class, process recovery, event replay, process input, port exposure, and exact signal semantics. Provenance identifies the accepted implementation: adapter version, runner digest when known, pinned runtime image reference/digest when known, and bridge protocol version.
 
 The control plane hashes capabilities and snapshots both structures into every accepted run. Execution and recovery fail before compute if the active provider differs. Do not mutate these declarations after construction, infer stronger behavior from provider names, or fabricate an image digest that the platform does not expose.
 
@@ -108,11 +109,12 @@ Reject a handle with the wrong provider or unsupported version. Provider handles
 
 Capabilities state facts that affect recovery and feature availability. They are not marketing labels and do not make unsupported behavior appear portable.
 
-The initial contract describes exactly five properties:
+The contract describes exactly six properties:
 
 - `isolation`: `none`, `container`, or `virtual-machine`;
 - `processRecovery`: whether the process can be inspected after the original request ends;
 - `eventReplay`: whether events can be resumed from a persisted provider cursor;
+- `processInput`: whether the adapter implements the ordered/idempotent `send` contract;
 - `portExposure`: whether `expose` is implemented;
 - `processSignals`: the exact signal semantics the adapter can honestly deliver.
 
@@ -157,10 +159,11 @@ A process specification contains:
 - non-secret and resolved secret environment for that process;
 - remaining relative timeout duration plus an explicit bounded hard-termination grace;
 - optional bounded initial stdin.
+- an input mode that is either closed after spawn or an explicitly declared ordered mailbox.
 
 No absolute control-plane deadline crosses this boundary. The control plane computes remaining policy time immediately before spawn; providers treat it as a duration and must not reinterpret it using sandbox wall-clock time.
 
-Never accept a shell string. Never interpolate a prompt into argv or a shell. The fixed runner receives one validated specification through initial stdin; the prompt then travels to the child as ACP data.
+Never accept a shell string. Never interpolate a prompt into argv or a shell. The fixed runner receives one validated specification through initial stdin. A one-shot prompt then travels to the child as ACP data; a session spec contains no turn prompt.
 
 The adapter must not log argv elements that may contain sensitive provider configuration, environment values, or initial stdin.
 
@@ -186,6 +189,22 @@ Requirements:
 - transport diagnostics are not injected into runner stdout.
 
 The runner itself emits a separate monotonic sequence. The provider cursor resumes transport; the runner sequence deduplicates semantic frames; the database sequence serves public logs.
+
+### `send`
+
+`send` exists only when `capabilities.processInput` declares the matching behavior. It delivers one bounded opaque runner command with a positive sequence and stable command identity. The provider does not inspect ACP semantics.
+
+Requirements:
+
+- each `(process, sequence)` binds permanently to one input fingerprint;
+- an exact retry is idempotent;
+- conflicting reuse returns a safe non-retryable `PROCESS_INPUT_CONFLICT`;
+- delivery order follows sequence order and cannot silently skip a committed command;
+- input remains separate from argv, event output, diagnostics, and provider handles;
+- process exit or destruction makes later delivery fail explicitly;
+- adapters without this guarantee omit `send` and declare `processInput: false`.
+
+This primitive is a runner mailbox, not arbitrary stdin, a PTY, or remote ACP. It exists so the control plane can durably dispatch `turn.start`, `turn.interrupt`, and `session.close` while ACP stays colocated with the agent.
 
 ### `signal`
 
@@ -285,6 +304,7 @@ Cloudflare-specific SDK types live only under `providers/cloudflare-sandbox/` an
 - applies and verifies declared workspace file modes through a fixed internal command because the pinned file API does not expose mode directly;
 - starts the fixed runner with bounded initial stdin;
 - when an SDK lacks direct initial stdin, may use a random provider-private staging file plus safely quoted redirection, provided the bytes never enter argv/diagnostics and the file is removed on every path;
+- when the pinned SDK lacks ongoing stdin, implements session input as a provider-private sequential mailbox only after durable bridge state binds `(process, sequence)` to one command fingerprint;
 - preserves runner stdout as protocol and stderr as diagnostics;
 - provides cursor-bearing live/replayed events;
 - advertises only hard termination for the pinned SDK, while control-plane stop destroys remaining sandbox processes after cancellation;
@@ -312,7 +332,8 @@ Every adapter, including local and fake, runs the same deterministic suite:
 13. ensure diagnostics and handles contain no injected secret;
 14. reconnect according to declared capabilities;
 15. preserve declared workspace file modes;
-16. keep provenance immutable and reject configuration drift before an execution uses the adapter.
+16. keep provenance immutable and reject configuration drift before an execution uses the adapter;
+17. when `processInput` is true, accept exact retries, reject conflicting sequence reuse, preserve order, and fail after process exit.
 
 Use injected identities and bounded event-driven waits; do not use arbitrary sleeps. A fake proves core replaceability. A local adapter proves real host process semantics. Each remote adapter additionally needs a credential-gated live test that creates, starts, executes, reads, stops, and destroys actual provider compute.
 
@@ -325,6 +346,7 @@ Use injected identities and bounded event-driven waits; do not use arbitrary sle
 - [ ] Provenance names the exact adapter, runner, image evidence, and bridge protocol without guessing unavailable digests.
 - [ ] Process launch uses executable plus argv.
 - [ ] Events are ordered, bounded, resumable, and channel-aware.
+- [ ] Process input is omitted or ordered, idempotent, bounded, and identity-bound exactly as declared.
 - [ ] Stop and destroy are idempotent and distinct.
 - [ ] Paths and symlinks cannot escape the workspace.
 - [ ] Workspace file modes survive the adapter boundary exactly.

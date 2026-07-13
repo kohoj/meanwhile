@@ -6,19 +6,34 @@
 [![Bun](https://img.shields.io/badge/runtime-Bun_1.3.13-black)](https://bun.sh/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> Agents and machines are replaceable. The run is not.
+> Agents and machines are replaceable. Intent and evidence are not.
 
-Meanwhile gives agent work a portable identity. One `RunSpec` composes intent, an [ACP](https://agentclientprotocol.com/) agent, a runtime, and policy; the resulting state, evidence, artifacts, cleanup, and deployments survive the machine that executed it.
+Meanwhile gives agent work a portable identity. A `Run` carries one task to immutable output. An `AgentSession` keeps one ACP context alive across ordered `Turn`s. Both compose an [ACP](https://agentclientprotocol.com/) agent, a runtime, and policy; both survive control-plane restarts without exposing provider machinery.
 
-Run a fix, migration, review, or release on disposable compute. Hand the resulting run—not a terminal session—to the next person or agent. Promote only immutable output.
+Use a run for a fix, migration, evaluation, or release. Use a session when a person or upstream agent needs to inspect, redirect, interrupt, and continue the same agent context. Promote only immutable run output.
 
-![Meanwhile turns any ACP agent and runtime adapter into a durable run for fleets, continuous maintenance, evaluation, embedded agent products, and autonomous delivery.](docs/assets/meanwhile-product-map.webp)
+```text
+                                  immutable Artifact ──► Deployment
+                                 /
+SDK / HTTP / CLI ──► one-shot Run
+                 \
+                  └──► durable Session ──► Turn 1 ──► Turn 2 ──► …
+                               │
+                         Runtime lease
+                               │ lifecycle · replay · ordered input
+                 RuntimeProvider (local · Cloudflare · …)
+                               │
+                       meanwhile-runner
+                               │ local ACP over stdio
+                               ▼
+                         any ACP agent
+```
 
-## The run is the product
+## Durable intent is the product
 
 An agent process is a tool. A sandbox is a temporary place to run it. Neither is the durable product boundary.
 
-Meanwhile makes the run that boundary: something an application can route, observe, cancel, recover, audit, and promote without learning the agent harness or infrastructure API underneath it.
+Meanwhile makes durable intent that boundary: something an application can route, observe, cancel, recover, audit, and—when output is captured—promote without learning the agent harness or infrastructure API underneath it.
 
 Meanwhile keeps four lifecycles separate:
 
@@ -30,6 +45,17 @@ Meanwhile keeps four lifecycles separate:
 | **Deployment** | Durable | Auditable promotion of an artifact |
 
 A runtime may disappear without erasing its run. A deployment never reaches back into a mutable workspace. Provider logs report facts; they never decide run state.
+
+Interactive work adds four concepts without weakening those boundaries:
+
+| Entity | Lifetime | Authority |
+| --- | --- | --- |
+| **AgentSession** | Durable | Continuity policy and current session state |
+| **Turn** | Durable | One prompt, deadline, conflict policy, and terminal result |
+| **Runtime lease** | Disposable | Compute held for the session, with independent cleanup state |
+| **Session event** | Durable, append-only | Replayable cross-turn evidence |
+
+`Run` remains the atomic execution and artifact-promotion unit. `AgentSession` is the interactive continuity unit. Neither is overloaded to imitate the other.
 
 ## Run it locally
 
@@ -56,10 +82,10 @@ That command creates a run, follows logs, captures an artifact, deploys it throu
 
 ## One run, end to end
 
-The typed client is the canonical programmatic interface. It uses Web `fetch`, `AbortSignal`, streams, and the same Zod contracts as the HTTP API. Install the tagged source package from a Bun client project:
+The typed client is the canonical programmatic interface. It uses Web `fetch`, `AbortSignal`, streams, and the same Zod contracts as the HTTP API. Pin the exact source revision from a Bun client project; `v0.1.1` is the current tagged baseline, while durable sessions remain in `Unreleased` until the next compatibility tag:
 
 ```console
-bun add github:kohoj/meanwhile#v0.1.1
+bun add github:kohoj/meanwhile#<commit-or-tag>
 ```
 
 The example below assumes the Codex ACP entry described under [Agent execution](#agent-execution) is installed in the selected runtime.
@@ -143,6 +169,61 @@ bun run cli -- cancel <run-id>
 bun run cli -- deploy <run-id> --artifact dist --target local-static
 ```
 
+## One agent context, many turns
+
+A session keeps one ACP child and its context alive. Turns are durable commands, not writes to a remote terminal:
+
+```ts
+import { Meanwhile } from "meanwhile"
+import { emptySessionTimeline, reduceSessionTimeline } from "meanwhile/timeline"
+import { captureWorkspace } from "meanwhile/workspace"
+
+const meanwhile = new Meanwhile({
+  baseUrl: process.env.MEANWHILE_URL ?? "http://127.0.0.1:7331",
+  apiKey: process.env.MEANWHILE_API_KEY!,
+})
+
+const session = await meanwhile.sessions.create(
+  {
+    workspace: { type: "files", files: await captureWorkspace("./workspace") },
+    agentType: "codex",
+    provider: "local",
+    idleTimeoutMs: 30 * 60_000,
+  },
+  { idempotencyKey: crypto.randomUUID() },
+)
+
+const first = await meanwhile.sessions.send(session.id, "Inspect the failure and propose a fix.", {
+  idempotencyKey: crypto.randomUUID(),
+  conflictPolicy: "reject",
+  timeoutMs: 10 * 60_000,
+})
+
+let timeline = emptySessionTimeline()
+for await (const event of meanwhile.sessions.followEvents(session.id)) {
+  timeline = reduceSessionTimeline(timeline, event)
+  if (timeline.turnStatuses[first.id] === "succeeded") break
+}
+
+await meanwhile.sessions.send(session.id, "Apply it and run the focused tests.", {
+  idempotencyKey: crypto.randomUUID(),
+  conflictPolicy: "enqueue",
+})
+await meanwhile.sessions.close(session.id)
+```
+
+`reject` refuses a turn while another is open, `enqueue` preserves order, and `interrupt_and_send` durably interrupts the active turn before starting the replacement. Turn timeout ends only that turn; session continuity remains available. Closing a session is idempotent and releases its runtime through durable cleanup.
+
+The equivalent CLI surface is intentionally small:
+
+```console
+bun run cli -- sessions create --agent codex --provider local --files ./workspace
+bun run cli -- sessions send <session-id> --conflict reject -- <prompt>
+bun run cli -- sessions watch <session-id> --json
+bun run cli -- sessions interrupt <session-id>
+bun run cli -- sessions close <session-id>
+```
+
 ## API
 
 The SDK call above is this portable HTTP operation:
@@ -176,17 +257,20 @@ All failures use one safe envelope:
 | Resource | Routes |
 | --- | --- |
 | Runs | `POST /runs`, `GET /runs`, `GET /runs/:id`, `POST /runs/:id/cancel` |
-| Evidence | `GET /runs/:id/logs`, `GET /runs/:id/artifacts` |
+| Run evidence | `GET /runs/:id/events`, `GET /runs/:id/logs`, `GET /runs/:id/artifacts` |
+| Sessions | `POST /sessions`, `GET /sessions`, `GET /sessions/:id` |
+| Session turns | `POST /sessions/:id/turns`, `GET /sessions/:id/turns` |
+| Session evidence/commands | `GET /sessions/:id/events`, `POST /sessions/:id/interrupt`, `POST /sessions/:id/close` |
 | Artifacts | `GET /artifacts/:id`, `GET /artifacts/:id/content` |
 | Deployments | `POST /deployments`, `GET /deployments`, `GET /deployments/:id`, `GET /deployments/:id/logs` |
 | Providers | `POST /providers/test` |
 | Operations | `GET /audit`, API-key lifecycle, `/healthz`, `/readyz`, `/openapi.json` |
 
-Run logs support cursor pagination and SSE follow over the same durable sequence. `runs.followLogs()` resumes with `Last-Event-ID`, deduplicates replay, rejects gaps, and honors caller cancellation.
+Run and session events support cursor pagination and SSE follow over the same durable sequence. `runs.followEvents()` and `sessions.followEvents()` resume with `Last-Event-ID`, deduplicate replay, reject gaps, and honor caller cancellation. `meanwhile/timeline` folds raw ACP updates into presentation-neutral messages, tool calls, plans, usage, statuses, and turn identity without making a UI part of the control plane.
 
 ## Agent execution
 
-Meanwhile is harness-neutral because the runtime-local `meanwhile-runner` speaks ACP over stdio. ACP initialization, capability negotiation, session creation, prompting, permission decisions, cancellation, and shutdown stay beside the agent; provider APIs transport process lifecycle and replayable frames rather than pretending to be a remote terminal.
+Meanwhile is harness-neutral because the runtime-local `meanwhile-runner` speaks ACP over stdio. ACP initialization, capability negotiation, session creation, prompting, permission decisions, cancellation, and shutdown stay beside the agent. One-shot runs receive one bounded spec. Durable sessions receive ordered, idempotent commands through a provider mailbox. In both cases ACP remains local; provider APIs transport runner lifecycle and replayable frames rather than pretending to be a remote terminal.
 
 `config/agents.json` is the only active launch catalog. Each entry declares a bare PATH executable, argv, working-directory policy, capabilities, and allowed environment names. The accepted definition and its digest are snapshotted into the run, so a queued or recovering run cannot silently change when the catalog changes.
 
@@ -238,6 +322,7 @@ interface RuntimeProvider {
   spawn(runtime: RuntimeHandle, process: ProcessSpec): Promise<ProcessHandle>
   inspectProcess(process: ProcessHandle): Promise<ProcessState>
   events(process: ProcessHandle, cursor: EventCursor, signal?: AbortSignal): AsyncIterable<ProcessEvent>
+  send?(process: ProcessHandle, input: ProcessInput): Promise<void>
   signal(process: ProcessHandle, signal: ProcessSignal): Promise<void>
   wait(process: ProcessHandle): Promise<ProcessExit>
 
@@ -250,6 +335,8 @@ interface RuntimeProvider {
 ```
 
 `local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, image, standalone Bun runner, and bundled Claude ACP adapter are pinned as one compatibility unit; Cloudflare types remain inside the provider package. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor and waits for terminal accumulated logs to become quiescent before publishing exit, so transient or eventually consistent provider reads cannot silently lose, duplicate, or skip accepted evidence.
+
+The pinned Sandbox SDK does not expose ongoing stdin after process creation. Meanwhile therefore does not claim generic interactive process I/O: the bridge durably binds each `(process, sequence)` to one secret-safe command fingerprint, then publishes a validated command to a provider-private mailbox. Exact retries are harmless; conflicting reuse fails closed. This is a capability-gated runner command transport, not remote ACP, a PTY, or a second control plane.
 
 The shipped Cloudflare image uses `standard-1` deliberately: a real Claude coding-agent process exceeded the `lite` class's 256 MiB limit. Deterministic bridge checks can fit smaller compute, but the supported live-agent proof must use a class sized for the agent toolchain. Runtime destruction remains the cost boundary.
 
@@ -303,10 +390,11 @@ SQLite in WAL mode is the source of truth for one active control-plane writer. I
 
 ```text
 Owner ── API keys
-  └── Run ── status events ── sequenced logs
-       ├── runtime instance ── runner cursor ── cleanup state
-       ├── immutable input bundle
-       └── immutable artifacts ── deployments ── deployment logs
+  ├── Run ── status/events/logs ── immutable artifacts ── deployments
+  │    └── runtime instance ── runner cursor ── cleanup state
+  └── AgentSession ── Turns ── session events
+       └── runtime lease ── process/command cursors ── cleanup state
+Shared immutable input bundle references feed either execution shape.
 All mutations ── append-only audit records
 ```
 
@@ -333,6 +421,8 @@ queued → provisioning → running → succeeded
 | Restart recovery | Persisted runtime/process handles and cursors reconnect and deduplicate replay where provider capabilities permit |
 | Cleanup | Terminal runtimes enter durable bounded-retry destruction; a runtime for a running run is never eligible |
 | Timezones | Durable timestamps are UTC instants accepted by the control plane; agent processes receive `TZ=UTC`; local rendering belongs to clients |
+
+Session and turn creation use the same owner-scoped idempotency rule independently. Session events bind runner evidence, control-plane transitions, and turn identity to one contiguous durable sequence. A session runtime is never cleanup-eligible while its session is operational; a timed-out or interrupted turn does not destroy continuity.
 
 Redaction prevents accidental known-value leakage. It cannot stop an agent from transforming or exfiltrating a credential it was intentionally given. Use short-lived, least-privilege, per-run credentials.
 
@@ -363,7 +453,7 @@ Backup includes a normalized SQLite snapshot, all referenced workspace/artifact 
 
 Meanwhile keeps three evidence planes distinct:
 
-1. owner-visible durable run logs;
+1. owner-visible durable run and session evidence;
 2. operational JSON logs, manual OpenTelemetry traces, bounded metrics, health, and diagnostics;
 3. append-only audit records for mutations and security-sensitive actions.
 
@@ -385,11 +475,13 @@ The release proof sends a revision-bound token through ACP, structurally verifie
 
 `proof:release:cloudflare` isolates provider/control-plane compatibility with the deterministic ACP fixture. `proof:release:cloudflare:claude` is the acceptance proof for real agent work: Claude receives the task inside Cloudflare Sandbox, creates `site/index.html`, and only the public SDK is used to retrieve and promote the captured artifact. A health response, skipped account test, or deterministic response is never described as real-model proof.
 
-The deterministic suite separately covers owner isolation, lifecycle transitions, log replay, artifacts, cancellation, timeout, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence.
+The deterministic suite separately covers owner isolation, lifecycle transitions, run/session replay, cross-turn ACP continuity, conflict policy, interrupt, timeout, artifacts, cancellation, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence.
 
 ## Production status
 
 Meanwhile `v0.1.1` is the current public compatibility baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox Claude path are implemented and release-proven through artifact download and deployment. A compatibility baseline is not a blanket production-support promise.
+
+Durable sessions on this branch are proven end to end with the real local process adapter, including one ACP identity across turns, interrupt, timeout, event replay, cleanup, and control-plane restart. The Cloudflare bridge and client path are contract-tested against protocol v4; they are not called live-remote session proof until the credential-gated session lifecycle runs against the exact deployed bridge and image revision.
 
 Before broad multi-tenant production use, the project still needs:
 
@@ -399,7 +491,8 @@ Before broad multi-tenant production use, the project still needs:
 - a lease-capable shared database for horizontal control-plane writers;
 - object-backed retention for logs beyond provider replay limits;
 - a tenant secret manager or host-scoped credential broker for private repository checkout;
-- an explicit bidirectional runner channel before interactive human approval can be supported.
+- a versioned permission-response command and explicit approval policy before interactive human approval can be supported;
+- provider-neutral suspend/resume semantics before idle sessions can release compute without closing ACP continuity.
 
 These are evolution triggers, not reasons to add distributed machinery to the current single-writer core.
 
@@ -415,7 +508,7 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 
 Codex produced the initial implementation end to end, including production code, tests, release proofs, documentation, and iterative review. The maintainer set the product model, architectural contracts, and acceptance criteria expressed throughout this README.
 
-Those decisions establish the durable Run as the chain of custody connecting intent, execution identity, evidence, artifacts, and deployment. Authority follows lifecycle: the control plane owns policy and durable state, runtime adapters report compute facts, the colocated runner owns ACP, artifact storage owns immutable bytes, and deployment adapters promote those bytes. Capability declarations, replay cursors, and accepted execution provenance make replaceability and recovery explicit system properties. Semantic release evidence spans agent output, telemetry, cleanup, restart, backup, restore, and deployment.
+Those decisions establish the durable Run as the chain of custody connecting atomic intent, execution identity, evidence, artifacts, and deployment, while AgentSession/Turn provide a separate continuity boundary for iterative work. Authority follows lifecycle: the control plane owns policy and durable state, runtime adapters report compute facts, the colocated runner owns ACP, artifact storage owns immutable bytes, and deployment adapters promote those bytes. Capability declarations, replay cursors, command identities, and accepted execution provenance make replaceability and recovery explicit system properties. Semantic release evidence spans agent output, telemetry, cleanup, restart, backup, restore, and deployment.
 
 These contracts are maintained in [AGENTS.md](AGENTS.md) and the architecture, provider, operations, and threat-model documentation, and they govern future contributions.
 

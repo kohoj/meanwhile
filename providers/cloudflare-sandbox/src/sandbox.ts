@@ -14,6 +14,7 @@ import {
   MAX_PROCESS_OUTPUT_BYTES,
   type ProcessEvent,
   type ProcessEventsResponse,
+  type ProcessInputRequest,
   type ProcessSignal,
   type ProcessSnapshot,
   type ProviderProcessStatus,
@@ -123,6 +124,7 @@ export interface BridgeRuntime {
   inspectProcess(processId: string): Promise<ProcessSnapshot>
   events(processId: string, cursor: string, limitChars: number): Promise<ProcessEventsResponse>
   signal(processId: string, signal: ProcessSignal): Promise<ProcessSnapshot>
+  send(processId: string, input: ProcessInputRequest): Promise<void>
   wait(processId: string, timeoutMs: number): Promise<ProcessSnapshot>
   writeFiles(request: WriteFilesRequest): Promise<void>
   listFiles(
@@ -218,18 +220,28 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
 
     const stdinPath =
       request.stdin === undefined ? undefined : `${STAGING_ROOT}/${crypto.randomUUID()}.stdin`
+    const mailboxPath =
+      request.input === "mailbox" ? `${STAGING_ROOT}/${processId}.inbox` : undefined
     const command = buildProcessCommand(request.argv, stdinPath)
     try {
       if (stdinPath) {
         await this.#sandbox.mkdir(STAGING_ROOT, { recursive: true })
         await this.#sandbox.writeFile(stdinPath, request.stdin ?? "", { encoding: "utf-8" })
       }
+      if (mailboxPath) await this.#sandbox.mkdir(mailboxPath, { recursive: true })
 
       const process = await this.#sandbox.startProcess(command, {
         autoCleanup: false,
         cwd: toWorkspacePath(request.cwd ?? "."),
         processId,
-        ...(request.env ? { env: request.env } : {}),
+        ...(request.env || mailboxPath
+          ? {
+              env: {
+                ...request.env,
+                ...(mailboxPath ? { MEANWHILE_PROCESS_INBOX: mailboxPath } : {}),
+              },
+            }
+          : {}),
         ...(request.timeoutMs === undefined
           ? {}
           : { timeout: request.timeoutMs + (request.terminationGraceMs ?? 0) }),
@@ -335,6 +347,31 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
       await this.#sandbox.killProcess(processId)
     }
     return this.#processSnapshot(process)
+  }
+
+  async send(processId: string, input: ProcessInputRequest): Promise<void> {
+    const process = await this.#requireProcess(processId)
+    if (TERMINAL_PROCESS_STATES.has(await process.getStatus())) {
+      throw new BridgeError("PROCESS_NOT_RUNNING", "The process is not running.", 409)
+    }
+    const directory = `${STAGING_ROOT}/${processId}.inbox`
+    const path = `${directory}/${inputFileName(input.sequence)}`
+    const encoded = `${JSON.stringify(input)}\n`
+    try {
+      const existing = await this.#sandbox.readFile(path, { encoding: "utf-8" })
+      const text = await new Response(existing.content).text()
+      if (text !== encoded) {
+        throw new BridgeError(
+          "PROCESS_INPUT_CONFLICT",
+          "The process input sequence is already bound to different data.",
+          409,
+        )
+      }
+      return
+    } catch (error) {
+      if (error instanceof BridgeError) throw error
+    }
+    await this.#sandbox.writeFile(path, encoded, { encoding: "utf-8" })
   }
 
   async wait(processId: string, timeoutMs: number): Promise<ProcessSnapshot> {
@@ -659,6 +696,10 @@ function toRuntimeFileInfo(file: SandboxFileInfo): RuntimeFileInfo {
     size: file.size,
     modifiedAt: file.modifiedAt,
   }
+}
+
+function inputFileName(sequence: number): string {
+  return `${String(sequence).padStart(16, "0")}.json`
 }
 
 function toIsoString(value: Date): string {

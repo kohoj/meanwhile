@@ -238,6 +238,102 @@ export const RunLogSchema = z
   })
   .meta({ id: "RunLogChunk" })
 
+const RunEventBaseShape = {
+  version: z.literal(1),
+  runId: IdentifierSchema,
+  ownerId: IdentifierSchema,
+  sequence: z.number().int().positive(),
+  createdAt: timestamp,
+} as const
+
+const AgentEventPayloadSchema = z.record(z.string(), safeJson)
+
+export const RunEventSchema = z
+  .discriminatedUnion("type", [
+    z
+      .object({
+        ...RunEventBaseShape,
+        type: z.literal("run.status"),
+        source: z.literal("control-plane"),
+        payload: z
+          .object({
+            fromStatus: z.enum(RUN_STATUSES).nullable(),
+            toStatus: z.enum(RUN_STATUSES),
+            statusVersion: z.number().int().positive(),
+            reason: z.string().min(1),
+          })
+          .strict(),
+      })
+      .strict(),
+    ...(
+      [
+        "runner.started",
+        "agent.initialized",
+        "agent.session_started",
+        "agent.update",
+        "agent.permission",
+        "agent.diagnostic",
+        "agent.stderr",
+        "agent.terminal",
+      ] as const
+    ).map((type) =>
+      z
+        .object({
+          ...RunEventBaseShape,
+          type: z.literal(type),
+          source: z.literal("runner"),
+          payload: AgentEventPayloadSchema,
+        })
+        .strict(),
+    ),
+    z
+      .object({
+        ...RunEventBaseShape,
+        type: z.literal("artifact.captured"),
+        source: z.literal("control-plane"),
+        payload: z
+          .object({
+            artifactId: ArtifactIdentifierSchema,
+            logicalPath: z.string(),
+            kind: z.enum(["file", "directory", "workspace"]),
+            digest: ArtifactIdentifierSchema,
+            byteSize: z.number().int().nonnegative(),
+          })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...RunEventBaseShape,
+        type: z.literal("runtime.cleanup"),
+        source: z.literal("control-plane"),
+        payload: z
+          .object({
+            runtimeId: z.string().min(1),
+            status: z.enum(["pending", "running", "succeeded", "failed"]),
+            attempt: z.number().int().nonnegative(),
+            error: NullableStructuredErrorSchema,
+          })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...RunEventBaseShape,
+        type: z.literal("run.log"),
+        source: z.enum(["control-plane", "runner"]),
+        payload: z
+          .object({
+            stream: z.enum(["stdout", "stderr", "agent", "system"]),
+            eventType: z.string(),
+            data: z.string(),
+          })
+          .strict(),
+      })
+      .strict(),
+  ])
+  .meta({ id: "RunEvent" })
+
 export const ArtifactSchema = z
   .object({
     id: ArtifactIdentifierSchema,
@@ -359,6 +455,199 @@ export const RunLogPageSchema = z.object({
   items: z.array(RunLogSchema).readonly(),
   nextCursor: z.number().int().positive().nullable(),
 })
+export const RunEventPageSchema = z.object({
+  items: z.array(RunEventSchema).readonly(),
+  nextCursor: z.number().int().positive().nullable(),
+})
+
+export const CreateSessionRequestSchema = z
+  .object({
+    workspace: CreateWorkspaceSourceSchema,
+    agentType: z
+      .string()
+      .regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/)
+      .max(128),
+    env: boundedEnvironment.default({}),
+    secretRefs: SecretReferencesSchema.default({}),
+    provider: z
+      .string()
+      .regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/)
+      .max(64)
+      .optional(),
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(1_000)
+      .max(86_400_000)
+      .default(30 * 60_000),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    for (const name of Object.keys(value.secretRefs)) {
+      if (Object.hasOwn(value.env, name)) {
+        context.addIssue({
+          code: "custom",
+          path: ["secretRefs", name],
+          message: "A name cannot appear in both env and secretRefs",
+        })
+      }
+    }
+  })
+  .meta({ id: "CreateSessionRequest" })
+
+const AgentSessionStatusSchema = z.enum([
+  "queued",
+  "provisioning",
+  "idle",
+  "running",
+  "closing",
+  "closed",
+  "failed",
+  "continuity_lost",
+])
+const TurnStatusSchema = z.enum([
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "timed_out",
+])
+
+export const AgentSessionSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    workspace: WorkspaceSourceSchema,
+    agentType: z.string(),
+    agentSpec: AgentLaunchSnapshotSchema,
+    agentCatalogDigest: ArtifactIdentifierSchema,
+    executionProvenance: ExecutionProvenanceSchema,
+    env: z.record(z.string(), z.string()),
+    secretRefs: z.record(z.string(), z.string()),
+    provider: z.string(),
+    status: AgentSessionStatusSchema,
+    statusVersion: z.number().int().positive(),
+    activeTurnId: IdentifierSchema.nullable(),
+    runtimeId: z.string().nullable(),
+    processId: z.string().nullable(),
+    agentSessionId: z.string().nullable(),
+    capabilities: z.record(z.string(), safeJson).nullable(),
+    idleTimeoutMs: z.number().int().positive(),
+    createdAt: timestamp,
+    startedAt: timestamp.nullable(),
+    closedAt: timestamp.nullable(),
+    updatedAt: timestamp,
+    error: NullableStructuredErrorSchema,
+  })
+  .meta({ id: "AgentSession" })
+
+export const SessionTurnSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    sessionId: IdentifierSchema,
+    sequence: z.number().int().positive(),
+    prompt: z.string(),
+    timeoutMs: z.number().int().positive(),
+    deadlineAt: timestamp.nullable(),
+    status: TurnStatusSchema,
+    statusVersion: z.number().int().positive(),
+    createdAt: timestamp,
+    startedAt: timestamp.nullable(),
+    finishedAt: timestamp.nullable(),
+    updatedAt: timestamp,
+    error: NullableStructuredErrorSchema,
+  })
+  .meta({ id: "SessionTurn" })
+
+export const CreateSessionTurnRequestSchema = z
+  .object({
+    prompt: z.string().min(1).max(1_048_576),
+    timeoutMs: z.number().int().min(1_000).max(86_400_000).default(3_600_000),
+    conflictPolicy: z.enum(["reject", "enqueue", "interrupt_and_send"]).default("reject"),
+  })
+  .strict()
+  .meta({ id: "CreateSessionTurnRequest" })
+
+const SessionEventBaseShape = {
+  version: z.literal(1),
+  sessionId: IdentifierSchema,
+  ownerId: IdentifierSchema,
+  sequence: z.number().int().positive(),
+  turnId: IdentifierSchema.nullable(),
+  createdAt: timestamp,
+} as const
+
+export const SessionEventSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      ...SessionEventBaseShape,
+      type: z.literal("session.status"),
+      source: z.literal("control-plane"),
+      payload: z
+        .object({
+          fromStatus: AgentSessionStatusSchema.nullable(),
+          toStatus: AgentSessionStatusSchema,
+          statusVersion: z.number().int().positive(),
+          reason: z.string(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...SessionEventBaseShape,
+      type: z.literal("turn.status"),
+      source: z.literal("control-plane"),
+      payload: z
+        .object({
+          fromStatus: TurnStatusSchema.nullable(),
+          toStatus: TurnStatusSchema,
+          statusVersion: z.number().int().positive(),
+          reason: z.string(),
+        })
+        .strict(),
+    })
+    .strict(),
+  ...(
+    [
+      "session.ready",
+      "turn.started",
+      "turn.update",
+      "turn.permission",
+      "agent.stderr",
+      "turn.terminal",
+      "session.closed",
+    ] as const
+  ).map((type) =>
+    z
+      .object({
+        ...SessionEventBaseShape,
+        type: z.literal(type),
+        source: z.literal("runner"),
+        payload: z.record(z.string(), safeJson),
+      })
+      .strict(),
+  ),
+  z
+    .object({
+      ...SessionEventBaseShape,
+      type: z.literal("session.diagnostic"),
+      source: z.literal("control-plane"),
+      payload: z.record(z.string(), safeJson),
+    })
+    .strict(),
+])
+
+export const AgentSessionResponseSchema = z.object({ session: AgentSessionSchema })
+export const AgentSessionPageSchema = z.object({ items: z.array(AgentSessionSchema).readonly() })
+export const SessionTurnResponseSchema = z.object({ turn: SessionTurnSchema })
+export const SessionTurnPageSchema = z.object({ items: z.array(SessionTurnSchema).readonly() })
+export const SessionEventPageSchema = z.object({
+  items: z.array(SessionEventSchema).readonly(),
+  nextCursor: z.number().int().positive().nullable(),
+})
 export const ArtifactPageSchema = z.object({ items: z.array(ArtifactSchema).readonly() })
 
 export const ApiKeySchema = z
@@ -392,7 +681,16 @@ export const AuditRecordSchema = z
     ownerId: IdentifierSchema,
     actorApiKeyId: IdentifierSchema.nullable(),
     action: z.string(),
-    resourceType: z.enum(["owner", "api_key", "run", "runtime", "artifact", "deployment"]),
+    resourceType: z.enum([
+      "owner",
+      "api_key",
+      "run",
+      "session",
+      "turn",
+      "runtime",
+      "artifact",
+      "deployment",
+    ]),
     resourceId: z.string(),
     requestId: z.string(),
     traceId: z.string().nullable(),
@@ -403,7 +701,9 @@ export const AuditRecordSchema = z
   .meta({ id: "AuditRecord" })
 
 export const AuditQuerySchema = CreatedPageQuerySchema.extend({
-  resourceType: z.enum(["owner", "api_key", "run", "runtime", "artifact", "deployment"]).optional(),
+  resourceType: z
+    .enum(["owner", "api_key", "run", "session", "turn", "runtime", "artifact", "deployment"])
+    .optional(),
   resourceId: z.string().min(1).max(256).optional(),
   action: z.string().min(1).max(128).optional(),
 })
@@ -497,6 +797,7 @@ export const ProviderDiagnosticsSchema = z
       isolation: z.enum(["none", "container", "virtual-machine"]),
       processRecovery: z.boolean(),
       eventReplay: z.boolean(),
+      processInput: z.boolean(),
       portExposure: z.boolean(),
       processSignals: z.array(z.enum(["SIGINT", "SIGTERM", "SIGKILL"])).readonly(),
     }),
@@ -511,6 +812,7 @@ export const ProviderDiagnosticsSchema = z
 export type CreateRunRequest = z.input<typeof CreateRunRequestSchema>
 export type Run = z.output<typeof RunSchema>
 export type RunLog = z.output<typeof RunLogSchema>
+export type RunEvent = z.output<typeof RunEventSchema>
 export type Artifact = z.output<typeof ArtifactSchema>
 export type ArtifactEntry = z.output<typeof ArtifactEntrySchema>
 export type ArtifactDetail = z.output<typeof ArtifactDetailSchema>
@@ -519,6 +821,15 @@ export type AuditRecord = z.output<typeof AuditRecordSchema>
 export type AuditPage = z.output<typeof AuditPageSchema>
 export type RunPage = z.output<typeof RunPageSchema>
 export type RunLogPage = z.output<typeof RunLogPageSchema>
+export type RunEventPage = z.output<typeof RunEventPageSchema>
+export type CreateSessionRequest = z.input<typeof CreateSessionRequestSchema>
+export type CreateSessionTurnRequest = z.input<typeof CreateSessionTurnRequestSchema>
+export type AgentSession = z.output<typeof AgentSessionSchema>
+export type AgentSessionPage = z.output<typeof AgentSessionPageSchema>
+export type SessionTurn = z.output<typeof SessionTurnSchema>
+export type SessionTurnPage = z.output<typeof SessionTurnPageSchema>
+export type SessionEvent = z.output<typeof SessionEventSchema>
+export type SessionEventPage = z.output<typeof SessionEventPageSchema>
 export type CreateDeploymentRequest = z.input<typeof CreateDeploymentRequestSchema>
 export type Deployment = z.output<typeof DeploymentSchema>
 export type DeploymentPage = z.output<typeof DeploymentPageSchema>

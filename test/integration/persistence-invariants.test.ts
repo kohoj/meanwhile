@@ -94,7 +94,7 @@ describe("migration history", () => {
     const raw = new Database(path)
     raw
       .query(
-        "INSERT INTO schema_migrations(version,name,sha256,applied_at) VALUES (3,'future',?,?)",
+        "INSERT INTO schema_migrations(version,name,sha256,applied_at) VALUES (5,'future',?,?)",
       )
       .run("a".repeat(64), AT)
     raw.close()

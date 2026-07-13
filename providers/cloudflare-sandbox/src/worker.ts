@@ -15,6 +15,8 @@ import {
   processEventsQuerySchema,
   processIdFromOperation,
   processIdSchema,
+  processInputFingerprint,
+  processInputRequestSchema,
   processSpecFingerprint,
   type RuntimeSnapshot,
   readFileQuerySchema,
@@ -80,6 +82,12 @@ export interface BridgeRegistry {
     processId: string,
     fingerprint: string,
   ): Promise<"reserved" | "existing">
+  reserveProcessInput(
+    runtimeId: string,
+    processId: string,
+    sequence: number,
+    fingerprint: string,
+  ): Promise<"reserved" | "existing">
 }
 
 export type BridgeRegistryFactory = (
@@ -89,6 +97,7 @@ export type BridgeRegistryFactory = (
 
 const RUNTIME_RECORD_KEY = "runtime"
 const PROCESS_FINGERPRINT_PREFIX = "process:"
+const PROCESS_INPUT_FINGERPRINT_PREFIX = "input:"
 
 /**
  * Separate durable lifecycle authority for a Sandbox identity. Cloudflare's
@@ -217,6 +226,26 @@ export class RuntimeRegistry extends DurableObject<CloudflareBridgeEnvironment> 
     return { status: "reserved" }
   }
 
+  async reserveProcessInput(
+    runtimeId: string,
+    processId: string,
+    sequence: number,
+    fingerprint: string,
+  ): Promise<ProcessReservation> {
+    const runtime = await this.#record()
+    if (!runtime || runtime.runtimeId !== runtimeId || runtime.state !== "active") {
+      return runtime
+        ? { status: "runtime_unavailable", runtimeState: runtime.state }
+        : { status: "runtime_unavailable" }
+    }
+    const key = `${PROCESS_INPUT_FINGERPRINT_PREFIX}${processId}:${sequence}`
+    const existing = await this.#state.storage.get<string>(key)
+    if (existing === fingerprint) return { status: "existing" }
+    if (existing !== undefined) return { status: "conflict" }
+    await this.#state.storage.put(key, fingerprint)
+    return { status: "reserved" }
+  }
+
   async #record(): Promise<RuntimeRegistryRecord | null> {
     return (await this.#state.storage.get<RuntimeRegistryRecord>(RUNTIME_RECORD_KEY)) ?? null
   }
@@ -248,6 +277,12 @@ interface RuntimeRegistryStub {
   reserveProcess(
     runtimeId: string,
     processId: string,
+    fingerprint: string,
+  ): Promise<ProcessReservation>
+  reserveProcessInput(
+    runtimeId: string,
+    processId: string,
+    sequence: number,
     fingerprint: string,
   ): Promise<ProcessReservation>
 }
@@ -305,6 +340,18 @@ class DurableBridgeRegistry implements BridgeRegistry {
       await this.#stub.reserveProcess(runtimeId, processId, fingerprint),
     )
   }
+
+  async reserveProcessInput(
+    runtimeId: string,
+    processId: string,
+    sequence: number,
+    fingerprint: string,
+  ): Promise<"reserved" | "existing"> {
+    return requireProcessReservation(
+      await this.#stub.reserveProcessInput(runtimeId, processId, sequence, fingerprint),
+      "PROCESS_INPUT_CONFLICT",
+    )
+  }
 }
 
 /** Deterministic test double for the same lifecycle contract. */
@@ -312,6 +359,7 @@ export class InMemoryBridgeRegistry implements BridgeRegistry {
   readonly #runtimeFactory: BridgeRuntimeFactory
   readonly #records = new Map<string, RuntimeRegistryRecord>()
   readonly #fingerprints = new Map<string, string>()
+  readonly #inputFingerprints = new Map<string, string>()
 
   constructor(runtimeFactory: BridgeRuntimeFactory) {
     this.#runtimeFactory = runtimeFactory
@@ -417,6 +465,28 @@ export class InMemoryBridgeRegistry implements BridgeRegistry {
       )
     }
     this.#fingerprints.set(key, fingerprint)
+    return "reserved"
+  }
+
+  async reserveProcessInput(
+    runtimeId: string,
+    processId: string,
+    sequence: number,
+    fingerprint: string,
+  ): Promise<"reserved" | "existing"> {
+    await this.assertActive(runtimeId)
+    const key = `${runtimeId}:${processId}:${sequence}`
+    const existing = this.#inputFingerprints.get(key)
+    if (existing === fingerprint) return "existing"
+    if (existing !== undefined) {
+      throw new BridgeError(
+        "PROCESS_INPUT_CONFLICT",
+        "The process input sequence is already bound to different data.",
+        409,
+        { retryable: false },
+      )
+    }
+    this.#inputFingerprints.set(key, fingerprint)
     return "reserved"
   }
 
@@ -592,6 +662,21 @@ export function createBridgeApp(options: BridgeAppOptions = {}): Hono<AppEnviron
     })
   })
 
+  app.post("/v1/runtimes/:runtimeId/processes/:processId/input", async (context) => {
+    context.set("operation", "process.input")
+    const processId = parseValue(processIdSchema, context.req.param("processId"))
+    const request = await parseJson(context, processInputRequestSchema)
+    const runtimeId = await assertRuntimeActive(context, options)
+    await getRegistry(context, options, runtimeId).reserveProcessInput(
+      runtimeId,
+      processId,
+      request.sequence,
+      await processInputFingerprint(request),
+    )
+    await getRuntime(context, options, runtimeId).send(processId, request)
+    return context.json({ accepted: true })
+  })
+
   app.get("/v1/runtimes/:runtimeId/processes/:processId/wait", async (context) => {
     context.set("operation", "process.wait")
     const processId = parseValue(processIdSchema, context.req.param("processId"))
@@ -760,14 +845,19 @@ function assertRegistryActive(record: RuntimeRegistryRecord | null): asserts rec
   }
 }
 
-function requireProcessReservation(reservation: ProcessReservation): "reserved" | "existing" {
+function requireProcessReservation(
+  reservation: ProcessReservation,
+  conflictCode = "PROCESS_CONFLICT",
+): "reserved" | "existing" {
   if (reservation.status === "reserved" || reservation.status === "existing") {
     return reservation.status
   }
   if (reservation.status === "conflict") {
     throw new BridgeError(
-      "PROCESS_CONFLICT",
-      "The process operation already identifies a different process specification.",
+      conflictCode,
+      conflictCode === "PROCESS_INPUT_CONFLICT"
+        ? "The process input sequence is already bound to different data."
+        : "The process operation already identifies a different process specification.",
       409,
       { retryable: false },
     )

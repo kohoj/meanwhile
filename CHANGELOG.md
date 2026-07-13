@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Durable `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent` resources across SQLite, HTTP/OpenAPI, the typed SDK, and CLI, preserving one ACP context across ordered prompts.
+- Explicit turn conflict policies (`reject`, `enqueue`, `interrupt_and_send`), independent session/turn idempotency, per-turn deadlines, interruption without continuity loss, idempotent close, and durable session-runtime cleanup.
+- One contiguous run event journal spanning status, validated runner evidence, logs, artifacts, and cleanup, with cursor pagination, resumable SSE, `meanwhile watch`, and pure presentation-neutral timeline reducers.
+- Provider-neutral ordered/idempotent process input plus complete local mailbox execution and a versioned Cloudflare bridge mailbox backed by durable sequence/fingerprint reservation.
+- Restart reconciliation for live interactive sessions, including provider/runner replay, exact evidence deduplication, undispatched command recovery, and explicit `continuity_lost` semantics.
+- Session telemetry for durable queue/active/runtime/cleanup state and bounded turn outcomes, plus owner-isolation, secret-redaction, timeout, replay, cleanup, and restart tests.
+
+### Changed
+
+- Runner protocol v3 now supports both one-shot `RunnerSpec` and prompt-free `SessionRunnerSpec` modes with versioned turn, interrupt, and close commands.
+- Cloudflare bridge protocol v4 adds capability-gated process input without exposing SDK types or remote ACP to the control-plane core.
+- Data-root quiescence and operational telemetry now include durable sessions and their independent runtime-lease cleanup lifecycle.
+
+### Fixed
+
+- Local runtime destruction now waits for observed process exit publication before removing runtime state, eliminating a cleanup race with final exit metadata.
+- Session command sequences are filename and persistence identities, preventing one sequence from being rebound to a different command ID.
+
+### Security
+
+- Session prompts and resolved credentials stay out of process argv, runner specs, provider handles, telemetry, and durable evidence; known values are redacted before session output is accepted.
+- Cloudflare reserves each process-input sequence against a secret-safe fingerprint before sandbox delivery; exact retries are harmless and conflicting reuse fails closed.
+
 ## [0.1.1] - 2026-07-14
 
 ### Added

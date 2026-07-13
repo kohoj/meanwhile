@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite"
 import {
   type AgentLaunchSnapshot,
+  type AgentSession,
+  type AgentSessionStatus,
   type ApiKey,
   type Artifact,
   type AuditRecord,
@@ -11,13 +13,21 @@ import {
   type ExecutionProvenance,
   isTerminalRunStatus,
   type JsonObject,
+  RUN_EVENT_VERSION,
   type Run,
+  type RunEvent,
   type RunLogChunk,
   type RunnerSession,
   type RunStatus,
   type RunStatusEvent,
   type RuntimeInstance,
+  SESSION_EVENT_VERSION,
+  type SessionEvent,
+  type SessionRuntimeLease,
+  type SessionTurn,
   type StructuredError,
+  type TurnConflictPolicy,
+  type TurnStatus,
   type WorkspaceSource,
 } from "../domain"
 import { AppError } from "../errors"
@@ -25,6 +35,10 @@ import { parseExecutionProvenance } from "../provenance"
 import { migrationSha256, migrations } from "./migrations"
 
 type Bind = string | number | bigint | boolean | null | Uint8Array
+
+const MAX_SESSION_CLEANUP_ATTEMPTS = 5
+const SESSION_CLEANUP_BASE_DELAY_MS = 1_000
+const SESSION_CLEANUP_MAX_DELAY_MS = 60_000
 
 interface RunRow extends Record<string, Bind> {
   id: string
@@ -80,6 +94,90 @@ interface RunnerSessionRow extends Record<string, Bind> {
   terminal_result_json: string | null
   created_at: string
   updated_at: string
+}
+
+interface RunEventRow extends Record<string, Bind> {
+  owner_id: string
+  run_id: string
+  sequence: number
+  version: typeof RUN_EVENT_VERSION
+  type: RunEvent["type"]
+  source: RunEvent["source"]
+  payload_json: string
+  created_at: string
+}
+
+interface AgentSessionRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  workspace_json: string
+  agent_type: string
+  agent_spec_json: string
+  agent_catalog_digest: string
+  execution_provenance_json: string
+  env_json: string
+  secret_refs_json: string
+  provider: string
+  status: AgentSessionStatus
+  status_version: number
+  active_turn_id: string | null
+  runtime_id: string | null
+  process_id: string | null
+  agent_session_id: string | null
+  capabilities_json: string | null
+  idle_timeout_ms: number
+  created_at: string
+  started_at: string | null
+  closed_at: string | null
+  updated_at: string
+  error_json: string | null
+}
+
+interface SessionTurnRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  session_id: string
+  sequence: number
+  prompt: string
+  timeout_ms: number
+  deadline_at: string | null
+  status: TurnStatus
+  status_version: number
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  updated_at: string
+  error_json: string | null
+}
+
+interface SessionLeaseRow extends Record<string, Bind> {
+  session_id: string
+  owner_id: string
+  provider: string
+  runtime_handle_json: string
+  process_handle_json: string | null
+  provider_cursor: string | null
+  runner_sequence: number
+  command_sequence: number
+  cleanup_status: SessionRuntimeLease["cleanupStatus"]
+  cleanup_attempts: number
+  cleanup_last_error_json: string | null
+  cleanup_next_attempt_at: string | null
+  created_at: string
+  updated_at: string
+  destroyed_at: string | null
+}
+
+interface SessionEventRow extends Record<string, Bind> {
+  owner_id: string
+  session_id: string
+  sequence: number
+  version: typeof SESSION_EVENT_VERSION
+  type: SessionEvent["type"]
+  source: SessionEvent["source"]
+  turn_id: string | null
+  payload_json: string
+  created_at: string
 }
 
 interface ArtifactRow extends Record<string, Bind> {
@@ -207,6 +305,84 @@ const runFromRow = (row: RunRow): Run => ({
   exitCode: row.exit_code,
 })
 
+const agentSessionFromRow = (row: AgentSessionRow): AgentSession => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  workspace: parse<WorkspaceSource>(row.workspace_json),
+  agentType: row.agent_type,
+  agentSpec: parse<AgentLaunchSnapshot>(row.agent_spec_json),
+  agentCatalogDigest: row.agent_catalog_digest,
+  executionProvenance: parseExecutionProvenance(parse<unknown>(row.execution_provenance_json)),
+  env: parse<Record<string, string>>(row.env_json),
+  secretRefs: parse<Record<string, string>>(row.secret_refs_json),
+  provider: row.provider,
+  status: row.status,
+  statusVersion: row.status_version,
+  activeTurnId: row.active_turn_id,
+  runtimeId: row.runtime_id,
+  processId: row.process_id,
+  agentSessionId: row.agent_session_id,
+  capabilities: row.capabilities_json === null ? null : parse<JsonObject>(row.capabilities_json),
+  idleTimeoutMs: row.idle_timeout_ms,
+  createdAt: row.created_at,
+  startedAt: row.started_at,
+  closedAt: row.closed_at,
+  updatedAt: row.updated_at,
+  error: row.error_json === null ? null : parse<StructuredError>(row.error_json),
+})
+
+const sessionTurnFromRow = (row: SessionTurnRow): SessionTurn => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  sessionId: row.session_id,
+  sequence: row.sequence,
+  prompt: row.prompt,
+  timeoutMs: row.timeout_ms,
+  deadlineAt: row.deadline_at,
+  status: row.status,
+  statusVersion: row.status_version,
+  createdAt: row.created_at,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at,
+  updatedAt: row.updated_at,
+  error: row.error_json === null ? null : parse<StructuredError>(row.error_json),
+})
+
+const sessionLeaseFromRow = (row: SessionLeaseRow): SessionRuntimeLease => ({
+  sessionId: row.session_id,
+  ownerId: row.owner_id,
+  provider: row.provider,
+  runtimeHandle: parse<JsonObject>(row.runtime_handle_json),
+  processHandle:
+    row.process_handle_json === null ? null : parse<JsonObject>(row.process_handle_json),
+  providerCursor: row.provider_cursor,
+  runnerSequence: row.runner_sequence,
+  commandSequence: row.command_sequence,
+  cleanupStatus: row.cleanup_status,
+  cleanupAttempts: row.cleanup_attempts,
+  cleanupLastError:
+    row.cleanup_last_error_json === null
+      ? null
+      : parse<StructuredError>(row.cleanup_last_error_json),
+  cleanupNextAttemptAt: row.cleanup_next_attempt_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  destroyedAt: row.destroyed_at,
+})
+
+const sessionEventFromRow = (row: SessionEventRow): SessionEvent =>
+  ({
+    version: row.version,
+    sessionId: row.session_id,
+    ownerId: row.owner_id,
+    sequence: row.sequence,
+    turnId: row.turn_id,
+    type: row.type,
+    source: row.source,
+    payload: parse<JsonObject>(row.payload_json),
+    createdAt: row.created_at,
+  }) as SessionEvent
+
 const apiKeyFromRow = (row: ApiKeyRow): ApiKey => ({
   id: row.id,
   ownerId: row.owner_id,
@@ -261,6 +437,15 @@ const sameArtifactIdentity = (left: Artifact, right: Artifact): boolean =>
   left.byteSize === right.byteSize &&
   left.storageKey === right.storageKey
 
+const continuityError = (status: AgentSessionStatus): StructuredError => ({
+  code: status === "failed" ? "ACP_SESSION_FAILED" : "SESSION_CONTINUITY_LOST",
+  message:
+    status === "failed"
+      ? "The ACP session failed before its active work completed"
+      : "The live ACP session can no longer be recovered",
+  retryable: false,
+})
+
 const deploymentFromRow = (row: DeploymentRow): Deployment => ({
   id: row.id,
   ownerId: row.owner_id,
@@ -299,6 +484,69 @@ const runLogFromEvidenceRow = (row: {
   runnerSequence: row.runner_sequence,
   createdAt: row.created_at,
 })
+
+type RunEventInput = RunEvent extends infer Event
+  ? Event extends RunEvent
+    ? Omit<Event, "sequence" | "version">
+    : never
+  : never
+
+const runEventFromRow = (row: RunEventRow): RunEvent =>
+  ({
+    version: row.version,
+    runId: row.run_id,
+    ownerId: row.owner_id,
+    sequence: row.sequence,
+    type: row.type,
+    source: row.source,
+    payload: parse<JsonObject>(row.payload_json),
+    createdAt: row.created_at,
+  }) as RunEvent
+
+const eventForLog = (chunk: Omit<RunLogChunk, "sequence"> | RunLogChunk): RunEventInput => {
+  const type = (() => {
+    switch (chunk.eventType) {
+      case "runner.started":
+      case "agent.initialized":
+        return chunk.eventType
+      case "session.started":
+        return "agent.session_started"
+      case "session.update":
+        return "agent.update"
+      case "permission.resolved":
+        return "agent.permission"
+      case "runner.diagnostic":
+        return "agent.diagnostic"
+      case "agent.stderr":
+        return "agent.stderr"
+      case "terminal":
+        return "agent.terminal"
+      default:
+        return null
+    }
+  })()
+  if (type !== null && chunk.runnerSessionId !== undefined) {
+    const payload = parse<unknown>(chunk.data)
+    if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
+      return {
+        runId: chunk.runId,
+        ownerId: chunk.ownerId,
+        type,
+        source: "runner",
+        payload: payload as JsonObject,
+        createdAt: chunk.createdAt,
+      }
+    }
+  }
+  return {
+    runId: chunk.runId,
+    ownerId: chunk.ownerId,
+    type: "run.log",
+    source: chunk.runnerSessionId === undefined ? "control-plane" : "runner",
+    payload: { stream: chunk.stream, eventType: chunk.eventType, data: chunk.data },
+    createdAt: chunk.createdAt,
+  }
+}
 
 export interface CreateRunInput {
   readonly id: string
@@ -429,6 +677,74 @@ export type BootstrapIdentityStatus =
   | "matching"
   | "conflict"
 
+export interface CreateAgentSessionInput {
+  readonly id: string
+  readonly ownerId: string
+  readonly workspace: WorkspaceSource
+  readonly agentType: string
+  readonly agentSpec: AgentLaunchSnapshot
+  readonly agentCatalogDigest: string
+  readonly executionProvenance: ExecutionProvenance
+  readonly env: Readonly<Record<string, string>>
+  readonly secretRefs: Readonly<Record<string, string>>
+  readonly provider: string
+  readonly idleTimeoutMs: number
+  readonly createdAt: string
+  readonly idempotencyKey?: string
+  readonly requestHash?: string
+  readonly audit: Omit<
+    AuditRecord,
+    "id" | "ownerId" | "action" | "resourceType" | "resourceId" | "createdAt"
+  >
+}
+
+export interface CreateSessionTurnInput {
+  readonly id: string
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly prompt: string
+  readonly timeoutMs: number
+  readonly conflictPolicy: TurnConflictPolicy
+  readonly createdAt: string
+  readonly idempotencyKey?: string
+  readonly requestHash?: string
+  readonly audit: Omit<
+    AuditRecord,
+    "id" | "ownerId" | "action" | "resourceType" | "resourceId" | "createdAt"
+  >
+}
+
+export interface SessionCommandRecord {
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly sequence: number
+  readonly id: string
+  readonly type: "turn.start" | "turn.interrupt" | "session.close"
+  readonly turnId: string | null
+  readonly data: JsonObject
+  readonly state: "pending" | "sent"
+  readonly createdAt: string
+  readonly sentAt: string | null
+}
+
+export interface AcceptSessionFrameInput {
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly runnerSequence: number
+  readonly providerCursor: string
+  readonly type:
+    | "session.ready"
+    | "turn.started"
+    | "turn.update"
+    | "turn.permission"
+    | "agent.stderr"
+    | "turn.terminal"
+    | "session.closed"
+  readonly turnId: string | null
+  readonly payload: JsonObject
+  readonly createdAt: string
+}
+
 export class Store {
   readonly database: Database
 
@@ -471,6 +787,10 @@ export class Store {
       state.activeRuns !== 0 ||
       state.activeRuntimes !== 0 ||
       state.cleanupBacklog !== 0 ||
+      state.queuedSessions !== 0 ||
+      state.activeSessions !== 0 ||
+      state.activeSessionRuntimes !== 0 ||
+      state.sessionCleanupBacklog !== 0 ||
       state.queuedDeployments !== 0 ||
       state.runningDeployments !== 0
     ) {
@@ -909,6 +1229,19 @@ export class Store {
           ) VALUES (?, ?, ?, NULL, 'queued', 1, 'run.created', ?)
         `)
         .run(crypto.randomUUID(), input.ownerId, input.id, input.createdAt)
+      this.insertNextRunEvent({
+        ownerId: input.ownerId,
+        runId: input.id,
+        type: "run.status",
+        source: "control-plane",
+        payload: {
+          fromStatus: null,
+          toStatus: "queued",
+          statusVersion: 1,
+          reason: "run.created",
+        },
+        createdAt: input.createdAt,
+      })
       if (input.idempotencyKey !== undefined && input.requestHash !== undefined) {
         this.database
           .query(
@@ -1013,6 +1346,10 @@ export class Store {
     readonly activeRuns: number
     readonly activeRuntimes: number
     readonly cleanupBacklog: number
+    readonly queuedSessions: number
+    readonly activeSessions: number
+    readonly activeSessionRuntimes: number
+    readonly sessionCleanupBacklog: number
     readonly queuedDeployments: number
     readonly runningDeployments: number
   } {
@@ -1023,6 +1360,10 @@ export class Store {
           active_runs: number
           active_runtimes: number
           cleanup_backlog: number
+          queued_sessions: number
+          active_sessions: number
+          active_session_runtimes: number
+          session_cleanup_backlog: number
           queued_deployments: number
           running_deployments: number
         },
@@ -1037,6 +1378,18 @@ export class Store {
           (SELECT COUNT(*) FROM runtime_instances
             WHERE cleanup_status != 'succeeded' AND cleanup_next_attempt_at IS NOT NULL)
             AS cleanup_backlog,
+          (SELECT COUNT(*) FROM agent_sessions WHERE status='queued') AS queued_sessions,
+          (SELECT COUNT(*) FROM agent_sessions
+            WHERE status IN ('provisioning','idle','running','closing')) AS active_sessions,
+          (SELECT COUNT(*) FROM session_runtime_leases lease
+            JOIN agent_sessions session
+              ON session.owner_id=lease.owner_id AND session.id=lease.session_id
+            WHERE lease.destroyed_at IS NULL
+              AND session.status IN ('provisioning','idle','running','closing'))
+            AS active_session_runtimes,
+          (SELECT COUNT(*) FROM session_runtime_leases
+            WHERE cleanup_status != 'succeeded' AND cleanup_next_attempt_at IS NOT NULL)
+            AS session_cleanup_backlog,
           (SELECT COUNT(*) FROM deployments WHERE status = 'queued') AS queued_deployments,
           (SELECT COUNT(*) FROM deployments WHERE status = 'running') AS running_deployments
       `)
@@ -1048,6 +1401,10 @@ export class Store {
       activeRuns: row.active_runs,
       activeRuntimes: row.active_runtimes,
       cleanupBacklog: row.cleanup_backlog,
+      queuedSessions: row.queued_sessions,
+      activeSessions: row.active_sessions,
+      activeSessionRuntimes: row.active_session_runtimes,
+      sessionCleanupBacklog: row.session_cleanup_backlog,
       queuedDeployments: row.queued_deployments,
       runningDeployments: row.running_deployments,
     }
@@ -1126,6 +1483,19 @@ export class Store {
           input.resultAudit.action,
           input.at,
         )
+      this.insertNextRunEvent({
+        ownerId: run.ownerId,
+        runId: run.id,
+        type: "run.status",
+        source: "control-plane",
+        payload: {
+          fromStatus: run.status,
+          toStatus,
+          statusVersion: claimed.statusVersion,
+          reason: input.resultAudit.action,
+        },
+        createdAt: input.at,
+      })
       const writeAudit = (audit: RunMutationAudit): void =>
         this.insertAudit({
           id: crypto.randomUUID(),
@@ -1219,6 +1589,19 @@ export class Store {
           input.reason,
           input.at,
         )
+      this.insertNextRunEvent({
+        ownerId: run.ownerId,
+        runId: run.id,
+        type: "run.status",
+        source: "control-plane",
+        payload: {
+          fromStatus: input.expectedStatus,
+          toStatus: input.toStatus,
+          statusVersion: run.statusVersion,
+          reason: input.reason,
+        },
+        createdAt: input.at,
+      })
       this.insertAudit({
         id: crypto.randomUUID(),
         ownerId: run.ownerId,
@@ -1426,6 +1809,19 @@ export class Store {
           input.providerCursor,
           input.createdAt,
         )
+      this.insertNextRunEvent(
+        eventForLog({
+          ownerId: input.ownerId,
+          runId: input.runId,
+          sequence,
+          stream: input.stream,
+          eventType: input.eventType,
+          data: input.data,
+          runnerSessionId: input.runnerSessionId,
+          runnerSequence: input.runnerSequence,
+          createdAt: input.createdAt,
+        }),
+      )
       const advanced = this.database
         .query(`
           UPDATE runner_sessions SET provider_cursor = ?, runner_sequence = ?,
@@ -1491,6 +1887,19 @@ export class Store {
             input.runningTransition.reason,
             at,
           )
+        this.insertNextRunEvent({
+          ownerId: run.ownerId,
+          runId: run.id,
+          type: "run.status",
+          source: "control-plane",
+          payload: {
+            fromStatus: "provisioning",
+            toStatus: "running",
+            statusVersion: resultingRun.statusVersion,
+            reason: input.runningTransition.reason,
+          },
+          createdAt: at,
+        })
         this.insertAudit({
           id: crypto.randomUUID(),
           ownerId: run.ownerId,
@@ -1535,26 +1944,30 @@ export class Store {
   }
 
   appendRunLog(chunk: RunLogChunk): boolean {
-    return (
-      this.database
-        .query(`
+    const transaction = this.database.transaction(() => {
+      const inserted =
+        this.database
+          .query(`
           INSERT INTO run_logs(
             owner_id, run_id, sequence, stream, event_type, data,
             runner_session_id, runner_sequence, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
         `)
-        .run(
-          chunk.ownerId,
-          chunk.runId,
-          chunk.sequence,
-          chunk.stream,
-          chunk.eventType,
-          chunk.data,
-          chunk.runnerSessionId ?? null,
-          chunk.runnerSequence ?? null,
-          chunk.createdAt,
-        ).changes === 1
-    )
+          .run(
+            chunk.ownerId,
+            chunk.runId,
+            chunk.sequence,
+            chunk.stream,
+            chunk.eventType,
+            chunk.data,
+            chunk.runnerSessionId ?? null,
+            chunk.runnerSequence ?? null,
+            chunk.createdAt,
+          ).changes === 1
+      if (inserted) this.insertNextRunEvent(eventForLog(chunk))
+      return inserted
+    })
+    return transaction.immediate()
   }
 
   appendRunLogNext(input: Omit<RunLogChunk, "sequence">): RunLogChunk | null {
@@ -1619,6 +2032,44 @@ export class Store {
         ...(row.runner_sequence === null ? {} : { runnerSequence: row.runner_sequence }),
         createdAt: row.created_at,
       }))
+  }
+
+  listRunEvents(ownerId: string, runId: string, after: number, limit: number): readonly RunEvent[] {
+    return this.database
+      .query<RunEventRow, [string, string, number, number]>(`
+        SELECT * FROM run_events
+        WHERE owner_id = ? AND run_id = ? AND sequence > ?
+        ORDER BY sequence LIMIT ?
+      `)
+      .all(ownerId, runId, after, Math.min(Math.max(limit, 1), 1_000))
+      .map(runEventFromRow)
+  }
+
+  private insertNextRunEvent(input: RunEventInput): RunEvent {
+    const sequence =
+      this.database
+        .query<{ sequence: number }, [string]>(
+          "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM run_events WHERE run_id = ?",
+        )
+        .get(input.runId)?.sequence ?? 1
+    const event = { ...input, version: RUN_EVENT_VERSION, sequence } as RunEvent
+    this.database
+      .query(`
+        INSERT INTO run_events(
+          owner_id, run_id, sequence, version, type, source, payload_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        event.ownerId,
+        event.runId,
+        event.sequence,
+        event.version,
+        event.type,
+        event.source,
+        stringify(event.payload),
+        event.createdAt,
+      )
+    return event
   }
 
   createRuntime(runtime: RuntimeInstance, audit?: AuditRecord): void {
@@ -1752,6 +2203,26 @@ export class Store {
         )
       if (result.changes !== 1) throw new Error("Runtime cleanup claim was lost")
       this.insertAudit(input.audit)
+      const runtime = this.database
+        .query<RuntimeRow, [string]>("SELECT * FROM runtime_instances WHERE id = ?")
+        .get(input.runtimeId)
+      if (runtime === null) throw new Error("Cleaned runtime is missing")
+      this.insertNextRunEvent({
+        ownerId: runtime.owner_id,
+        runId: runtime.run_id,
+        type: "runtime.cleanup",
+        source: "control-plane",
+        payload: {
+          runtimeId: runtime.id,
+          status: runtime.cleanup_status,
+          attempt: runtime.cleanup_attempts,
+          error:
+            runtime.cleanup_last_error_json === null
+              ? null
+              : parse<StructuredError>(runtime.cleanup_last_error_json),
+        },
+        createdAt: input.at,
+      })
     })
     transaction()
   }
@@ -1862,7 +2333,23 @@ export class Store {
             artifact.storageKey,
             artifact.createdAt,
           )
-        if (inserted.changes === 1) continue
+        if (inserted.changes === 1) {
+          this.insertNextRunEvent({
+            ownerId: artifact.ownerId,
+            runId: artifact.runId,
+            type: "artifact.captured",
+            source: "control-plane",
+            payload: {
+              artifactId: artifact.id,
+              logicalPath: artifact.logicalPath,
+              kind: artifact.kind,
+              digest: artifact.digest,
+              byteSize: artifact.byteSize,
+            },
+            createdAt: artifact.createdAt,
+          })
+          continue
+        }
         const existing = this.database
           .query<ArtifactRow, [string]>("SELECT * FROM artifacts WHERE id = ?")
           .get(artifact.id)
@@ -2183,6 +2670,1130 @@ export class Store {
         stringify(record.metadata),
         record.createdAt,
       )
+  }
+
+  createAgentSession(input: CreateAgentSessionInput): boolean {
+    return this.database.transaction(() => {
+      if (input.idempotencyKey !== undefined) {
+        const existing = this.database
+          .query<{ request_hash: string; session_id: string }, [string, string]>(
+            "SELECT request_hash, session_id FROM session_idempotency_keys WHERE owner_id = ? AND key = ?",
+          )
+          .get(input.ownerId, input.idempotencyKey)
+        if (existing) {
+          if (existing.request_hash !== input.requestHash) {
+            throw new AppError({
+              code: "IDEMPOTENCY_CONFLICT",
+              status: 409,
+              message: "Idempotency key is already bound to different session input",
+            })
+          }
+          return false
+        }
+      }
+
+      this.database
+        .query(`
+          INSERT INTO agent_sessions(
+            id, owner_id, workspace_json, agent_type, agent_spec_json,
+            agent_catalog_digest, execution_provenance_json, env_json, secret_refs_json,
+            provider, status, status_version, idle_timeout_ms, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?)
+        `)
+        .run(
+          input.id,
+          input.ownerId,
+          stringify(input.workspace),
+          input.agentType,
+          stringify(input.agentSpec),
+          input.agentCatalogDigest,
+          stringify(input.executionProvenance),
+          stringify(input.env),
+          stringify(input.secretRefs),
+          input.provider,
+          input.idleTimeoutMs,
+          input.createdAt,
+          input.createdAt,
+        )
+      this.#insertSessionEvent({
+        ownerId: input.ownerId,
+        sessionId: input.id,
+        turnId: null,
+        type: "session.status",
+        source: "control-plane",
+        payload: { fromStatus: null, toStatus: "queued", statusVersion: 1, reason: "created" },
+        createdAt: input.createdAt,
+      })
+      if (input.idempotencyKey !== undefined) {
+        this.database
+          .query(`
+            INSERT INTO session_idempotency_keys(owner_id,key,request_hash,session_id,created_at)
+            VALUES (?, ?, ?, ?, ?)
+          `)
+          .run(
+            input.ownerId,
+            input.idempotencyKey,
+            input.requestHash as string,
+            input.id,
+            input.createdAt,
+          )
+      }
+      this.insertAudit({
+        ...input.audit,
+        id: crypto.randomUUID(),
+        ownerId: input.ownerId,
+        action: "session.create",
+        resourceType: "session",
+        resourceId: input.id,
+        createdAt: input.createdAt,
+      })
+      return true
+    })()
+  }
+
+  getAgentSession(ownerId: string, sessionId: string): AgentSession | null {
+    const row = this.database
+      .query<AgentSessionRow, [string, string]>(
+        "SELECT * FROM agent_sessions WHERE owner_id = ? AND id = ?",
+      )
+      .get(ownerId, sessionId)
+    return row ? agentSessionFromRow(row) : null
+  }
+
+  getAgentSessionInternal(sessionId: string): AgentSession | null {
+    const row = this.database
+      .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id = ?")
+      .get(sessionId)
+    return row ? agentSessionFromRow(row) : null
+  }
+
+  getIdempotentAgentSession(
+    ownerId: string,
+    key: string,
+  ): { readonly requestHash: string; readonly session: AgentSession } | null {
+    const row = this.database
+      .query<AgentSessionRow & { request_hash: string }, [string, string]>(`
+        SELECT s.*, i.request_hash FROM session_idempotency_keys i
+        JOIN agent_sessions s ON s.owner_id = i.owner_id AND s.id = i.session_id
+        WHERE i.owner_id = ? AND i.key = ?
+      `)
+      .get(ownerId, key)
+    return row ? { requestHash: row.request_hash, session: agentSessionFromRow(row) } : null
+  }
+
+  listAgentSessions(ownerId: string, limit = 50): readonly AgentSession[] {
+    return this.database
+      .query<AgentSessionRow, [string, number]>(`
+        SELECT * FROM agent_sessions WHERE owner_id = ? ORDER BY created_at DESC, id DESC LIMIT ?
+      `)
+      .all(ownerId, Math.min(Math.max(limit, 1), 100))
+      .map(agentSessionFromRow)
+  }
+
+  listOperationalAgentSessions(): readonly AgentSession[] {
+    return this.database
+      .query<AgentSessionRow, []>(`
+        SELECT * FROM agent_sessions
+        WHERE status IN ('queued','provisioning','idle','running','closing')
+        ORDER BY created_at, id
+      `)
+      .all()
+      .map(agentSessionFromRow)
+  }
+
+  claimAgentSessionProvisioning(sessionId: string, at: string): AgentSession | null {
+    return this.database.transaction(() => {
+      const row = this.database
+        .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id = ?")
+        .get(sessionId)
+      if (row?.status !== "queued") return null
+      this.database
+        .query(`
+          UPDATE agent_sessions SET status='provisioning', status_version=status_version+1,
+            started_at=?, updated_at=? WHERE id=? AND status='queued' AND status_version=?
+        `)
+        .run(at, at, sessionId, row.status_version)
+      this.#insertSessionStatus(row, "provisioning", "executor_claimed", at)
+      this.insertAudit({
+        id: crypto.randomUUID(),
+        ownerId: row.owner_id,
+        actorApiKeyId: null,
+        action: "session.provision",
+        resourceType: "session",
+        resourceId: sessionId,
+        requestId: `executor:${sessionId}`,
+        traceId: null,
+        metadata: {},
+        createdAt: at,
+      })
+      return this.getAgentSessionInternal(sessionId)
+    })()
+  }
+
+  attachSessionRuntime(input: {
+    readonly sessionId: string
+    readonly ownerId: string
+    readonly provider: string
+    readonly runtimeId: string
+    readonly runtimeHandle: JsonObject
+    readonly at: string
+  }): void {
+    this.database.transaction(() => {
+      this.database
+        .query(`
+          INSERT INTO session_runtime_leases(
+            session_id,owner_id,provider,runtime_handle_json,cleanup_status,created_at,updated_at
+          ) VALUES (?, ?, ?, ?, 'pending', ?, ?)
+        `)
+        .run(
+          input.sessionId,
+          input.ownerId,
+          input.provider,
+          stringify(input.runtimeHandle),
+          input.at,
+          input.at,
+        )
+      this.database
+        .query("UPDATE agent_sessions SET runtime_id=?, updated_at=? WHERE id=? AND owner_id=?")
+        .run(input.runtimeId, input.at, input.sessionId, input.ownerId)
+      this.insertAudit({
+        id: crypto.randomUUID(),
+        ownerId: input.ownerId,
+        actorApiKeyId: null,
+        action: "runtime.create",
+        resourceType: "runtime",
+        resourceId: input.runtimeId,
+        requestId: `executor:${input.sessionId}`,
+        traceId: null,
+        metadata: { sessionId: input.sessionId, provider: input.provider },
+        createdAt: input.at,
+      })
+    })()
+  }
+
+  attachSessionProcess(input: {
+    readonly sessionId: string
+    readonly ownerId: string
+    readonly processId: string
+    readonly processHandle: JsonObject
+    readonly at: string
+  }): void {
+    this.database.transaction(() => {
+      this.database
+        .query(`
+          UPDATE session_runtime_leases SET process_handle_json=?, updated_at=?
+          WHERE session_id=? AND owner_id=?
+        `)
+        .run(stringify(input.processHandle), input.at, input.sessionId, input.ownerId)
+      this.database
+        .query("UPDATE agent_sessions SET process_id=?, updated_at=? WHERE id=? AND owner_id=?")
+        .run(input.processId, input.at, input.sessionId, input.ownerId)
+      this.insertAudit({
+        id: crypto.randomUUID(),
+        ownerId: input.ownerId,
+        actorApiKeyId: null,
+        action: "agent.start",
+        resourceType: "session",
+        resourceId: input.sessionId,
+        requestId: `executor:${input.sessionId}`,
+        traceId: null,
+        metadata: { processId: input.processId },
+        createdAt: input.at,
+      })
+    })()
+  }
+
+  getSessionRuntimeLease(sessionId: string): SessionRuntimeLease | null {
+    const row = this.database
+      .query<SessionLeaseRow, [string]>("SELECT * FROM session_runtime_leases WHERE session_id = ?")
+      .get(sessionId)
+    return row ? sessionLeaseFromRow(row) : null
+  }
+
+  createSessionTurn(input: CreateSessionTurnInput): { turn: SessionTurn; replayed: boolean } {
+    return this.database.transaction(() => {
+      const sessionRow = this.database
+        .query<AgentSessionRow, [string, string]>(
+          "SELECT * FROM agent_sessions WHERE owner_id=? AND id=?",
+        )
+        .get(input.ownerId, input.sessionId)
+      if (!sessionRow) throw new AppError({ code: "NOT_FOUND", message: "Session not found" })
+      if (["closed", "failed", "continuity_lost", "closing"].includes(sessionRow.status)) {
+        throw new AppError({
+          code: "SESSION_NOT_ACTIVE",
+          status: 409,
+          message: "Session is not active",
+        })
+      }
+      if (input.idempotencyKey !== undefined) {
+        const existing = this.database
+          .query<{ request_hash: string; turn_id: string }, [string, string, string]>(`
+            SELECT request_hash, turn_id FROM turn_idempotency_keys
+            WHERE owner_id=? AND session_id=? AND key=?
+          `)
+          .get(input.ownerId, input.sessionId, input.idempotencyKey)
+        if (existing) {
+          if (existing.request_hash !== input.requestHash) {
+            throw new AppError({
+              code: "IDEMPOTENCY_CONFLICT",
+              status: 409,
+              message: "Idempotency key is already bound to different turn input",
+            })
+          }
+          const turn = this.getSessionTurn(input.ownerId, input.sessionId, existing.turn_id)
+          if (!turn)
+            throw new AppError({
+              code: "DATABASE_INTEGRITY_FAILED",
+              message: "Idempotent turn is missing",
+            })
+          return { turn, replayed: true }
+        }
+      }
+      const openTurn = this.database
+        .query<{ id: string }, [string]>(`
+          SELECT id FROM session_turns
+          WHERE session_id=? AND status IN ('queued','running') ORDER BY sequence LIMIT 1
+        `)
+        .get(input.sessionId)
+      if (openTurn !== null && input.conflictPolicy === "reject") {
+        throw new AppError({
+          code: "SESSION_BUSY",
+          status: 409,
+          message: "Session already has an active turn",
+        })
+      }
+      const sequence =
+        this.database
+          .query<{ value: number }, [string]>(
+            "SELECT COALESCE(MAX(sequence),0)+1 AS value FROM session_turns WHERE session_id=?",
+          )
+          .get(input.sessionId)?.value ?? 1
+      this.database
+        .query(`
+          INSERT INTO session_turns(
+            id,owner_id,session_id,sequence,prompt,timeout_ms,status,status_version,created_at,updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)
+        `)
+        .run(
+          input.id,
+          input.ownerId,
+          input.sessionId,
+          sequence,
+          input.prompt,
+          input.timeoutMs,
+          input.createdAt,
+          input.createdAt,
+        )
+      this.#insertSessionEvent({
+        ownerId: input.ownerId,
+        sessionId: input.sessionId,
+        turnId: input.id,
+        type: "turn.status",
+        source: "control-plane",
+        payload: { fromStatus: null, toStatus: "queued", statusVersion: 1, reason: "created" },
+        createdAt: input.createdAt,
+      })
+      if (input.idempotencyKey !== undefined) {
+        this.database
+          .query(`
+            INSERT INTO turn_idempotency_keys(owner_id,session_id,key,request_hash,turn_id,created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            input.ownerId,
+            input.sessionId,
+            input.idempotencyKey,
+            input.requestHash as string,
+            input.id,
+            input.createdAt,
+          )
+      }
+      if (sessionRow.active_turn_id === null && sessionRow.status === "idle") {
+        this.#activateTurn(sessionRow, input.id, input.createdAt)
+      } else if (
+        sessionRow.active_turn_id !== null &&
+        input.conflictPolicy === "interrupt_and_send"
+      ) {
+        this.#queueSessionCommand(
+          input.ownerId,
+          input.sessionId,
+          "turn.interrupt",
+          sessionRow.active_turn_id,
+          { turnId: sessionRow.active_turn_id },
+          input.createdAt,
+        )
+        this.insertAudit({
+          ...input.audit,
+          id: crypto.randomUUID(),
+          ownerId: input.ownerId,
+          action: "session.interrupt",
+          resourceType: "session",
+          resourceId: input.sessionId,
+          metadata: { turnId: sessionRow.active_turn_id, replacementTurnId: input.id },
+          createdAt: input.createdAt,
+        })
+      }
+      this.insertAudit({
+        ...input.audit,
+        id: crypto.randomUUID(),
+        ownerId: input.ownerId,
+        action: "turn.create",
+        resourceType: "turn",
+        resourceId: input.id,
+        metadata: {
+          ...input.audit.metadata,
+          sessionId: input.sessionId,
+          conflictPolicy: input.conflictPolicy,
+        },
+        createdAt: input.createdAt,
+      })
+      return {
+        turn: this.getSessionTurn(input.ownerId, input.sessionId, input.id) as SessionTurn,
+        replayed: false,
+      }
+    })()
+  }
+
+  getSessionTurn(ownerId: string, sessionId: string, turnId: string): SessionTurn | null {
+    const row = this.database
+      .query<SessionTurnRow, [string, string, string]>(`
+        SELECT * FROM session_turns WHERE owner_id=? AND session_id=? AND id=?
+      `)
+      .get(ownerId, sessionId, turnId)
+    return row ? sessionTurnFromRow(row) : null
+  }
+
+  listSessionTurns(ownerId: string, sessionId: string): readonly SessionTurn[] {
+    return this.database
+      .query<SessionTurnRow, [string, string]>(`
+        SELECT * FROM session_turns WHERE owner_id=? AND session_id=? ORDER BY sequence
+      `)
+      .all(ownerId, sessionId)
+      .map(sessionTurnFromRow)
+  }
+
+  listSessionEvents(
+    ownerId: string,
+    sessionId: string,
+    after: number,
+    limit: number,
+  ): readonly SessionEvent[] {
+    return this.database
+      .query<SessionEventRow, [string, string, number, number]>(`
+        SELECT owner_id,session_id,sequence,version,type,source,turn_id,payload_json,created_at
+        FROM session_events WHERE owner_id=? AND session_id=? AND sequence>?
+        ORDER BY sequence LIMIT ?
+      `)
+      .all(ownerId, sessionId, after, Math.min(Math.max(limit, 1), 1000))
+      .map(sessionEventFromRow)
+  }
+
+  requestSessionInterrupt(input: {
+    readonly ownerId: string
+    readonly sessionId: string
+    readonly at: string
+    readonly audit: Omit<
+      AuditRecord,
+      "id" | "ownerId" | "action" | "resourceType" | "resourceId" | "createdAt"
+    >
+  }): AgentSession {
+    return this.database.transaction(() => {
+      const session = this.getAgentSession(input.ownerId, input.sessionId)
+      if (!session) throw new AppError({ code: "NOT_FOUND", message: "Session not found" })
+      if (!session.activeTurnId) return session
+      this.#queueSessionCommand(
+        input.ownerId,
+        input.sessionId,
+        "turn.interrupt",
+        session.activeTurnId,
+        { turnId: session.activeTurnId },
+        input.at,
+      )
+      this.insertAudit({
+        ...input.audit,
+        id: crypto.randomUUID(),
+        ownerId: input.ownerId,
+        action: "session.interrupt",
+        resourceType: "session",
+        resourceId: input.sessionId,
+        metadata: { ...input.audit.metadata, turnId: session.activeTurnId },
+        createdAt: input.at,
+      })
+      return session
+    })()
+  }
+
+  requestSessionClose(input: {
+    readonly ownerId: string
+    readonly sessionId: string
+    readonly at: string
+    readonly audit: Omit<
+      AuditRecord,
+      "id" | "ownerId" | "action" | "resourceType" | "resourceId" | "createdAt"
+    >
+  }): AgentSession {
+    return this.database.transaction(() => {
+      const row = this.database
+        .query<AgentSessionRow, [string, string]>(
+          "SELECT * FROM agent_sessions WHERE owner_id=? AND id=?",
+        )
+        .get(input.ownerId, input.sessionId)
+      if (!row) throw new AppError({ code: "NOT_FOUND", message: "Session not found" })
+      if (["closed", "failed", "continuity_lost"].includes(row.status))
+        return agentSessionFromRow(row)
+      if (row.status === "closing") return agentSessionFromRow(row)
+      if (row.active_turn_id)
+        this.#queueSessionCommand(
+          input.ownerId,
+          input.sessionId,
+          "turn.interrupt",
+          row.active_turn_id,
+          { turnId: row.active_turn_id },
+          input.at,
+        )
+      this.#queueSessionCommand(input.ownerId, input.sessionId, "session.close", null, {}, input.at)
+      this.database
+        .query(
+          "UPDATE agent_sessions SET status='closing',status_version=status_version+1,updated_at=? WHERE id=?",
+        )
+        .run(input.at, input.sessionId)
+      this.#insertSessionStatus(row, "closing", "close_requested", input.at)
+      this.insertAudit({
+        ...input.audit,
+        id: crypto.randomUUID(),
+        ownerId: input.ownerId,
+        action: "session.close",
+        resourceType: "session",
+        resourceId: input.sessionId,
+        createdAt: input.at,
+      })
+      return this.getAgentSession(input.ownerId, input.sessionId) as AgentSession
+    })()
+  }
+
+  listPendingSessionCommands(sessionId: string): readonly SessionCommandRecord[] {
+    return this.database
+      .query<
+        {
+          owner_id: string
+          session_id: string
+          sequence: number
+          id: string
+          type: SessionCommandRecord["type"]
+          turn_id: string | null
+          data_json: string
+          state: SessionCommandRecord["state"]
+          created_at: string
+          sent_at: string | null
+        },
+        [string]
+      >("SELECT * FROM session_commands WHERE session_id=? AND state='pending' ORDER BY sequence")
+      .all(sessionId)
+      .map((row) => ({
+        ownerId: row.owner_id,
+        sessionId: row.session_id,
+        sequence: row.sequence,
+        id: row.id,
+        type: row.type,
+        turnId: row.turn_id,
+        data: parse<JsonObject>(row.data_json),
+        state: row.state,
+        createdAt: row.created_at,
+        sentAt: row.sent_at,
+      }))
+  }
+
+  markSessionCommandSent(sessionId: string, sequence: number, at: string): void {
+    this.database.transaction(() => {
+      this.database
+        .query(
+          "UPDATE session_commands SET state='sent',sent_at=? WHERE session_id=? AND sequence=? AND state='pending'",
+        )
+        .run(at, sessionId, sequence)
+      this.database
+        .query(
+          "UPDATE session_runtime_leases SET command_sequence=MAX(command_sequence,?),updated_at=? WHERE session_id=?",
+        )
+        .run(sequence, at, sessionId)
+    })()
+  }
+
+  updateSessionProviderCursor(sessionId: string, cursor: string, at: string): void {
+    this.database
+      .query("UPDATE session_runtime_leases SET provider_cursor=?,updated_at=? WHERE session_id=?")
+      .run(cursor, at, sessionId)
+  }
+
+  timeoutActiveSessionTurn(sessionId: string, at: string): boolean {
+    return this.database.transaction(() => {
+      const session = this.database
+        .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id=?")
+        .get(sessionId)
+      if (!session?.active_turn_id || session.status !== "running") return false
+      const turn = this.#requireSessionTurn(sessionId, session.active_turn_id)
+      if (
+        turn.status !== "running" ||
+        turn.deadline_at === null ||
+        Date.parse(turn.deadline_at) > Date.parse(at)
+      ) {
+        return false
+      }
+      const error: StructuredError = {
+        code: "TURN_TIMED_OUT",
+        message: "The agent turn exceeded its configured timeout",
+        retryable: false,
+      }
+      this.database
+        .query(`
+          UPDATE session_turns SET status='timed_out',status_version=status_version+1,
+            finished_at=?,updated_at=?,error_json=? WHERE id=? AND status='running'
+        `)
+        .run(at, at, stringify(error), turn.id)
+      this.#insertTurnStatus(turn, "timed_out", "control_plane_deadline", at)
+      this.#queueSessionCommand(
+        session.owner_id,
+        session.id,
+        "turn.interrupt",
+        turn.id,
+        { turnId: turn.id },
+        at,
+      )
+      this.insertAudit({
+        id: crypto.randomUUID(),
+        ownerId: session.owner_id,
+        actorApiKeyId: null,
+        action: "turn.timeout",
+        resourceType: "turn",
+        resourceId: turn.id,
+        requestId: `executor:${session.id}`,
+        traceId: null,
+        metadata: { sessionId: session.id },
+        createdAt: at,
+      })
+      this.#advanceSessionAfterTurn(session, turn.id, at)
+      return true
+    })()
+  }
+
+  acceptSessionFrame(input: AcceptSessionFrameInput): boolean {
+    return this.database.transaction(() => {
+      const leaseRow = this.database
+        .query<SessionLeaseRow, [string]>("SELECT * FROM session_runtime_leases WHERE session_id=?")
+        .get(input.sessionId)
+      if (!leaseRow || leaseRow.owner_id !== input.ownerId)
+        throw new AppError({
+          code: "SESSION_RUNTIME_LOST",
+          message: "Session runtime lease is missing",
+        })
+      if (input.runnerSequence <= leaseRow.runner_sequence) {
+        const accepted = this.database
+          .query<{ type: string; turn_id: string | null; payload_json: string }, [string, number]>(`
+            SELECT type,turn_id,payload_json FROM session_events
+            WHERE session_id=? AND runner_sequence=?
+          `)
+          .get(input.sessionId, input.runnerSequence)
+        if (
+          accepted?.type === input.type &&
+          accepted.turn_id === input.turnId &&
+          accepted.payload_json === stringify(input.payload)
+        ) {
+          return false
+        }
+        throw new AppError({
+          code: "RUNNER_PROTOCOL_ERROR",
+          message: "Session runner replay conflicts with accepted evidence",
+        })
+      }
+      if (input.runnerSequence !== leaseRow.runner_sequence + 1)
+        throw new AppError({
+          code: "RUNNER_PROTOCOL_ERROR",
+          message: "Session runner sequence contained a gap",
+        })
+      this.#insertSessionEvent({
+        ...input,
+        source: "runner",
+        runnerSequence: input.runnerSequence,
+        providerCursor: input.providerCursor,
+      })
+
+      const sessionRow = this.database
+        .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id=?")
+        .get(input.sessionId)
+      if (!sessionRow)
+        throw new AppError({
+          code: "DATABASE_INTEGRITY_FAILED",
+          message: "Session record is missing",
+        })
+
+      if (input.type === "session.ready") {
+        const agentSessionId = Reflect.get(input.payload, "agentSessionId")
+        const capabilities = Reflect.get(input.payload, "capabilities")
+        this.database
+          .query(
+            "UPDATE agent_sessions SET agent_session_id=?,capabilities_json=?,updated_at=? WHERE id=?",
+          )
+          .run(String(agentSessionId), stringify(capabilities), input.createdAt, input.sessionId)
+        if (sessionRow.status === "provisioning") {
+          this.database
+            .query(
+              "UPDATE agent_sessions SET status='idle',status_version=status_version+1,updated_at=? WHERE id=?",
+            )
+            .run(input.createdAt, input.sessionId)
+          this.#insertSessionStatus(sessionRow, "idle", "runner_ready", input.createdAt)
+          const queued = this.database
+            .query<SessionTurnRow, [string]>(
+              "SELECT * FROM session_turns WHERE session_id=? AND status='queued' ORDER BY sequence LIMIT 1",
+            )
+            .get(input.sessionId)
+          const ready = this.database
+            .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id=?")
+            .get(input.sessionId)
+          if (queued && ready) this.#activateTurn(ready, queued.id, input.createdAt)
+        }
+      } else if (input.type === "turn.started" && input.turnId) {
+        const turn = this.#requireSessionTurn(input.sessionId, input.turnId)
+        if (turn.status === "queued") {
+          const deadline = new Date(Date.parse(input.createdAt) + turn.timeout_ms).toISOString()
+          this.database
+            .query(
+              "UPDATE session_turns SET status='running',status_version=status_version+1,started_at=?,deadline_at=?,updated_at=? WHERE id=?",
+            )
+            .run(input.createdAt, deadline, input.createdAt, input.turnId)
+          this.#insertTurnStatus(turn, "running", "runner_started", input.createdAt)
+        }
+      } else if (input.type === "turn.terminal" && input.turnId) {
+        const turn = this.#requireSessionTurn(input.sessionId, input.turnId)
+        if (turn.status === "queued" || turn.status === "running") {
+          const result = Reflect.get(input.payload, "result")
+          const outcome =
+            typeof result === "object" && result !== null
+              ? Reflect.get(result, "outcome")
+              : "failed"
+          const status: TurnStatus =
+            outcome === "succeeded"
+              ? "succeeded"
+              : outcome === "cancelled"
+                ? "interrupted"
+                : outcome === "timed_out"
+                  ? "timed_out"
+                  : "failed"
+          const error =
+            typeof result === "object" && result !== null ? Reflect.get(result, "error") : null
+          this.database
+            .query(
+              "UPDATE session_turns SET status=?,status_version=status_version+1,finished_at=?,updated_at=?,error_json=? WHERE id=?",
+            )
+            .run(
+              status,
+              input.createdAt,
+              input.createdAt,
+              error == null ? null : stringify(error),
+              input.turnId,
+            )
+          this.#insertTurnStatus(turn, status, "runner_terminal", input.createdAt)
+          if (status === "timed_out") {
+            this.insertAudit({
+              id: crypto.randomUUID(),
+              ownerId: input.ownerId,
+              actorApiKeyId: null,
+              action: "turn.timeout",
+              resourceType: "turn",
+              resourceId: input.turnId,
+              requestId: `executor:${input.sessionId}`,
+              traceId: null,
+              metadata: { sessionId: input.sessionId, source: "runner" },
+              createdAt: input.createdAt,
+            })
+          }
+          this.#advanceSessionAfterTurn(sessionRow, input.turnId, input.createdAt)
+        }
+      } else if (input.type === "session.closed") {
+        const reason = Reflect.get(input.payload, "reason")
+        const status: AgentSessionStatus =
+          reason === "requested" || reason === "idle_timeout"
+            ? "closed"
+            : reason === "failed"
+              ? "failed"
+              : "continuity_lost"
+        if (!["closed", "failed", "continuity_lost"].includes(sessionRow.status)) {
+          const turnStatus: Extract<TurnStatus, "interrupted" | "failed"> =
+            status === "closed" ? "interrupted" : "failed"
+          this.#finishOpenSessionTurns(
+            input.sessionId,
+            turnStatus,
+            status === "closed" ? null : continuityError(status),
+            input.createdAt,
+            `session_${String(reason)}`,
+          )
+          this.database
+            .query(
+              "UPDATE agent_sessions SET status=?,status_version=status_version+1,active_turn_id=NULL,closed_at=?,updated_at=? WHERE id=?",
+            )
+            .run(status, input.createdAt, input.createdAt, input.sessionId)
+          this.#insertSessionStatus(sessionRow, status, `runner_${String(reason)}`, input.createdAt)
+          this.#scheduleSessionCleanup(input.sessionId, input.createdAt)
+        }
+      }
+      this.database
+        .query(
+          "UPDATE session_runtime_leases SET runner_sequence=?,provider_cursor=?,updated_at=? WHERE session_id=?",
+        )
+        .run(input.runnerSequence, input.providerCursor, input.createdAt, input.sessionId)
+      return true
+    })()
+  }
+
+  failAgentSession(sessionId: string, error: StructuredError, at: string): void {
+    this.database.transaction(() => {
+      const row = this.database
+        .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id=?")
+        .get(sessionId)
+      if (!row || ["closed", "failed", "continuity_lost"].includes(row.status)) return
+      this.#finishOpenSessionTurns(sessionId, "failed", error, at, error.code)
+      this.database
+        .query(
+          "UPDATE agent_sessions SET status='failed',status_version=status_version+1,error_json=?,closed_at=?,updated_at=? WHERE id=?",
+        )
+        .run(stringify(error), at, at, sessionId)
+      this.#insertSessionStatus(row, "failed", error.code, at)
+      this.#scheduleSessionCleanup(sessionId, at)
+    })()
+  }
+
+  loseAgentSession(sessionId: string, error: StructuredError, at: string): void {
+    this.database.transaction(() => {
+      const row = this.database
+        .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id=?")
+        .get(sessionId)
+      if (!row || ["closed", "failed", "continuity_lost"].includes(row.status)) return
+      this.#finishOpenSessionTurns(sessionId, "failed", error, at, error.code)
+      this.database
+        .query(
+          "UPDATE agent_sessions SET status='continuity_lost',status_version=status_version+1,error_json=?,closed_at=?,updated_at=? WHERE id=?",
+        )
+        .run(stringify(error), at, at, sessionId)
+      this.#insertSessionStatus(row, "continuity_lost", error.code, at)
+      this.#scheduleSessionCleanup(sessionId, at)
+    })()
+  }
+
+  closeAgentSession(sessionId: string, reason: string, at: string): void {
+    this.database.transaction(() => {
+      const row = this.database
+        .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id=?")
+        .get(sessionId)
+      if (!row || row.status === "closed") return
+      if (row.status === "failed" || row.status === "continuity_lost") return
+      this.#finishOpenSessionTurns(sessionId, "interrupted", null, at, reason)
+      this.database
+        .query(
+          "UPDATE agent_sessions SET status='closed',status_version=status_version+1,active_turn_id=NULL,closed_at=?,updated_at=? WHERE id=?",
+        )
+        .run(at, at, sessionId)
+      this.#insertSessionStatus(row, "closed", reason, at)
+      this.#scheduleSessionCleanup(sessionId, at)
+    })()
+  }
+
+  appendSessionDiagnostic(input: {
+    readonly ownerId: string
+    readonly sessionId: string
+    readonly payload: JsonObject
+    readonly createdAt: string
+  }): void {
+    this.database.transaction(() => {
+      if (!this.getAgentSession(input.ownerId, input.sessionId)) {
+        throw new AppError({ code: "NOT_FOUND", message: "Session not found" })
+      }
+      this.#insertSessionEvent({
+        ownerId: input.ownerId,
+        sessionId: input.sessionId,
+        turnId: null,
+        type: "session.diagnostic",
+        source: "control-plane",
+        payload: input.payload,
+        createdAt: input.createdAt,
+      })
+    })()
+  }
+
+  listSessionCleanupCandidates(at: string, limit = 100): readonly string[] {
+    return this.database
+      .query<{ session_id: string }, [string, number, number]>(`
+        SELECT lease.session_id FROM session_runtime_leases lease
+        JOIN agent_sessions session
+          ON session.owner_id=lease.owner_id AND session.id=lease.session_id
+        WHERE session.status IN ('closed','failed','continuity_lost')
+          AND lease.cleanup_status IN ('pending','failed')
+          AND lease.cleanup_next_attempt_at IS NOT NULL
+          AND lease.cleanup_next_attempt_at<=?
+          AND lease.cleanup_attempts<?
+        ORDER BY lease.cleanup_next_attempt_at,lease.session_id
+        LIMIT ?
+      `)
+      .all(at, MAX_SESSION_CLEANUP_ATTEMPTS, Math.min(Math.max(limit, 1), 100))
+      .map((row) => row.session_id)
+  }
+
+  claimSessionRuntimeCleanup(sessionId: string, at: string): SessionRuntimeLease | null {
+    return this.database.transaction(() => {
+      const claimed = this.database
+        .query(`
+          UPDATE session_runtime_leases SET cleanup_status='running',
+            cleanup_attempts=cleanup_attempts+1,cleanup_next_attempt_at=NULL,updated_at=?
+          WHERE session_id=? AND cleanup_status IN ('pending','failed')
+            AND cleanup_next_attempt_at IS NOT NULL AND cleanup_next_attempt_at<=?
+            AND cleanup_attempts<?
+            AND EXISTS (
+              SELECT 1 FROM agent_sessions session
+              WHERE session.id=session_runtime_leases.session_id
+                AND session.status IN ('closed','failed','continuity_lost')
+            )
+        `)
+        .run(at, sessionId, at, MAX_SESSION_CLEANUP_ATTEMPTS)
+      return claimed.changes === 1 ? this.getSessionRuntimeLease(sessionId) : null
+    })()
+  }
+
+  finishSessionRuntimeCleanup(sessionId: string, error: StructuredError | null, at: string): void {
+    this.database.transaction(() => {
+      const lease = this.getSessionRuntimeLease(sessionId)
+      if (lease?.cleanupStatus !== "running") return
+      const exhausted = error !== null && lease.cleanupAttempts >= MAX_SESSION_CLEANUP_ATTEMPTS
+      const delay = Math.min(
+        SESSION_CLEANUP_BASE_DELAY_MS * 2 ** Math.max(0, lease.cleanupAttempts - 1),
+        SESSION_CLEANUP_MAX_DELAY_MS,
+      )
+      const nextAttemptAt =
+        error === null || exhausted ? null : new Date(Date.parse(at) + delay).toISOString()
+      this.database
+        .query(`
+          UPDATE session_runtime_leases SET cleanup_status=?,cleanup_last_error_json=?,
+            cleanup_next_attempt_at=?,destroyed_at=?,updated_at=?
+          WHERE session_id=? AND cleanup_status='running'
+        `)
+        .run(
+          error === null ? "succeeded" : "failed",
+          error === null ? null : stringify(error),
+          nextAttemptAt,
+          error === null ? at : null,
+          at,
+          sessionId,
+        )
+      const session = this.getAgentSessionInternal(sessionId)
+      if (session)
+        this.insertAudit({
+          id: crypto.randomUUID(),
+          ownerId: session.ownerId,
+          actorApiKeyId: null,
+          action: "runtime.destroy",
+          resourceType: "runtime",
+          resourceId: session.runtimeId ?? sessionId,
+          requestId: `executor:${sessionId}`,
+          traceId: null,
+          metadata: {
+            sessionId,
+            succeeded: error === null,
+            attempt: lease.cleanupAttempts,
+            exhausted,
+          },
+          createdAt: at,
+        })
+    })()
+  }
+
+  #finishOpenSessionTurns(
+    sessionId: string,
+    status: Extract<TurnStatus, "interrupted" | "failed">,
+    error: StructuredError | null,
+    at: string,
+    reason: string,
+  ): void {
+    const turns = this.database
+      .query<SessionTurnRow, [string]>(`
+        SELECT * FROM session_turns
+        WHERE session_id=? AND status IN ('queued','running') ORDER BY sequence
+      `)
+      .all(sessionId)
+    for (const turn of turns) {
+      this.database
+        .query(`
+          UPDATE session_turns SET status=?,status_version=status_version+1,
+            finished_at=?,updated_at=?,error_json=?
+          WHERE id=? AND status IN ('queued','running')
+        `)
+        .run(status, at, at, error === null ? null : stringify(error), turn.id)
+      this.#insertTurnStatus(turn, status, reason, at)
+    }
+  }
+
+  #scheduleSessionCleanup(sessionId: string, at: string): void {
+    this.database
+      .query(`
+        UPDATE session_runtime_leases SET cleanup_status='pending',
+          cleanup_next_attempt_at=COALESCE(cleanup_next_attempt_at,?),updated_at=?
+        WHERE session_id=? AND cleanup_status IN ('pending','failed')
+      `)
+      .run(at, at, sessionId)
+  }
+
+  #insertSessionEvent(input: {
+    readonly ownerId: string
+    readonly sessionId: string
+    readonly turnId: string | null
+    readonly type: SessionEvent["type"]
+    readonly source: SessionEvent["source"]
+    readonly payload: JsonObject
+    readonly createdAt: string
+    readonly runnerSequence?: number
+    readonly providerCursor?: string
+  }): void {
+    this.database
+      .query(`
+        INSERT INTO session_events(
+          owner_id,session_id,sequence,version,type,source,turn_id,payload_json,
+          runner_sequence,provider_cursor,created_at
+        ) SELECT ?, ?, COALESCE(MAX(sequence),0)+1, ?, ?, ?, ?, ?, ?, ?, ?
+          FROM session_events WHERE session_id=?
+      `)
+      .run(
+        input.ownerId,
+        input.sessionId,
+        SESSION_EVENT_VERSION,
+        input.type,
+        input.source,
+        input.turnId,
+        stringify(input.payload),
+        input.runnerSequence ?? null,
+        input.providerCursor ?? null,
+        input.createdAt,
+        input.sessionId,
+      )
+  }
+
+  #insertSessionStatus(
+    row: AgentSessionRow,
+    toStatus: AgentSessionStatus,
+    reason: string,
+    at: string,
+  ): void {
+    this.#insertSessionEvent({
+      ownerId: row.owner_id,
+      sessionId: row.id,
+      turnId: row.active_turn_id,
+      type: "session.status",
+      source: "control-plane",
+      payload: { fromStatus: row.status, toStatus, statusVersion: row.status_version + 1, reason },
+      createdAt: at,
+    })
+  }
+
+  #insertTurnStatus(row: SessionTurnRow, toStatus: TurnStatus, reason: string, at: string): void {
+    this.#insertSessionEvent({
+      ownerId: row.owner_id,
+      sessionId: row.session_id,
+      turnId: row.id,
+      type: "turn.status",
+      source: "control-plane",
+      payload: { fromStatus: row.status, toStatus, statusVersion: row.status_version + 1, reason },
+      createdAt: at,
+    })
+  }
+
+  #queueSessionCommand(
+    ownerId: string,
+    sessionId: string,
+    type: SessionCommandRecord["type"],
+    turnId: string | null,
+    payload: JsonObject,
+    at: string,
+  ): void {
+    const sequence =
+      this.database
+        .query<{ value: number }, [string]>(
+          "SELECT COALESCE(MAX(sequence),0)+1 AS value FROM session_commands WHERE session_id=?",
+        )
+        .get(sessionId)?.value ?? 1
+    const id = crypto.randomUUID()
+    const data = {
+      version: 1,
+      sequence,
+      id,
+      type,
+      ...(turnId === null ? {} : { turnId }),
+      ...payload,
+    }
+    this.database
+      .query(`
+        INSERT INTO session_commands(owner_id,session_id,sequence,id,type,turn_id,data_json,state,created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      `)
+      .run(ownerId, sessionId, sequence, id, type, turnId, stringify(data), at)
+  }
+
+  #activateTurn(sessionRow: AgentSessionRow, turnId: string, at: string): void {
+    this.database
+      .query(
+        "UPDATE agent_sessions SET status='running',status_version=status_version+1,active_turn_id=?,updated_at=? WHERE id=?",
+      )
+      .run(turnId, at, sessionRow.id)
+    this.#insertSessionStatus(sessionRow, "running", "turn_activated", at)
+    const turn = this.#requireSessionTurn(sessionRow.id, turnId)
+    this.#queueSessionCommand(
+      sessionRow.owner_id,
+      sessionRow.id,
+      "turn.start",
+      turnId,
+      { prompt: turn.prompt, timeoutBudgetMs: turn.timeout_ms },
+      at,
+    )
+  }
+
+  #advanceSessionAfterTurn(sessionRow: AgentSessionRow, turnId: string, at: string): void {
+    const current = this.database
+      .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id=?")
+      .get(sessionRow.id)
+    if (!current || current.active_turn_id !== turnId) return
+    if (current.status === "closing") return
+    const next = this.database
+      .query<SessionTurnRow, [string]>(
+        "SELECT * FROM session_turns WHERE session_id=? AND status='queued' ORDER BY sequence LIMIT 1",
+      )
+      .get(sessionRow.id)
+    if (next) {
+      this.database
+        .query("UPDATE agent_sessions SET active_turn_id=?,updated_at=? WHERE id=?")
+        .run(next.id, at, current.id)
+      this.#queueSessionCommand(
+        current.owner_id,
+        current.id,
+        "turn.start",
+        next.id,
+        { prompt: next.prompt, timeoutBudgetMs: next.timeout_ms },
+        at,
+      )
+      return
+    }
+    this.database
+      .query(
+        "UPDATE agent_sessions SET status='idle',status_version=status_version+1,active_turn_id=NULL,updated_at=? WHERE id=?",
+      )
+      .run(at, current.id)
+    this.#insertSessionStatus(current, "idle", "turn_finished", at)
+  }
+
+  #requireSessionTurn(sessionId: string, turnId: string): SessionTurnRow {
+    const row = this.database
+      .query<SessionTurnRow, [string, string]>(
+        "SELECT * FROM session_turns WHERE session_id=? AND id=?",
+      )
+      .get(sessionId, turnId)
+    if (!row)
+      throw new AppError({
+        code: "RUNNER_PROTOCOL_ERROR",
+        message: "Runner referenced an unknown turn",
+      })
+    return row
   }
 
   listAudit(ownerId: string, resourceId?: string): readonly AuditRecord[] {

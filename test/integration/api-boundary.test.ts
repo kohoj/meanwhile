@@ -36,7 +36,14 @@ test("the route inventory is exact and every control operation fails closed", as
     "/runs/{id}",
     "/runs/{id}/artifacts",
     "/runs/{id}/cancel",
+    "/runs/{id}/events",
     "/runs/{id}/logs",
+    "/sessions",
+    "/sessions/{id}",
+    "/sessions/{id}/close",
+    "/sessions/{id}/events",
+    "/sessions/{id}/interrupt",
+    "/sessions/{id}/turns",
   ]
   expect(Object.keys(specification.paths).sort()).toEqual(expectedPaths)
   expect(specification.security).toEqual([{ BearerAuth: [] }])

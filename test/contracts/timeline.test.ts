@@ -1,0 +1,137 @@
+import { expect, test } from "bun:test"
+import type { SessionEvent } from "../../src/api/contracts"
+import {
+  emptySessionTimeline,
+  reduceSessionTimeline,
+  sessionTimelineFromEvents,
+} from "../../src/timeline"
+import { API_OWNER_ID, API_SESSION_ID, API_TIMESTAMP, API_TURN_ID } from "../fixtures/api"
+
+test("session timeline is a deterministic projection over durable cross-turn evidence", () => {
+  const events: SessionEvent[] = [
+    statusEvent(1, "session.status", null, {
+      fromStatus: null,
+      toStatus: "queued",
+      statusVersion: 1,
+      reason: "created",
+    }),
+    statusEvent(2, "turn.status", API_TURN_ID, {
+      fromStatus: null,
+      toStatus: "queued",
+      statusVersion: 1,
+      reason: "created",
+    }),
+    statusEvent(3, "turn.status", API_TURN_ID, {
+      fromStatus: "queued",
+      toStatus: "running",
+      statusVersion: 2,
+      reason: "runner_started",
+    }),
+    updateEvent(4, {
+      sessionUpdate: "agent_message_chunk",
+      messageId: "answer",
+      content: { type: "text", text: "hello " },
+    }),
+    updateEvent(5, {
+      sessionUpdate: "agent_message_chunk",
+      messageId: "answer",
+      content: { type: "text", text: "world" },
+    }),
+    updateEvent(6, {
+      sessionUpdate: "tool_call",
+      toolCallId: "read-1",
+      title: "Read file",
+      kind: "read",
+      status: "pending",
+      rawInput: { path: "README.md" },
+    }),
+    updateEvent(7, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "read-1",
+      status: "completed",
+      rawOutput: { bytes: 42 },
+    }),
+    statusEvent(8, "turn.status", API_TURN_ID, {
+      fromStatus: "running",
+      toStatus: "succeeded",
+      statusVersion: 3,
+      reason: "runner_terminal",
+    }),
+    statusEvent(9, "session.status", API_TURN_ID, {
+      fromStatus: "running",
+      toStatus: "idle",
+      statusVersion: 4,
+      reason: "turn_finished",
+    }),
+  ]
+
+  const timeline = sessionTimelineFromEvents(events)
+
+  expect(timeline).toMatchObject({
+    sessionId: API_SESSION_ID,
+    cursor: 9,
+    status: "idle",
+    activeTurnId: null,
+    turnStatuses: { [API_TURN_ID]: "succeeded" },
+    messages: [
+      {
+        id: `${API_TURN_ID}:answer`,
+        turnId: API_TURN_ID,
+        role: "agent",
+        text: "hello world",
+        firstSequence: 4,
+        lastSequence: 5,
+      },
+    ],
+    toolCalls: [
+      {
+        id: `${API_TURN_ID}:read-1`,
+        turnId: API_TURN_ID,
+        title: "Read file",
+        kind: "read",
+        status: "completed",
+        rawInput: { path: "README.md" },
+        rawOutput: { bytes: 42 },
+        firstSequence: 6,
+        lastSequence: 7,
+      },
+    ],
+  })
+  expect(reduceSessionTimeline(timeline, events.at(-1) as SessionEvent)).toBe(timeline)
+  expect(() => reduceSessionTimeline(emptySessionTimeline(), events[1] as SessionEvent)).toThrow(
+    "Session event sequence is not contiguous",
+  )
+})
+
+function statusEvent(
+  sequence: number,
+  type: "session.status" | "turn.status",
+  turnId: string | null,
+  payload: SessionEvent["payload"],
+): SessionEvent {
+  return {
+    version: 1,
+    sessionId: API_SESSION_ID,
+    ownerId: API_OWNER_ID,
+    sequence,
+    turnId,
+    type,
+    source: "control-plane",
+    payload,
+    createdAt: API_TIMESTAMP,
+  } as SessionEvent
+}
+
+function updateEvent(sequence: number, update: Record<string, unknown>): SessionEvent {
+  return {
+    version: 1,
+    sessionId: API_SESSION_ID,
+    ownerId: API_OWNER_ID,
+    sequence,
+    turnId: API_TURN_ID,
+    type: "turn.update",
+    source: "runner",
+    payload: { turnId: API_TURN_ID, update, truncated: false },
+    createdAt: API_TIMESTAMP,
+  }
+}

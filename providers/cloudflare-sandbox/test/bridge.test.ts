@@ -10,6 +10,7 @@ import {
   INITIAL_EVENT_CURSOR,
   MAX_PROCESS_OUTPUT_BYTES,
   type ProcessEventsResponse,
+  type ProcessInputRequest,
   type ProcessSignal,
   type ProcessSnapshot,
   type RuntimeFileInfo,
@@ -219,6 +220,31 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(text).not.toContain("secret-value-one")
     expect(text).not.toContain("secret-value-two")
     expect(fixture.runtime.calls.filter((call) => call === "spawn")).toHaveLength(2)
+  })
+
+  test("binds each process-input sequence before forwarding it to the sandbox", async () => {
+    const fixture = createFixture()
+    const input = {
+      sequence: 1,
+      id: "70c78f7e-a915-4a4b-a9cb-e805f534f606",
+      data: JSON.stringify({ type: "turn.start", prompt: "private prompt" }),
+    }
+    const send = (body: unknown) =>
+      fixture.request(`/v1/runtimes/${RUNTIME_ID}/processes/${PROCESS_ID}/input`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify(body),
+      })
+
+    expect((await send(input)).status).toBe(200)
+    expect((await send(input)).status).toBe(200)
+    const conflict = await send({ ...input, data: "different private prompt" })
+    const text = await conflict.text()
+
+    expect(conflict.status).toBe(409)
+    expect(JSON.parse(text)).toMatchObject({ error: { code: "PROCESS_INPUT_CONFLICT" } })
+    expect(text).not.toContain("private prompt")
+    expect(fixture.runtime.calls.filter((call) => call === "send")).toHaveLength(2)
   })
 
   test("uses a component-wise replay cursor without duplicating stream data", () => {
@@ -673,6 +699,10 @@ class FakeRuntime implements BridgeRuntime {
     return processSnapshot("killed")
   }
 
+  async send(_processId: string, _input: ProcessInputRequest): Promise<void> {
+    this.calls.push("send")
+  }
+
   async wait(): Promise<ProcessSnapshot> {
     this.calls.push("wait")
     return processSnapshot("completed")
@@ -764,6 +794,7 @@ function spawnRequest(stdin: string): SpawnProcessRequest {
     operationId: PROCESS_ID.slice(3),
     argv: ["/opt/meanwhile/bin/meanwhile-runner"],
     stdin,
+    input: "closed",
   }
 }
 

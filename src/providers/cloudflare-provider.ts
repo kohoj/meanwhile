@@ -13,6 +13,7 @@ import {
 } from "../../providers/cloudflare-sandbox/src/protocol"
 import { SERVICE_VERSION } from "../version"
 import {
+  assertProcessInput,
   assertRuntimeId,
   type CreateRuntimeInput,
   type EventCursor,
@@ -21,6 +22,7 @@ import {
   type ProcessEvent,
   type ProcessExit,
   type ProcessHandle,
+  type ProcessInput,
   type ProcessSignal,
   type ProcessSpec,
   type ProcessState,
@@ -80,6 +82,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     isolation: "container" as const,
     processRecovery: true,
     eventReplay: true,
+    processInput: true,
     portExposure: true,
     // Sandbox SDK 0.12.3 exposes hard termination only. Advertising fewer
     // semantics is safer than pretending its ignored signal argument is real.
@@ -255,6 +258,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
             ? {}
             : { terminationGraceMs: spec.terminationGraceMs }),
           ...(spec.initialStdin === undefined ? {} : { stdin: spec.initialStdin }),
+          input: spec.input ?? "closed",
         },
         "process",
         processSnapshotSchema,
@@ -390,6 +394,16 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       const state = processState(snapshot, new Date().toISOString())
       if (state.status === "exited" && state.exit !== undefined) return state.exit
     }
+  }
+
+  async send(process: ProcessHandle, input: ProcessInput): Promise<void> {
+    const identity = this.#processIdentity(process, "send")
+    try {
+      assertProcessInput(input)
+    } catch (cause) {
+      throw this.#error("send", "INVALID_PROCESS_INPUT", "Process input is invalid", cause)
+    }
+    await this.#jsonRequest("send", "POST", `${this.#processPath(identity)}/input`, input)
   }
 
   async writeFiles(runtime: RuntimeHandle, files: readonly RuntimeFile[]): Promise<void> {
@@ -843,6 +857,12 @@ function validateProcessSpec(
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || value.includes("\0")) {
       throw error("INVALID_PROCESS_SPEC", "Process environment contains an invalid name or value")
     }
+  }
+  if (Object.hasOwn(spec.env ?? {}, "MEANWHILE_PROCESS_INBOX")) {
+    throw error("INVALID_PROCESS_SPEC", "Process environment contains a reserved name")
+  }
+  if (spec.input !== undefined && spec.input !== "closed" && spec.input !== "mailbox") {
+    throw error("INVALID_PROCESS_SPEC", "Process input mode is invalid")
   }
   try {
     processHardTimeoutMs(spec)
