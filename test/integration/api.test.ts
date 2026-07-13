@@ -467,6 +467,18 @@ class MemoryDeploymentApi implements DeploymentApi {
     return deployment
   }
 
+  async list(
+    ownerId: string,
+    options: { limit: number; before?: string },
+  ): Promise<{ readonly items: readonly Deployment[]; readonly nextCursor: string | null }> {
+    return {
+      items: [...this.records.values()]
+        .filter((deployment) => deployment.ownerId === ownerId)
+        .slice(0, options.limit),
+      nextCursor: null,
+    }
+  }
+
   async get(ownerId: string, deploymentId: string): Promise<Deployment> {
     const deployment = this.records.get(deploymentId)
     if (deployment === undefined || deployment.ownerId !== ownerId) {

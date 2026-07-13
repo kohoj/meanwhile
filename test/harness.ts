@@ -2,7 +2,7 @@ import type { RequestContext } from "../src/domain"
 import { Store } from "../src/persistence/store"
 import { EnvironmentSecretResolver } from "../src/secrets"
 import { type CreateRunCommand, type RunCommandSink, RunService } from "../src/services/run-service"
-import { permissiveTestAgentIntents } from "./fixtures/agent-intent"
+import { permissiveTestAgentIntents, testExecutionProvenance } from "./fixtures/agent-intent"
 
 export const OWNER_A = "00000000-0000-4000-8000-00000000000a"
 export const OWNER_B = "00000000-0000-4000-8000-00000000000b"
@@ -113,6 +113,7 @@ export const createRunHarness = (): RunHarness => {
       allowedOwnerIds: [OWNER_A, OWNER_B],
     }),
     providerNames: { has: (name) => name === "local" },
+    executionProvenance: testExecutionProvenance,
     defaultProvider: "local",
     clock: clock.now,
     id: () => {

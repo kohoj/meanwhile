@@ -16,6 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises"
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path"
+import { SERVICE_VERSION } from "../version"
 import {
   assertRuntimeId,
   type CreateRuntimeInput,
@@ -100,6 +101,7 @@ export interface LocalRuntimeProviderOptions {
   readonly baseEnvironment?: Readonly<Record<string, string>>
   /** Host path used only when argv[0] is the reserved `meanwhile-runner`. */
   readonly runnerExecutable?: string
+  readonly runnerDigest?: string
 }
 
 /**
@@ -108,6 +110,7 @@ export interface LocalRuntimeProviderOptions {
  */
 export class LocalRuntimeProvider implements RuntimeProvider {
   readonly name = PROVIDER_NAME
+  readonly provenance: RuntimeProvider["provenance"]
   readonly capabilities = Object.freeze({
     isolation: "none" as const,
     processRecovery: globalThis.process.platform !== "win32",
@@ -136,6 +139,16 @@ export class LocalRuntimeProvider implements RuntimeProvider {
       throw new TypeError("runnerExecutable must be an absolute host path")
     }
     this.#runnerExecutable = options.runnerExecutable ?? null
+    if (options.runnerDigest !== undefined && !/^[a-f0-9]{64}$/.test(options.runnerDigest)) {
+      throw new TypeError("runnerDigest must be a SHA-256 digest")
+    }
+    this.provenance = Object.freeze({
+      adapterVersion: SERVICE_VERSION,
+      runnerDigest: options.runnerDigest ?? null,
+      runtimeImageReference: null,
+      runtimeImageDigest: null,
+      bridgeProtocolVersion: null,
+    })
     const configuredEnvironment = validateEnvironment(options.baseEnvironment ?? {})
     const inheritedPath = String(Reflect.get(Bun.env, "PATH") ?? "/usr/local/bin:/usr/bin:/bin")
     const executablePath = configuredEnvironment["PATH"] ?? inheritedPath

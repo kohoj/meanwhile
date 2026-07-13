@@ -34,6 +34,8 @@ import {
   permissiveTestAgentIntents,
   TEST_AGENT_CATALOG_DIGEST,
   testAgentSpec,
+  testExecutionProvenance,
+  testExecutionProvenanceFor,
 } from "../fixtures/agent-intent"
 import { MockRuntimeProvider } from "../fixtures/mock-provider"
 
@@ -54,6 +56,23 @@ afterEach(async () => {
 })
 
 describe("durable runner terminal evidence", () => {
+  test("uses control-plane acceptance time instead of a sandbox wall clock", async () => {
+    const provider = new MockRuntimeProvider()
+    const fixture = await createFixture({
+      provider,
+      runner: terminalRunner({ outcome: "succeeded", stopReason: "end_turn" }, future()),
+    })
+    const run = createRun(fixture.store, {}, provider)
+    const terminalReached = fixture.store.observe(run.id, "succeeded")
+    await fixture.executor.start()
+    await bounded(terminalReached)
+    expect(
+      fixture.store
+        .listRunLogs(OWNER_ID, run.id, 0, 100)
+        .every(({ createdAt }) => createdAt !== future()),
+    ).toBeTrue()
+  })
+
   test("structurally redacts one terminal value before every durable and public representation", async () => {
     const secret = `terminal-"quoted"\\slash\nline-${crypto.randomUUID()}`
     const terminal: RunnerTerminalPayload = {
@@ -72,10 +91,14 @@ describe("durable runner terminal evidence", () => {
       secret,
       workspaceFiles: [{ path: "dist/leak.txt", content: encoder.encode(secret) }],
     })
-    const run = createRun(fixture.store, {
-      secretRefs: { [AGENT_SECRET]: `env://${AGENT_SECRET}` },
-      artifactPaths: ["dist"],
-    })
+    const run = createRun(
+      fixture.store,
+      {
+        secretRefs: { [AGENT_SECRET]: `env://${AGENT_SECRET}` },
+        artifactPaths: ["dist"],
+      },
+      provider,
+    )
     const terminalReached = fixture.store.observe(run.id, "failed")
 
     await fixture.executor.start()
@@ -134,11 +157,15 @@ describe("durable runner terminal evidence", () => {
     const delegate = new MockRuntimeProvider()
     const provider = withRecovery(delegate, false)
     const fixture = await createFixture({ provider, runner: unreachableRunner() })
-    const run = createRun(fixture.store, {
-      artifactPaths: ["dist"],
-      deadlineAt: "2000-01-01T00:00:00.000Z",
-      status: "running",
-    })
+    const run = createRun(
+      fixture.store,
+      {
+        artifactPaths: ["dist"],
+        deadlineAt: "2000-01-01T00:00:00.000Z",
+        status: "running",
+      },
+      provider,
+    )
     const runtime = await seedRuntime(fixture.store, delegate, run, { destroy: true })
     const terminal: RunnerTerminalPayload = {
       outcome: "failed",
@@ -182,11 +209,15 @@ describe("durable runner terminal evidence", () => {
     const delegate = new MockRuntimeProvider()
     const provider = withRecovery(delegate, false)
     const fixture = await createFixture({ provider, runner: unreachableRunner() })
-    const run = createRun(fixture.store, {
-      artifactPaths: ["dist"],
-      deadlineAt: "2000-01-01T00:00:00.000Z",
-      status: "provisioning",
-    })
+    const run = createRun(
+      fixture.store,
+      {
+        artifactPaths: ["dist"],
+        deadlineAt: "2000-01-01T00:00:00.000Z",
+        status: "provisioning",
+      },
+      provider,
+    )
     const runtime = await seedRuntime(fixture.store, delegate, run, {
       files: [{ path: "dist/index.html", content: encoder.encode("<h1>recovered</h1>") }],
     })
@@ -224,7 +255,7 @@ describe("durable runner terminal evidence", () => {
   test("reconciles an accepted session start before waiting on a still-live process", async () => {
     const provider = new MockRuntimeProvider()
     const fixture = await createFixture({ provider })
-    const run = createRun(fixture.store, { status: "provisioning" })
+    const run = createRun(fixture.store, { status: "provisioning" }, provider)
     const runtimeHandle = await provider.create({ runtimeId: `rt-${run.id}` })
     await provider.start(runtimeHandle)
     const process = await provider.spawn(runtimeHandle, {
@@ -273,7 +304,7 @@ describe("durable runner terminal evidence", () => {
     const delegate = new MockRuntimeProvider()
     const provider = withEventStreamProcessLoss(delegate)
     const fixture = await createFixture({ provider })
-    const run = createRun(fixture.store, { status: "running" })
+    const run = createRun(fixture.store, { status: "running" }, provider)
     const runtime = await seedRuntime(fixture.store, delegate, run)
     fixture.store.upsertRunnerSession({
       runId: run.id,
@@ -361,17 +392,24 @@ function createRun(
     secretRefs?: Readonly<Record<string, string>>
     artifactPaths?: readonly string[]
   } = {},
+  provider?: RuntimeProvider,
 ): Run {
   const createdAt = now()
+  const agentSpec = testAgentSpec({
+    secretEnvNames: Object.keys(options.secretRefs ?? {}),
+  })
   const run = store.createRun({
     id: crypto.randomUUID(),
     ownerId: OWNER_ID,
     workspace: { type: "bundle", artifactId: "a".repeat(64) },
     agentType: "demo",
-    agentSpec: testAgentSpec({
-      secretEnvNames: Object.keys(options.secretRefs ?? {}),
-    }),
+    agentSpec,
     agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+    executionProvenance: testExecutionProvenanceFor(
+      provider ?? "mock",
+      agentSpec,
+      TEST_AGENT_CATALOG_DIGEST,
+    ),
     prompt: "terminal evidence",
     env: {},
     secretRefs: options.secretRefs ?? {},
@@ -504,7 +542,10 @@ function seedTerminal(
   })
 }
 
-function terminalRunner(terminal: RunnerTerminalPayload): RunnerSessionController {
+function terminalRunner(
+  terminal: RunnerTerminalPayload,
+  sourceTimestamp?: string,
+): RunnerSessionController {
   return {
     async start(input: StartRunnerInput): Promise<ProcessHandle> {
       return processHandle(input.provider.name, `${input.runtime.opaque}.${input.processId}`)
@@ -514,6 +555,10 @@ function terminalRunner(terminal: RunnerTerminalPayload): RunnerSessionControlle
         sessionId: "malicious-provider-session",
       })
       const terminalFrame = frame(input.runId, input.runnerSessionId, 2, "terminal", terminal)
+      if (sourceTimestamp !== undefined) {
+        started.timestamp = sourceTimestamp
+        terminalFrame.timestamp = sourceTimestamp
+      }
       await input.onFrame(started, "1")
       await input.onCursor("1")
       await input.onFrame(terminalFrame, "2")
@@ -591,6 +636,7 @@ function runApi(
     agentIntents: permissiveTestAgentIntents,
     secretReferences: secrets,
     providerNames: providers,
+    executionProvenance: testExecutionProvenance,
     defaultProvider: "mock",
   })
   const api = createApiRouter()

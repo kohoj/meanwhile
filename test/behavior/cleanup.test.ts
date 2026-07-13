@@ -28,13 +28,24 @@ import {
   RuntimeReaper,
   RuntimeReaperLoop,
 } from "../../src/services/runtime-reaper"
-import { TEST_AGENT_CATALOG_DIGEST, testAgentSpec } from "../fixtures/agent-intent"
+import {
+  TEST_AGENT_CATALOG_DIGEST,
+  testAgentSpec,
+  testExecutionProvenanceFor,
+} from "../fixtures/agent-intent"
 
 const OWNER_ID = "owner-cleanup"
 const START = "2026-01-01T00:00:00.000Z"
 
 class DestroyProvider implements RuntimeProvider {
   readonly name = "fake"
+  readonly provenance = Object.freeze({
+    adapterVersion: "test",
+    runnerDigest: "2".repeat(64),
+    runtimeImageReference: null,
+    runtimeImageDigest: null,
+    bridgeProtocolVersion: null,
+  })
   readonly capabilities = {
     isolation: "container",
     processRecovery: true,
@@ -398,6 +409,7 @@ function createRunWithRuntime(
     agentType: "fixture",
     agentSpec: testAgentSpec(),
     agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+    executionProvenance: testExecutionProvenanceFor("fake"),
     prompt: "test cleanup",
     env: {},
     secretRefs: {},

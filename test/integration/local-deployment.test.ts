@@ -20,7 +20,11 @@ import {
   StoreDeploymentSourceResolver,
 } from "../../src/services/deployment-executor"
 import { StructuredLogger } from "../../src/telemetry"
-import { TEST_AGENT_CATALOG_DIGEST, testAgentSpec } from "../fixtures/agent-intent"
+import {
+  TEST_AGENT_CATALOG_DIGEST,
+  testAgentSpec,
+  testExecutionProvenanceFor,
+} from "../fixtures/agent-intent"
 
 const disposals: Array<() => Promise<void> | void> = []
 
@@ -195,6 +199,7 @@ function createSucceededRun(store: Store): void {
     agentType: "fixture",
     agentSpec: testAgentSpec(),
     agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+    executionProvenance: testExecutionProvenanceFor("local"),
     prompt: "Build static output",
     env: {},
     secretRefs: {},

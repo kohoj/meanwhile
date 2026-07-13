@@ -60,7 +60,7 @@ try {
     )
   }
 
-  const artifacts = await meanwhile.runs.artifacts(run.id)
+  const artifacts = await meanwhile.artifacts.list(run.id)
   const site = artifacts.find((artifact) => artifact.logicalPath === "site")
   if (site === undefined) {
     throw new DemoError("DEMO_ARTIFACT_MISSING", "The declared site artifact was not captured")

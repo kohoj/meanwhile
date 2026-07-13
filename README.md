@@ -40,10 +40,13 @@ Read [Architecture](docs/architecture.md) for the complete model and [Threat mod
 - Persisted deadlines, cancellation intent, restart reconciliation, and durable cleanup.
 - Idempotent run creation with conflicting-key detection.
 - Immutable, content-addressed artifacts and API-driven deployment.
+- Owner-scoped artifact inspection/download, deployment history, audit queries, and API-key lifecycle through the same API, SDK, and CLI.
 - A full local path that needs no cloud account.
 - A real Cloudflare Sandbox provider behind an independently deployable bridge.
 - ACP-native agent execution through the same runtime-local runner everywhere.
 - A typed Web-standard client with durable waits, resumable log iteration, runtime response validation, and the same structured error contract as HTTP.
+- Immutable execution provenance, UTC evidence semantics, and monotonic runtime timeout enforcement across clock domains.
+- A single-writer data-root lease plus verified backup, restore, and explicit garbage collection.
 - Structured errors, append-only audit evidence, JSON logs, traces, and metrics.
 
 The local provider is for development, deterministic tests, and demos. **It is not a security sandbox and must not run untrusted code.** Use a genuine isolation provider for untrusted repositories or prompts.
@@ -70,6 +73,8 @@ bun run demo
 ```
 
 `bun run demo` is the acceptance path: create a local run, follow its logs, capture an artifact, and publish it through `local-static` without a cloud account.
+
+`bun run proof:release` is the stronger no-account release path. It additionally proves runtime-destruction audit, artifact-download integrity, a control-plane restart, persisted preview/history reads, and a complete hashed backup.
 
 To run the service directly:
 
@@ -113,7 +118,7 @@ Compose defaults the browser-facing preview origin to `http://127.0.0.1:7332`. S
 
 ## API
 
-Every protected request uses a bearer API key. `MEANWHILE_API_KEY` exists only to bootstrap a local development owner; production keys are high-entropy values shown once and stored only as hashes.
+Every protected request uses a bearer API key. `MEANWHILE_API_KEY` exists only to bootstrap a local development owner; production keys are high-entropy values shown once and stored only as hashes. Protected responses default to `Cache-Control: private, no-store`, including one-time key creation responses.
 
 ```console
 export MEANWHILE_URL=http://127.0.0.1:7331
@@ -234,6 +239,16 @@ curl --fail-with-body \
 
 Polling and SSE use the same durable cursor. Reconnect with the last accepted cursor to avoid gaps or duplicates.
 
+Artifacts remain independently inspectable and downloadable after runtime cleanup:
+
+```console
+bun run cli -- artifacts list <run-id>
+bun run cli -- artifacts get <artifact-id>
+bun run cli -- artifacts download <artifact-id> --path index.html --output ./index.html
+```
+
+The download path streams immutable bytes and exposes their digest and size. The CLI writes atomically, verifies both, and refuses to overwrite an existing file.
+
 ### Cancel
 
 ```console
@@ -263,6 +278,18 @@ curl --fail-with-body \
 
 Exactly one of `artifactPath` or logical `workspacePath` identifies a captured immutable source. Deployment never reads a live runtime or arbitrary host path. `local-static` serves output on the separate preview origin.
 
+Owner-facing operational resources use the same client boundary:
+
+```console
+bun run cli -- deployments list
+bun run cli -- audit list --resource-type run --resource-id <run-id>
+bun run cli -- api-keys create --name automation
+bun run cli -- api-keys list
+bun run cli -- api-keys revoke <key-id>
+```
+
+New key material is returned once; only its hash and safe prefix persist. The final active key cannot be revoked, preventing accidental owner lockout.
+
 ### Structured failures
 
 ```json
@@ -278,7 +305,7 @@ Exactly one of `artifactPath` or logical `workspacePath` identifies a captured i
 
 Provider bodies, stack traces, SQL, absolute host paths, prompts, and secrets are never public error details.
 
-The complete contracted route set also includes `GET /runs`, `POST /providers/test`, `GET /deployments/:id`, `GET /deployments/:id/logs`, `GET /healthz`, `GET /readyz`, and `GET /openapi.json`. `src/api/contracts.ts` is the implemented request/response schema source; the OpenAPI document and client types derive from it, and README examples do not override it.
+The complete contracted route set also includes `GET /runs`, `GET /artifacts/:id`, `GET /artifacts/:id/content`, `POST /providers/test`, `GET /deployments`, `GET /deployments/:id`, `GET /deployments/:id/logs`, `GET /audit`, `POST|GET /api-keys`, `DELETE /api-keys/:id`, `GET /healthz`, `GET /readyz`, and `GET /openapi.json`. `src/api/contracts.ts` is the implemented request/response schema source; the OpenAPI document and client types derive from it, and README examples do not override it.
 
 ## Agents and ACP
 
@@ -338,6 +365,8 @@ Deploy the bridge package, configure its authentication secret, then set:
 MEANWHILE_DEFAULT_PROVIDER=cloudflare
 CLOUDFLARE_BRIDGE_URL=https://<bridge-worker>
 CLOUDFLARE_BRIDGE_TOKEN=<high-entropy shared credential>
+CLOUDFLARE_RUNNER_DIGEST=<sha256 of the deployed meanwhile-runner>
+CLOUDFLARE_RUNTIME_IMAGE_DIGEST=sha256:<deployed image digest when available>
 ```
 
 Set `CLOUDFLARE_BRIDGE_URL` to the deployed bridge URL. Set the control plane's `CLOUDFLARE_BRIDGE_TOKEN` to the same secret value stored in the bridge-side `BRIDGE_TOKEN` binding. Never put either credential name in an agent catalog or run environment.
@@ -358,6 +387,14 @@ bun run test:live:cloudflare
 
 That command sets the opt-in gate itself and fails, rather than skips, when either credential is absent. Run it against the exact deployed bridge revision before enabling production traffic.
 
+The complete remote control-plane proof is stricter:
+
+```console
+bun run proof:release:cloudflare
+```
+
+It requires both provenance digest variables, then drives the real provider through run, ACP evidence, artifact capture/download, local-static promotion, runtime destruction, restart recovery, and backup verification. Those digest values are operator/platform assertions used for identity pinning and drift detection, not a cryptographic runtime attestation claim. A platform digest that is not available stays `null` in ordinary runs; Meanwhile never invents provenance.
+
 ## Persistence and data model
 
 SQLite in WAL mode is the authoritative store for one active control-plane writer. Artifact bytes live in an owner-scoped content-addressed store under `MEANWHILE_DATA_DIR`; SQLite contains metadata and references only.
@@ -374,6 +411,22 @@ The durable model separates:
 
 Terminal run state is immutable. Cleanup has its own state and never deletes the durable evidence planes.
 
+Every accepted run stores a self-verifying execution-provenance snapshot: agent definition/catalog digests, runner digest when known, provider adapter/capability identity, pinned runtime image reference/digest when known, and bridge protocol version. It participates in idempotency. Execution and recovery fail closed if the active provider no longer matches it; legacy rows without provenance remain readable but cannot be re-executed.
+
+### Data-root lifecycle
+
+The service and maintenance commands share one adjacent lease, so a second writer cannot open the same local control plane. Stop the service before maintenance:
+
+```console
+bun run cli -- data backup --output ../meanwhile-backup
+bun run cli -- data verify ../meanwhile-backup
+bun run cli -- data restore ../meanwhile-backup
+bun run cli -- data gc --dry-run
+bun run cli -- data gc --apply
+```
+
+Backup output must be outside the live data root. A backup contains a normalized SQLite snapshot, every referenced workspace/artifact object, persisted preview bytes, migration identities, release/Bun versions, and a digest for every file. Restore accepts only an absent or empty root. Garbage collection removes only unreferenced content-addressed objects and preview trees, is dry-run-first, and never deletes run history or referenced bytes.
+
 ## Security model
 
 - Every public lookup is owner-scoped; cross-owner access returns `NOT_FOUND`.
@@ -382,6 +435,7 @@ Terminal run state is immutable. Cleanup has its own state and never deletes the
 - Redaction is established before process output is consumed and covers logs, telemetry, errors, audit metadata, artifacts, and deployment logs.
 - Artifact paths are relative, declared, bounded, traversal-safe, and checked for symlink escape.
 - Untrusted previews use an origin separate from the authenticated API.
+- Public timestamps are UTC ISO 8601 instants accepted by the control plane. Provider/runner wall clocks do not order durable evidence; runtime timeout duration uses a monotonic budget, and ACP agent processes receive `TZ=UTC`.
 
 Any credential intentionally supplied to an agent must be considered visible to that agent. Redaction limits accidental known-value leakage; it cannot prevent deliberate transformation or network exfiltration. Prefer short-lived, least-privilege, per-run credentials.
 
@@ -411,7 +465,10 @@ bun run demo:codex          # explicit locally authenticated Codex ACP proof
 bun run demo:codex:serve    # retain the verified local preview for inspection
 bun run demo:claude         # explicit locally authenticated Claude Code ACP proof
 bun run demo:claude:serve   # retain the verified Claude preview for inspection
+bun run proof:release       # cleanup, restart, and backup no-account release proof
+bun run proof:release:cloudflare # full real-provider proof with configured execution provenance
 bun run runner:build        # standalone Bun runner
+bun run cli -- data gc --dry-run # inspect unreachable durable bytes
 bun run cloudflare:check    # bridge package checks
 bun run cloudflare:dev      # bridge development process
 bun run cloudflare:deploy   # bridge deployment
@@ -430,9 +487,9 @@ See [Contributing](CONTRIBUTING.md) for the quality gate.
 - Redaction cannot stop deliberate exfiltration by code that receives a credential.
 - Cloudflare operation needs an account, deployed bridge, and an account-level live verification of the exact revision.
 - `local-static` is the no-account deployment target; additional targets are adapters, not core branches.
-- API-key self-service, quotas/rate limits, HA/multi-writer coordination, object-backed large-log retention, and release signing are not yet productized.
+- Quotas/rate limits, HA/multi-writer coordination, object-backed large-log retention, and release signing are not yet productized.
 - Agent permissions are predeclared and non-interactive; interactive human approval requires an explicit bidirectional runner control channel.
-- A control-plane crash during multi-blob workspace publication can leave unreferenced content-addressed bytes. They cannot be addressed as a bundle without the catalog commit, but a retention-aware mark-and-sweep collector is not yet productized.
+- A control-plane crash during multi-blob workspace publication can leave unreferenced content-addressed bytes. They cannot be addressed as a bundle without the catalog commit and are removed only by an explicit maintenance garbage-collection pass.
 
 The source of truth for architectural invariants is [AGENTS.md](AGENTS.md). The deterministic suite, no-account demo, container build, and credential-gated provider proof are separate gates because no one of them establishes production readiness alone.
 

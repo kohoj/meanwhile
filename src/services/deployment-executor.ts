@@ -241,6 +241,11 @@ export interface DeploymentRepository {
   }): Promise<DeploymentRecord>
   getForOwner(ownerId: string, deploymentId: string): Promise<DeploymentRecord | null>
   getForExecution(deploymentId: string): Promise<DeploymentRecord | null>
+  listForOwner(input: {
+    ownerId: string
+    limit: number
+    before?: string
+  }): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }>
   transitionWithAudit(input: {
     deploymentId: string
     fromStatus: DeploymentStatus
@@ -288,6 +293,17 @@ export class StoreDeploymentRepository implements DeploymentRepository {
 
   async getForExecution(deploymentId: string): Promise<DeploymentRecord | null> {
     return this.#store.getDeploymentInternal(deploymentId)
+  }
+
+  async listForOwner(input: {
+    ownerId: string
+    limit: number
+    before?: string
+  }): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }> {
+    return this.#store.listDeployments(input.ownerId, {
+      limit: input.limit,
+      ...(input.before === undefined ? {} : { before: input.before }),
+    })
   }
 
   async transitionWithAudit(input: {
@@ -494,6 +510,17 @@ export class DeploymentExecutor {
     const deployment = await this.#repository.getForOwner(ownerId, deploymentId)
     if (deployment === null) throw notFound()
     return deployment
+  }
+
+  async list(
+    ownerId: string,
+    options: { limit: number; before?: string },
+  ): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }> {
+    return this.#repository.listForOwner({
+      ownerId,
+      limit: options.limit,
+      ...(options.before === undefined ? {} : { before: options.before }),
+    })
   }
 
   async logs(input: {

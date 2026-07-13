@@ -369,6 +369,43 @@ describe("Meanwhile CLI", () => {
       details: { code: "MIGRATION_HISTORY_INVALID" },
     })
   })
+
+  test("preserves structured maintenance errors", async () => {
+    const dataDirectory = await temporaryDirectory()
+    new Database(join(dataDirectory, "meanwhile.sqlite"), { create: true }).close()
+    const invocation = capture()
+
+    const exitCode = await runCli(
+      ["data", "backup", "--output", join(dataDirectory, "nested-backup")],
+      invocation.options({ MEANWHILE_DATA_DIR: dataDirectory }),
+    )
+
+    expect(exitCode).toBe(2)
+    expect(JSON.parse(invocation.stderr)).toEqual({
+      error: {
+        code: "INVALID_REQUEST",
+        message: "Backup output must be outside the data root",
+        details: {},
+      },
+    })
+
+    const malformedBackup = join(await temporaryDirectory(), "malformed-backup")
+    await mkdir(malformedBackup)
+    await Bun.write(join(malformedBackup, "manifest.json"), "not-json")
+    const verifyInvocation = capture()
+    const verifyExitCode = await runCli(
+      ["data", "verify", malformedBackup],
+      verifyInvocation.options({}),
+    )
+    expect(verifyExitCode).toBe(2)
+    expect(JSON.parse(verifyInvocation.stderr)).toEqual({
+      error: {
+        code: "DATA_BACKUP_INVALID",
+        message: "Backup manifest or data is invalid",
+        details: {},
+      },
+    })
+  })
 })
 
 const capture = () => {

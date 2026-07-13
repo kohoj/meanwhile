@@ -52,6 +52,13 @@ export interface MockProviderOperation {
 /** Deterministic behavioral fake. Tests drive output and completion explicitly. */
 export class MockRuntimeProvider implements RuntimeProvider {
   readonly name: string
+  readonly provenance = Object.freeze({
+    adapterVersion: "test",
+    runnerDigest: "2".repeat(64),
+    runtimeImageReference: null,
+    runtimeImageDigest: null,
+    bridgeProtocolVersion: null,
+  })
   readonly capabilities = Object.freeze({
     isolation: "none" as const,
     processRecovery: true,

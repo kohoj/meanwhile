@@ -6,6 +6,12 @@ import { type ArtifactBlob, type ArtifactStore, asSha256Digest, sha256 } from ".
 
 const BUNDLE_VERSION = 1
 
+export const WORKSPACE_BUNDLE_LIMITS = Object.freeze({
+  maxFiles: 256,
+  maxFileBytes: 4 * 1024 * 1024,
+  maxTotalBytes: 8 * 1024 * 1024,
+})
+
 export interface UploadedWorkspaceFile {
   readonly path: string
   readonly content: Uint8Array
@@ -18,7 +24,7 @@ export interface WorkspaceBundleLimits {
   readonly maxTotalBytes: number
 }
 
-interface BundleManifest {
+export interface WorkspaceBundleManifest {
   readonly version: typeof BUNDLE_VERSION
   readonly files: readonly {
     readonly path: string
@@ -103,7 +109,7 @@ export class WorkspaceBundleStore {
       ...file,
       digest: sha256(file.content),
     }))
-    const entries: BundleManifest["files"][number][] = preparedFiles.map((file) => ({
+    const entries: WorkspaceBundleManifest["files"][number][] = preparedFiles.map((file) => ({
       path: file.path,
       mode: file.mode,
       digest: file.digest,
@@ -187,7 +193,7 @@ export class WorkspaceBundleStore {
     }
     const bytes = await this.artifacts.read(ownerId, manifestBlob)
     if (sha256(bytes) !== manifestBlob.digest) throw invalidBundle("Workspace bundle is corrupt")
-    const manifest = decodeManifest(bytes, this.limits)
+    const manifest = decodeWorkspaceBundleManifest(bytes, this.limits)
     const files: RuntimeFile[] = []
     for (const entry of manifest.files) {
       const blob = await this.artifacts.resolve(ownerId, {
@@ -218,7 +224,10 @@ const assertBundleMetadata = (
   }
 }
 
-const decodeManifest = (bytes: Uint8Array, limits: WorkspaceBundleLimits): BundleManifest => {
+export const decodeWorkspaceBundleManifest = (
+  bytes: Uint8Array,
+  limits: WorkspaceBundleLimits,
+): WorkspaceBundleManifest => {
   let value: unknown
   try {
     value = JSON.parse(new TextDecoder().decode(bytes))
@@ -240,7 +249,7 @@ const decodeManifest = (bytes: Uint8Array, limits: WorkspaceBundleLimits): Bundl
   }
   let previous: string | null = null
   let totalBytes = 0
-  const files = value.files.map((candidate): BundleManifest["files"][number] => {
+  const files = value.files.map((candidate): WorkspaceBundleManifest["files"][number] => {
     if (typeof candidate !== "object" || candidate === null) {
       throw invalidBundle("Workspace bundle entry is invalid")
     }
@@ -293,7 +302,7 @@ const validateMode = (mode: number): number => {
 const invalidBundle = (message: string, cause?: unknown): AppError =>
   new AppError({ code: "INVALID_REQUEST", message, retryable: false, cause })
 
-const encodeManifest = (manifest: BundleManifest): Uint8Array =>
+const encodeManifest = (manifest: WorkspaceBundleManifest): Uint8Array =>
   new TextEncoder().encode(JSON.stringify(manifest))
 
 const compareText = (left: string, right: string): number =>

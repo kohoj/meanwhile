@@ -63,7 +63,7 @@ Collapsing any pair creates a correctness failure. Runtime deletion cannot imply
 | Store | SQL, transactions, ordering, uniqueness, owner predicates | Provider calls, secret values, artifact bodies |
 | Runtime provider | Compute, process, event, file, expose, health primitives | Owners, run status, audit policy, deployment |
 | Runner session | Runner launch/reconnect and validated event ingestion | ACP implementation details |
-| Runtime-local runner | ACP session, child process group, deadline, protocol frames | Durable status, auth, storage, deployment |
+| Runtime-local runner | ACP session, child process group, relative timeout budget, protocol frames | Durable status, auth, storage, deployment |
 | Artifact collector/store | Safe capture and immutable bytes | Run outcome decisions |
 | Deployment executor/adapter | Deployment state and target execution | Mutable runtime access, run mutation |
 | Reaper | Eligible runtime destruction and cleanup evidence | Deleting durable product history |
@@ -78,11 +78,11 @@ The public contract has one implementation path. Pure Zod schemas define request
 
 The API authenticates the bearer key, derives `ownerId`, validates the body, and passes a canonical request to `RunService`. It never accepts owner identity or opaque provider handles from the body.
 
-Before the store transaction, the run service resolves the strict agent catalog entry into an immutable launch snapshot. The snapshot contains only non-secret executable, argv, capability, allowlist, and derived permission-policy data plus definition and catalog digests. It is part of the idempotency hash; later catalog edits cannot silently change queued or recovering work.
+Before the store transaction, the run service resolves the strict agent catalog entry into an immutable launch snapshot. The snapshot contains only non-secret executable, argv, capability, allowlist, and derived permission-policy data plus definition and catalog digests. It also captures a self-verifying execution identity: runner digest when known, provider adapter version, capability digest, pinned image reference/digest when known, and bridge protocol version. Both snapshots are part of the idempotency hash; later catalog, adapter, capability, runner, or image-configuration edits cannot silently change queued or recovering work.
 
 Inline workspace files follow a prepare/publish boundary. Preparation snapshots every caller-owned buffer, validates the complete path/size set, and computes the canonical manifest and content digests without storage writes. The resulting bundle identity is part of the request hash, allowing the owner-scoped idempotency key to be checked before publication. Publication writes idempotent content-addressed blobs and commits the owner-scoped workspace-bundle catalog row; only then may the run transaction commit. An existing bundle reference is validated in the authenticated owner scope before run creation. The SQLite uniqueness constraint remains the concurrency authority; the single-control-plane keyed gate only avoids redundant upload work.
 
-An interrupted multi-blob publication may leave unreferenced content-addressed bytes before its catalog commit. Those bytes are not an addressable workspace input, and a future retention-aware mark-and-sweep collector may remove them. Operators must currently include the artifact data root in retention and capacity planning rather than assuming failed publication reclaims bytes synchronously.
+An interrupted multi-blob publication may leave unreferenced content-addressed bytes before its catalog commit. Those bytes are not an addressable workspace input. The explicit data-root garbage collector discovers them from the durable reference graph, reports a dry run first, and removes them only on a separate apply command; request handling never performs opportunistic deletion.
 
 The store transaction:
 
@@ -97,19 +97,21 @@ Equal key and hash returns the same run. Equal key with different input is a con
 
 One executor claims the run with a compare-and-swap state/version predicate. The persisted absolute deadline starts at this claim, so provider provisioning is inside the timeout budget.
 
-The selected provider creates and starts compute, receives safe workspace input, and spawns the fixed runner. Opaque runtime and process handles are persisted without inspecting provider-private fields.
+Before compute, the executor verifies that current provider/runner provenance still matches the accepted snapshot. A mismatch fails closed without a provider operation. The selected provider then creates and starts compute, receives safe workspace input, and spawns the fixed runner. Opaque runtime and process handles are persisted without inspecting provider-private fields.
 
 ### 3. Establish ACP
 
-The control plane sends one validated `RunnerSpec` to the runner through initial stdin. Resolved secret values are process environment only and are absent from the serialized specification.
+The control plane sends one validated `RunnerSpec` to the runner through initial stdin. It converts the remaining persisted deadline into a relative timeout budget immediately before spawn; no control-plane or sandbox wall-clock instant crosses the runner protocol. Resolved secret values are process environment only and are absent from the serialized specification.
 
-The runner launches the snapshotted bare PATH executable and argv directly, initializes ACP, negotiates capabilities, creates a session, and begins the prompt turn. The provider runtime or image, not the control-plane host, owns executable availability. Only a successful ACP initialization and session creation permits the executor to transition the run to `running`.
+The runner launches the snapshotted bare PATH executable and argv directly with `TZ=UTC`, initializes ACP, negotiates capabilities, creates a session, and begins the prompt turn. It enforces the relative budget with a monotonic clock. The provider runtime or image, not the control-plane host, owns executable availability. Only a successful ACP initialization and session creation permits the executor to transition the run to `running`.
 
 Agent-specific parsing never enters this path. A non-ACP tool needs a separate ACP adapter executable.
 
 ### 4. Ingest evidence
 
 Runner stdout contains versioned NDJSON frames only. Each has a monotonically increasing runner sequence. The provider wraps transport events in its own reconnect cursor. The runner session validates bounds and protocol version, deduplicates accepted runner sequences, redacts output, and appends durable log or lifecycle evidence.
+
+Runner and provider timestamps remain diagnostic facts. Durable/public evidence receives its UTC timestamp when the control plane accepts it, preventing sandbox clock skew from corrupting ordering or user-facing history. Consumers render those instants in the user's timezone.
 
 ```text
 provider cursor → transport resume
@@ -152,7 +154,7 @@ Cancellation persists intent before signalling. The executor uses a compare-and-
 
 ### Timeout versus success
 
-The persisted deadline is enforced independently by runner and control plane. Either can initiate process termination, but only one database transition can claim `timed_out`. A success observed after that claim cannot replace it.
+The persisted absolute deadline is enforced by the control plane; the runner independently enforces the remaining duration with a monotonic clock. Either can initiate process termination, but only one database transition can claim `timed_out`. A success observed after that claim cannot replace it.
 
 ### Cleanup versus active execution
 
@@ -202,7 +204,15 @@ SQLite stores relational truth: ownership, state, ordering, uniqueness, referenc
 
 Artifact bytes are owner-scoped and content-addressed. Atomic writes publish only complete objects. Artifact metadata binds each object to an owner and run, logical path, digest, media type, size, and storage key.
 
-One active control-plane writer is an explicit topology constraint. Horizontal writers require a shared lease-capable database and are an evolution trigger, not a hidden promise.
+One active control-plane writer is an explicit topology constraint. An adjacent data-root lease excludes a second service process and maintenance commands. Horizontal writers require a shared lease-capable database and are an evolution trigger, not a hidden promise.
+
+The data root is one recovery unit. Backup requires quiescent durable work, serializes a standalone SQLite snapshot, walks the complete referenced workspace/artifact graph, includes persisted preview bytes, and hashes every file into an atomic manifest outside the live root. Verification reopens the database read-only and checks migrations, graph completeness, paths, sizes, and digests. Restore accepts only an absent or empty root. Garbage collection derives reachability from SQLite and is explicit dry-run/apply work.
+
+## Complete public resource boundary
+
+Runs are the orchestration resource, but not the only durable product resource. The same owner-scoped HTTP/client/CLI boundary exposes artifact inspection and byte streaming, deployment history and logs, append-only audit queries, and API-key create/list/revoke. This keeps operators and upstream agents out of SQLite and local storage. Maintenance is the only intentional local-only CLI surface because it requires exclusive ownership of the data root rather than bearer authorization.
+
+The release proof exercises this boundary as a system property: run, ACP evidence, artifact integrity, deployment, preview, destruction audit, process restart, persisted reads, and verified backup. The credential-gated Cloudflare variant runs the same control path against real isolated compute; the provider lifecycle test remains a narrower adapter proof.
 
 ## Evidence planes
 

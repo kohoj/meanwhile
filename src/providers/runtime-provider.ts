@@ -21,6 +21,15 @@ export interface RuntimeCapabilities {
   readonly processSignals: readonly ProcessSignal[]
 }
 
+export interface RuntimeProviderProvenance {
+  readonly adapterVersion: string
+  readonly runnerDigest: string | null
+  readonly runtimeImageReference: string | null
+  /** Digest of the deployed provider image when the deployment system exposes it. */
+  readonly runtimeImageDigest: string | null
+  readonly bridgeProtocolVersion: number | null
+}
+
 export interface RuntimeHandle {
   readonly kind: "runtime"
   readonly version: typeof RUNTIME_HANDLE_VERSION
@@ -189,6 +198,7 @@ export class RuntimeProviderError extends Error {
 export interface RuntimeProvider {
   readonly name: string
   readonly capabilities: RuntimeCapabilities
+  readonly provenance: RuntimeProviderProvenance
 
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>

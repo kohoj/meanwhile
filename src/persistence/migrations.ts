@@ -226,6 +226,14 @@ export const migrations: readonly Migration[] = [
       CREATE INDEX audit_records_owner_resource_idx ON audit_records(owner_id, resource_type, resource_id, created_at);
     `,
   },
+  {
+    version: 2,
+    name: "execution_provenance",
+    sql: `
+      ALTER TABLE runs ADD COLUMN execution_provenance_json TEXT
+        CHECK(execution_provenance_json IS NULL OR json_valid(execution_provenance_json));
+    `,
+  },
 ]
 
 export const migrationSha256 = (migration: Migration): string =>

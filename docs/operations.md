@@ -41,6 +41,8 @@ Bun loads local `.env` files for development. Production should inject environme
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | When OTel enabled | OTLP/HTTP collector endpoint; no credentials in the URL |
 | `CLOUDFLARE_BRIDGE_URL` | For Cloudflare | Deployed bridge base URL |
 | `CLOUDFLARE_BRIDGE_TOKEN` | For Cloudflare | High-entropy bridge credential |
+| `CLOUDFLARE_RUNNER_DIGEST` | For complete Cloudflare provenance | Operator-verified SHA-256 of the runner installed in the deployed runtime image |
+| `CLOUDFLARE_RUNTIME_IMAGE_DIGEST` | When the platform exposes it | `sha256:` digest of the deployed runtime image |
 
 The complete safe template is [.env.example](../.env.example). Invalid recognized values, ports, catalog entries, default-provider selection, and endpoints fail validation rather than falling back silently. An explicit unknown provider on run creation is rejected before input or run persistence.
 
@@ -57,6 +59,7 @@ Properties:
 - Runtime working directories are disposable even when located beneath the data root.
 - Audit, run logs, status history, deployments, and cleanup state survive service restart.
 - Preview output is derived from immutable artifacts; it is not a second source of truth.
+- An adjacent lease directory keyed by physical data-root identity is the single-writer authority for both the service and maintenance commands; a symlink alias cannot acquire a second lease.
 
 Set restrictive filesystem ownership for the service account. The control plane needs read/write access to the data root and execute access to the runner. Other users should have no access. Do not place the data root inside a repository workspace.
 
@@ -65,13 +68,13 @@ Set restrictive filesystem ownership for the service account. The control plane 
 The startup order is:
 
 1. validate environment configuration and initialize telemetry before application composition;
-2. create the data root, open SQLite, and apply transactional migrations;
+2. create the data root, acquire its exclusive lease, open SQLite, and apply transactional migrations;
 3. bootstrap the optional local identity and validate the agent catalog;
 4. compose provider, artifact, and deployment registries and require the configured default provider to exist;
 5. start reconciliation, execution, deployment, and cleanup supervisors;
 6. bind the Bun HTTP server and expose readiness.
 
-Invalid configuration, migration/schema state, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
+Invalid configuration, data-root ownership, migration/schema state, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment and resumes automatically when persisted successful previews exist. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
 
 Development target:
 
@@ -97,7 +100,7 @@ Mount `MEANWHILE_DATA_DIR` on durable storage and ensure the container's service
 
 ## Shutdown and restart
 
-On a normal shutdown the Bun HTTP server stops first, then the control-plane supervisors stop, the separate preview listener closes, telemetry flushes and shuts down while its durable gauges can still read SQLite, and SQLite closes last. Each supervisor owns the safe termination or handoff of work it has already claimed; shutdown does not reinterpret an unfinished run as an agent failure.
+On a normal shutdown the Bun HTTP server stops first, then the control-plane supervisors stop, the separate preview listener closes, telemetry flushes and shuts down while its durable gauges can still read SQLite, SQLite closes, and the data-root lease releases last. Each supervisor owns the safe termination or handoff of work it has already claimed; shutdown does not reinterpret an unfinished run as an agent failure.
 
 Do not cancel active remote agents merely because the API process is restarting. Persisted runtime/process handles and cursors allow startup reconciliation when the provider supports it. Local child processes need explicit supervisor semantics and must not be assumed recoverable merely because a PID was stored.
 
@@ -164,21 +167,36 @@ A failed migration halts startup. Operators restore from backup or deploy a corr
 
 ## Backup and restore
 
-A valid backup contains both SQLite state and artifact bytes from one consistent operational point.
+A valid backup contains SQLite, every referenced workspace/artifact object, persisted local-static preview bytes, migration identities, service/Bun versions, and per-file hashes from one quiescent point.
 
-Before the first release, the conservative supported procedure is:
+Stop the service, then use the maintenance boundary:
 
-1. stop the single control-plane writer cleanly;
-2. verify no service process still has the database open;
-3. make an atomic filesystem snapshot or archive of the entire data root;
-4. record the application revision and schema migration level with the backup;
-5. restart and verify readiness.
+```console
+bun run cli -- data backup --output /backups/meanwhile-2026-07-14
+bun run cli -- data verify /backups/meanwhile-2026-07-14
+```
 
-An online database-only copy is insufficient because it can omit WAL state or artifact bytes. A production online-backup feature must coordinate SQLite's backup API with an artifact manifest; do not document ordinary `cp` of a live database as safe.
+The adjacent data-root lease rejects the command if a control plane or another maintenance process is active. Backup also rejects queued, provisioning, running, or in-progress deployment/cleanup work. It serializes SQLite into a standalone non-WAL snapshot, walks the referenced immutable object graph, copies previews, hashes every file, and atomically publishes the manifest. Physical paths are canonicalized, so the output must be outside the live root even through symlink aliases.
 
-Restore into an empty data root with the same or newer compatible release, restrictive ownership, and no active writer. Run `doctor`, start the service, confirm migrations, inspect cleanup backlog, and exercise an owner-scoped read before admitting traffic.
+Restore only into an absent or empty configured data root:
 
-Test restoration periodically. An untested archive is not a backup strategy.
+```console
+MEANWHILE_DATA_DIR=/srv/meanwhile-restored \
+  bun run cli -- data restore /backups/meanwhile-2026-07-14
+```
+
+Restore verifies before writing, stages the complete root, creates an empty disposable-runtime directory, reopens the database read-only, and publishes by rename. Then run `doctor`, start the service, confirm migrations and cleanup state, and exercise owner-scoped artifact/audit reads before admitting traffic.
+
+Ordinary copying of a live SQLite file is unsupported because it can omit WAL state and immutable bytes. Test restoration periodically; an unverified archive is not a backup strategy.
+
+Garbage collection uses the same exclusive, quiescent maintenance boundary:
+
+```console
+bun run cli -- data gc --dry-run
+bun run cli -- data gc --apply
+```
+
+It derives reachability from durable workspace/artifact references and successful local-static deployments. It may remove only unreferenced content-addressed objects, interrupted temporary objects, and unreferenced preview trees. It never deletes relational history or referenced bytes.
 
 ## Runtime cleanup
 
@@ -212,10 +230,13 @@ Before enabling it in the control plane:
 1. configure a high-entropy `BRIDGE_TOKEN` secret binding in the Cloudflare deployment;
 2. deploy the exact bridge and container image revision tested together;
 3. set `CLOUDFLARE_BRIDGE_URL` to that deployment's URL and set control-plane `CLOUDFLARE_BRIDGE_TOKEN` to the same secret value stored under bridge binding `BRIDGE_TOKEN`;
-4. run `doctor` and the mock-bridge integration tests;
-5. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
-6. verify create, start, process events, file read/write, stop, and explicit destroy;
-7. inspect Cloudflare for leaked test resources.
+4. record `CLOUDFLARE_RUNNER_DIGEST` and, when the platform exposes it, `CLOUDFLARE_RUNTIME_IMAGE_DIGEST`; absent evidence remains `null` rather than being guessed;
+5. run `doctor` and the mock-bridge integration tests;
+6. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
+7. run `bun run proof:release:cloudflare` to prove the full control-plane, promotion, cleanup, restart, and backup path with complete configured provenance;
+8. inspect Cloudflare for leaked test resources.
+
+The configured runner and image digests are operator/platform assertions used to pin execution identity. They are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
 
 Do not confuse a sleeping container with a destroyed sandbox. Do not place Cloudflare account credentials in the agent runtime. Rotate the bridge token as a control-plane credential and ensure old revisions fail closed on protocol mismatch.
 
@@ -239,7 +260,7 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 ### Run remains `provisioning`
 
 1. Correlate run ID to the provisioning span and provider operation.
-2. Compare the persisted deadline with the injected clock and current time.
+2. Compare the persisted UTC deadline with control-plane time and inspect the runner's accepted relative budget; do not compare it with sandbox wall time.
 3. Inspect the runtime handle through the adapter, not the provider console alone.
 4. Check whether runner process identity was persisted before the failure.
 5. Let the executor claim timeout or structured provider failure; do not edit status manually.
@@ -293,11 +314,12 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 - [ ] `doctor` passes with production configuration.
 - [ ] API keys are provisioned through the persistent hashed-key lifecycle; bootstrap key is disabled.
 - [ ] Data root has durable capacity, restrictive ownership, backup, and tested restore.
-- [ ] Exactly one active SQLite writer is enforced by deployment topology.
+- [ ] The data-root lease and deployment topology enforce exactly one active SQLite writer.
 - [ ] Runner binary provenance and execute permissions are verified.
 - [ ] Every configured ACP agent is pinned and catalog-validated.
 - [ ] Local provider is disabled for untrusted tenants.
 - [ ] Remote provider shared contract and live lifecycle tests pass.
+- [ ] The release proof passes on the exact revision; remote release requires complete configured runner/image provenance.
 - [ ] Bridge credentials are scoped, stored outside images, and rotatable.
 - [ ] Cleanup backlog, queue latency, run outcomes, and storage capacity are monitored.
 - [ ] OTLP compatibility is proven under Bun before export is enabled.

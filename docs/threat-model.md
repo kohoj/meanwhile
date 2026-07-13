@@ -101,7 +101,7 @@ The runner and agent share one runtime. Unless a provider proves otherwise, code
 - Provider and deployment SDKs enforce their documented account boundaries.
 - The Cloudflare bridge authenticates every request and rejects incompatible protocol versions.
 - API, runner, provider bridge, database migration, and artifact format versions are deployed compatibly.
-- System clock is sufficiently accurate for deadlines, token expiry, and audit ordering.
+- The control-plane clock is sufficiently accurate for persisted deadline instants, token expiry, and audit ordering. Sandbox clocks are untrusted; runner duration uses a relative monotonic budget and provider timestamps do not order durable evidence.
 - Exact known secret values are available to the redactor before any corresponding output is consumed.
 - Operators do not run untrusted workloads through the local provider.
 
@@ -113,7 +113,7 @@ If an assumption is false, the associated guarantee is invalid; fail closed wher
 
 | Threat | Control | Residual risk |
 | --- | --- | --- |
-| Guess or steal API key | High-entropy bearer keys, shown once, persisted as hashes with safe prefixes, revocable key identity | Bearer theft grants owner authority until revocation |
+| Guess or steal API key | High-entropy bearer keys, shown once, persisted as hashes with safe prefixes, revocable key identity, and non-cacheable protected responses | Bearer theft grants owner authority until revocation |
 | Submit another `ownerId` | Public bodies never accept owner identity; auth context supplies it | Compromised auth middleware affects all routes |
 | Enumerate another owner's ID | Every public store method scopes by owner; cross-owner result is `NOT_FOUND` | Timing and aggregate-capacity side channels require separate review |
 | Use leaked provider/storage handle | Handles never cross public APIs and are validated by adapter/bridge | Trusted logs or database compromise can expose handles |
@@ -195,7 +195,9 @@ Control-plane policy may branch on declared capabilities, never provider name. A
 | Cleanup destroys active runtime | Eligibility joined to authoritative run state in claim transaction | Provider handle aliasing must be prevented by adapter validation |
 | Audit diverges from mutation | State change and audit record share one transaction | Local administrator can rewrite SQLite; audit is not externally tamper-proof |
 | Restart loses accepted evidence | Persist state/log cursor before acknowledgement; replay and deduplicate | A provider without replay can lose unaccepted in-flight output |
-| Backup omits artifact or WAL | Back up complete data root at a consistent point; test restore | No built-in online coordinated backup before it is implemented and tested |
+| Second writer corrupts local truth | Adjacent lease keyed by physical data-root identity excludes another service, maintenance command, or symlink alias | Host administrator can remove locks or mutate storage |
+| Backup omits artifact or WAL | Exclusive quiescent maintenance; standalone SQLite serialization; complete referenced-blob traversal; hashed manifest; read-only verification | Backup remains offline and depends on trusted local filesystem/hash implementation |
+| Garbage collection deletes live bytes | Reachability derives from durable references; dry-run/apply are separate; quiescence and lease are required | Storage/DB compromise can forge the reference graph |
 
 Audit is append-only application evidence, not a cryptographic transparency log. Operators requiring tamper resistance must export it to an append-only external system in a future explicit boundary.
 
@@ -239,6 +241,7 @@ Cloudflare isolation protects the control-plane host from the sandbox; it does n
 - Commit `bun.lock` after the first real install and review changes.
 - Pin the Cloudflare Sandbox package and container image to matching exact versions.
 - Build the standalone runner reproducibly and record its digest in release artifacts.
+- Persist the accepted runner, agent catalog, adapter, capability, image, and bridge identities with each run; leave unavailable platform digests null.
 - Keep third-party SDKs at their owning boundary.
 - Minimize production dependencies and remove unused packages.
 - Run type, lint, unit, integration, protocol, and credential-gated live provider tests before release.
@@ -261,8 +264,10 @@ Required adversarial tests include:
 - forged, missing, rotated, and incompatible bridge credentials/protocols;
 - restart during provisioning, running, artifact capture, deployment, and destroy;
 - provider event replay expiry and missing compute;
+- future/malformed sandbox timestamps, UTC agent environment, and monotonic timeout enforcement;
+- missing/tampered execution provenance and adapter/capability drift before compute;
 - cleanup attempts against a running run;
-- database and artifact restore consistency.
+- data-root lease exclusion, backup tampering, nested paths, restore consistency, and garbage-collection reachability.
 
 Tests assert stable error codes, ordering, side effects, and absence of secret bytes. They use deterministic clocks and adapters rather than arbitrary sleeps.
 
@@ -289,7 +294,7 @@ Update this model before shipping any of the following:
 - interactive human approval or a new runner control channel;
 - another authentication method or operator role;
 - horizontal writers or a shared database;
-- public artifact download, log export, or audit query surface;
+- material expansion of public artifact download, log export, or audit query semantics;
 - object storage, external log storage, or deduplication across owners;
 - outbound network policy or credential broker;
 - a new runtime provider, deployment target, or preview mode;

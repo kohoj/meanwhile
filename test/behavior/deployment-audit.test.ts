@@ -585,6 +585,20 @@ class MemoryDeploymentRepository implements DeploymentRepository {
     return record?.ownerId === ownerId ? record : null
   }
 
+  async listForOwner(input: {
+    ownerId: string
+    limit: number
+    before?: string
+  }): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }> {
+    this.#assertAccessible()
+    return {
+      items: [...this.records.values()]
+        .filter(({ ownerId }) => ownerId === input.ownerId)
+        .slice(0, input.limit),
+      nextCursor: null,
+    }
+  }
+
   async getForExecution(deploymentId: string) {
     this.#assertAccessible()
     return this.records.get(deploymentId) ?? null

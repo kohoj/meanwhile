@@ -5,7 +5,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AppError } from "../../src/errors"
 import { Store, type TransitionRunInput } from "../../src/persistence/store"
-import { TEST_AGENT_CATALOG_DIGEST, testAgentSpec } from "../fixtures/agent-intent"
+import {
+  TEST_AGENT_CATALOG_DIGEST,
+  testAgentSpec,
+  testExecutionProvenanceFor,
+} from "../fixtures/agent-intent"
 
 const AT = "2026-07-13T00:00:00.000Z"
 const OWNER_A = "owner-a"
@@ -90,7 +94,7 @@ describe("migration history", () => {
     const raw = new Database(path)
     raw
       .query(
-        "INSERT INTO schema_migrations(version,name,sha256,applied_at) VALUES (2,'future',?,?)",
+        "INSERT INTO schema_migrations(version,name,sha256,applied_at) VALUES (3,'future',?,?)",
       )
       .run("a".repeat(64), AT)
     raw.close()
@@ -304,6 +308,7 @@ function createRun(store: Store, ownerId: string, id: string): void {
     agentType: "demo",
     agentSpec: testAgentSpec(),
     agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+    executionProvenance: testExecutionProvenanceFor("local"),
     prompt: "test",
     env: {},
     secretRefs: {},

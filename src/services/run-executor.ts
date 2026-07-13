@@ -17,6 +17,7 @@ import {
 } from "../domain"
 import { AppError, normalizeError } from "../errors"
 import type { Store } from "../persistence/store"
+import { assertProviderProvenance } from "../provenance"
 import { observeRuntimeProvider } from "../providers/observed-provider"
 import type { RuntimeProviderRegistry } from "../providers/registry"
 import {
@@ -351,6 +352,7 @@ export class RunExecutor implements ManagedComponent {
   async #provisionOrReconnect(run: Run, scope?: TelemetryScope): Promise<void> {
     this.#assertRunning()
     const baseProvider = this.#providers.get(run.provider)
+    assertProviderProvenance(run.executionProvenance, baseProvider)
     const provider =
       scope === undefined
         ? baseProvider

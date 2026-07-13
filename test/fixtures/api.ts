@@ -1,4 +1,5 @@
 import type { Deployment, Run, RunLog } from "../../src/api/contracts"
+import { digestExecutionProvenance } from "../../src/provenance"
 
 export const API_RUN_ID = "00000000-0000-4000-8000-000000000001"
 export const API_OWNER_ID = "00000000-0000-4000-8000-000000000002"
@@ -6,6 +7,20 @@ export const API_DEPLOYMENT_ID = "00000000-0000-4000-8000-000000000003"
 export const API_TIMESTAMP = "2026-07-13T00:00:00.000Z"
 
 export function apiRun(status: Run["status"] = "queued"): Run {
+  const executionSnapshot = {
+    version: 1 as const,
+    agentDefinitionDigest: "b".repeat(64),
+    agentCatalogDigest: "c".repeat(64),
+    runnerDigest: "d".repeat(64),
+    provider: {
+      name: "local",
+      adapterVersion: "0.1.0",
+      capabilitiesDigest: "e".repeat(64),
+      runtimeImageReference: null,
+      runtimeImageDigest: null,
+      bridgeProtocolVersion: null,
+    },
+  }
   return {
     id: API_RUN_ID,
     ownerId: API_OWNER_ID,
@@ -24,6 +39,10 @@ export function apiRun(status: Run["status"] = "queued"): Run {
       secretEnvNames: [],
     },
     agentCatalogDigest: "c".repeat(64),
+    executionProvenance: {
+      ...executionSnapshot,
+      digest: digestExecutionProvenance(executionSnapshot),
+    },
     prompt: "make it work",
     env: {},
     secretRefs: {},

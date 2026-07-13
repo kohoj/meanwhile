@@ -184,6 +184,15 @@ describe("meanwhile runner", () => {
     expect(result.frames.some((frame) => frame.type === "agent.stderr")).toBe(true)
   })
 
+  test("normalizes the agent process timezone to UTC", async () => {
+    const result = await executeRunner(
+      spec({ environment: { FIXTURE_REPORT_TZ: "1", TZ: "Pacific/Honolulu" } }),
+      { TZ: "Asia/Shanghai" },
+    )
+    expect(JSON.stringify(result.frames)).toContain("tz=UTC")
+    expect(JSON.stringify(result.frames)).not.toContain("Pacific/Honolulu")
+  })
+
   test("contains SDK diagnostics without echoing malformed agent output", async () => {
     const secret = "malformed-output-secret"
     const result = await executeRunner(

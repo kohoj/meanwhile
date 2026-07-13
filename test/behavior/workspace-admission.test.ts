@@ -10,7 +10,7 @@ import type { RequestContext } from "../../src/domain"
 import { Store } from "../../src/persistence/store"
 import { EnvironmentSecretResolver } from "../../src/secrets"
 import { RunService } from "../../src/services/run-service"
-import { permissiveTestAgentIntents } from "../fixtures/agent-intent"
+import { permissiveTestAgentIntents, testExecutionProvenance } from "../fixtures/agent-intent"
 import { DeterministicClock, OWNER_A, OWNER_B, runInput, TestRunCommands } from "../harness"
 
 const roots: string[] = []
@@ -198,6 +198,7 @@ const createFixture = async () => {
       allowedOwnerIds: [OWNER_A, OWNER_B],
     }),
     providerNames: { has: (name) => name === "local" },
+    executionProvenance: testExecutionProvenance,
     defaultProvider: "local",
     clock: clock.now,
     id: () => {

@@ -32,7 +32,7 @@ const created = await meanwhile.runs.create(
 const run = await meanwhile.runs.wait(created.id, { timeoutMs: 30_000, pollIntervalMs: 25 })
 const logs = await meanwhile.runs.logs(run.id, { limit: 1_000 })
 const eventTypes = new Set(logs.items.map((item) => item.eventType))
-const artifacts = await meanwhile.runs.artifacts(run.id)
+const artifacts = await meanwhile.artifacts.list(run.id)
 const site = artifacts.find((artifact) => artifact.logicalPath === "site")
 if (
   run.status !== "succeeded" ||

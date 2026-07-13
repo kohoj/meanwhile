@@ -33,6 +33,14 @@ const environmentSchema = z.object({
   OTEL_EXPORTER_OTLP_ENDPOINT: z.url().optional(),
   CLOUDFLARE_BRIDGE_URL: z.url().optional(),
   CLOUDFLARE_BRIDGE_TOKEN: z.string().min(24).optional(),
+  CLOUDFLARE_RUNTIME_IMAGE_DIGEST: z
+    .string()
+    .regex(/^sha256:[a-f0-9]{64}$/)
+    .optional(),
+  CLOUDFLARE_RUNNER_DIGEST: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
 })
 
 export interface AppConfig {
@@ -63,6 +71,8 @@ export interface AppConfig {
   readonly cloudflare?: {
     readonly bridgeUrl: string
     readonly token: string
+    readonly runtimeImageDigest?: string
+    readonly runnerDigest?: string
   }
 }
 
@@ -127,6 +137,12 @@ export const loadConfig = (
           cloudflare: {
             bridgeUrl: parsed.CLOUDFLARE_BRIDGE_URL as string,
             token: parsed.CLOUDFLARE_BRIDGE_TOKEN as string,
+            ...(parsed.CLOUDFLARE_RUNTIME_IMAGE_DIGEST === undefined
+              ? {}
+              : { runtimeImageDigest: parsed.CLOUDFLARE_RUNTIME_IMAGE_DIGEST }),
+            ...(parsed.CLOUDFLARE_RUNNER_DIGEST === undefined
+              ? {}
+              : { runnerDigest: parsed.CLOUDFLARE_RUNNER_DIGEST }),
           },
         }
       : {}),

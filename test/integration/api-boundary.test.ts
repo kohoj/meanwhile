@@ -20,6 +20,11 @@ test("the route inventory is exact and every control operation fails closed", as
   expect(specificationResponse.status).toBe(200)
   const specification = (await specificationResponse.json()) as OpenApiDocument
   const expectedPaths = [
+    "/api-keys",
+    "/api-keys/{id}",
+    "/artifacts/{id}",
+    "/artifacts/{id}/content",
+    "/audit",
     "/deployments",
     "/deployments/{id}",
     "/deployments/{id}/logs",
@@ -53,6 +58,7 @@ test("the route inventory is exact and every control operation fails closed", as
         headers: { "Content-Type": "application/json" },
       })
       expect(response.status).toBe(401)
+      expect(response.headers.get("Cache-Control")).toBe("private, no-store")
       expect(await response.json()).toMatchObject({ error: { code: "UNAUTHENTICATED" } })
     }
   }
@@ -131,6 +137,7 @@ test("unknown-length request bodies are bounded and replayed below the Bun hard 
   expect(validRequest.headers.get("Content-Length")).toBeNull()
   const validResponse = await harness.application.app.fetch(validRequest)
   expect(validResponse.status).toBe(200)
+  expect(validResponse.headers.get("Cache-Control")).toBe("private, no-store")
   expect(await validResponse.json()).toMatchObject({ provider: "local" })
 
   const server = Bun.serve({

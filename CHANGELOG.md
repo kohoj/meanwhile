@@ -29,6 +29,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Executable documentation contracts for local links, JSON examples, and the published agent-catalog template.
 - Typed Web-standard client with resource namespaces, shared runtime-validated contracts, structured errors, deterministic terminal waits, response evidence, and replay-safe asynchronous log following.
 - Bounded link-free Bun workspace capture as a separate client entrypoint and direct client contract coverage.
+- Complete owner-scoped resource namespaces across HTTP, SDK, and CLI for artifact inspection/streaming download, deployment history, audit queries, and API-key create/list/revoke with final-key lockout protection.
+- Immutable per-run execution provenance covering agent/catalog, runner, provider adapter/capabilities, runtime image evidence, and bridge protocol, with idempotency participation and fail-closed drift detection.
+- Exclusive local data-root lease plus quiescent hashed backup/verification, staged restore, and explicit dry-run/apply reachability garbage collection.
+- `bun run proof:release` system proof for agent execution, immutable download, deployment, runtime destruction audit, process restart, persisted preview/history, and verified backup, plus a real-provider Cloudflare variant that requires complete configured execution provenance.
 
 ### Changed
 
@@ -41,6 +45,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Compose publishes only loopback host ports, makes its unsafe local-provider choice explicit, and accepts optional provider plus allowlisted `env://` values through an uncommitted runtime env file.
 - Cloudflare bridge protocol v2 now binds process retries to a secret-safe full-spec fingerprint, requires an explicit version header, keeps lifecycle truth in a separate durable registry, advertises only the SDK's hard-termination capability, and bounds accumulated replay to 4 MiB of UTF-8 output.
 - CLI and executable demos now consume the same public client as external callers; public Zod contracts are separated from Hono registration, and hermetic demo-environment setup no longer obscures the SDK usage path.
+- Runner protocol v2 carries a remaining timeout duration instead of a cross-machine wall-clock deadline; ACP children run in UTC, monotonic elapsed time owns runtime duration, and durable event timestamps come from control-plane acceptance.
+- Successful local-static previews resume their separate listener after a control-plane restart.
 
 ### Fixed
 
@@ -48,6 +54,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Sparse telemetry correlation is canonicalized before validation, preventing an unavailable optional identifier from obscuring the original failure.
 - The production image now carries both versioned protocol modules required by the control-plane import graph, and CI boots the built image through `/readyz` instead of treating a successful image build as runtime proof.
 - Doctor diagnostics now distinguish migration-history incompatibility from filesystem writability.
+- Sandbox/provider timestamps can no longer control durable log chronology or runner timeout duration.
+- Data-root maintenance now canonicalizes physical paths, preventing symlink aliases from bypassing writer exclusion or nesting a backup inside the live root; restore also revalidates each byte at publication time.
+- Protected control-plane responses now default to `Cache-Control: private, no-store`, including one-time API-key material and authenticated errors.
+- Artifact downloads now use an atomic no-clobber publication step, so a concurrent filesystem write cannot be overwritten after CLI preflight.
 
 ### Security
 
@@ -68,9 +78,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - No tagged release exists.
 - SQLite intentionally supports one active control-plane writer.
 - Local execution is not a sandbox; Cloudflare requires a deployed bridge and live account verification for the exact revision.
-- API-key self-service, quotas/rate limits, horizontal coordination, large-log object retention, release signing, and additional deployment targets are not yet productized.
+- Quotas/rate limits, horizontal coordination, large-log object retention, release signing, and additional deployment targets are not yet productized.
 - Agent permission policy is predeclared and non-interactive; an interactive approval flow needs an explicit runner control channel.
-- Interrupted workspace-bundle publication may leave unreferenced content-addressed bytes until a retention-aware mark-and-sweep collector is implemented.
+- Interrupted workspace-bundle publication may leave unreferenced content-addressed bytes until an operator runs the explicit garbage-collection maintenance command.
 - The pinned Cloudflare SDK exposes accumulated logs rather than range reads; bridge replay is limited to 4 MiB and larger histories require a provider-owned cursor/range facility or an external spool outside the workload sandbox.
 
 ## Compatibility policy

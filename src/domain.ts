@@ -24,6 +24,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonObject = { [key: string]: JsonValue }
 
 export const AGENT_LAUNCH_SNAPSHOT_VERSION = 1 as const
+export const EXECUTION_PROVENANCE_VERSION = 1 as const
 
 export type AgentToolKind =
   | "read"
@@ -56,6 +57,23 @@ export interface AgentLaunchSnapshot {
   readonly permissionPolicy: AgentPermissionPolicy
   readonly envNames: readonly string[]
   readonly secretEnvNames: readonly string[]
+}
+
+export interface ExecutionProvenance {
+  readonly version: typeof EXECUTION_PROVENANCE_VERSION
+  readonly agentDefinitionDigest: string
+  readonly agentCatalogDigest: string
+  readonly runnerDigest: string | null
+  readonly provider: {
+    readonly name: string
+    readonly adapterVersion: string
+    readonly capabilitiesDigest: string
+    readonly runtimeImageReference: string | null
+    readonly runtimeImageDigest: string | null
+    readonly bridgeProtocolVersion: number | null
+  }
+  /** SHA-256 of every preceding field in this snapshot. */
+  readonly digest: string
 }
 
 export interface RepositoryWorkspaceSource {
@@ -105,6 +123,7 @@ export interface Run {
   readonly agentType: string
   readonly agentSpec: AgentLaunchSnapshot
   readonly agentCatalogDigest: string
+  readonly executionProvenance: ExecutionProvenance | null
   readonly prompt: string
   readonly env: Readonly<Record<string, string>>
   readonly secretRefs: Readonly<Record<string, string>>

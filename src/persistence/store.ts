@@ -8,6 +8,7 @@ import {
   type Deployment,
   type DeploymentLogChunk,
   type DeploymentStatus,
+  type ExecutionProvenance,
   isTerminalRunStatus,
   type JsonObject,
   type Run,
@@ -20,6 +21,7 @@ import {
   type WorkspaceSource,
 } from "../domain"
 import { AppError } from "../errors"
+import { parseExecutionProvenance } from "../provenance"
 import { migrationSha256, migrations } from "./migrations"
 
 type Bind = string | number | bigint | boolean | null | Uint8Array
@@ -31,6 +33,7 @@ interface RunRow extends Record<string, Bind> {
   agent_type: string
   agent_spec_json: string
   agent_catalog_digest: string
+  execution_provenance_json: string | null
   prompt: string
   env_json: string
   secret_refs_json: string
@@ -180,6 +183,10 @@ const runFromRow = (row: RunRow): Run => ({
   agentType: row.agent_type,
   agentSpec: parse<AgentLaunchSnapshot>(row.agent_spec_json),
   agentCatalogDigest: row.agent_catalog_digest,
+  executionProvenance:
+    row.execution_provenance_json === null
+      ? null
+      : parseExecutionProvenance(parse<unknown>(row.execution_provenance_json)),
   prompt: row.prompt,
   env: parse<Record<string, string>>(row.env_json),
   secretRefs: parse<Record<string, string>>(row.secret_refs_json),
@@ -300,6 +307,7 @@ export interface CreateRunInput {
   readonly agentType: string
   readonly agentSpec: AgentLaunchSnapshot
   readonly agentCatalogDigest: string
+  readonly executionProvenance: ExecutionProvenance
   readonly prompt: string
   readonly env: Readonly<Record<string, string>>
   readonly secretRefs: Readonly<Record<string, string>>
@@ -396,6 +404,14 @@ export interface Page<T> {
   readonly nextCursor: string | null
 }
 
+export interface DurableBlobRoot {
+  readonly kind: "workspace" | "artifact"
+  readonly ownerId: string
+  readonly digest: string
+  readonly byteSize: number
+  readonly storageKey: string
+}
+
 export interface BootstrapIdentityInput {
   readonly ownerId: string
   readonly ownerName: string
@@ -446,6 +462,94 @@ export class Store {
     }
     this.database.exec("BEGIN IMMEDIATE")
     this.database.exec("ROLLBACK")
+  }
+
+  assertQuiescent(): void {
+    const state = this.countOperationalState()
+    if (
+      state.queuedRuns !== 0 ||
+      state.activeRuns !== 0 ||
+      state.activeRuntimes !== 0 ||
+      state.cleanupBacklog !== 0 ||
+      state.queuedDeployments !== 0 ||
+      state.runningDeployments !== 0
+    ) {
+      throw new AppError({
+        code: "DATA_ROOT_BUSY",
+        status: 409,
+        message: "Data-root maintenance requires no queued or active work",
+        details: state,
+      })
+    }
+  }
+
+  serialize(): Uint8Array {
+    const snapshot = Uint8Array.from(this.database.serialize())
+    // sqlite3_serialize returns the complete main database, but preserves WAL
+    // read/write-version header bytes. A standalone immutable backup has no
+    // sidecar WAL, so normalize both file-format bytes to legacy rollback mode.
+    if (snapshot.byteLength < 20 || snapshot[18] !== 2 || snapshot[19] !== 2) {
+      throw new AppError({
+        code: "DATABASE_SNAPSHOT_INVALID",
+        message: "SQLite produced an unexpected snapshot format",
+      })
+    }
+    snapshot[18] = 1
+    snapshot[19] = 1
+    return snapshot
+  }
+
+  migrationHistory(): readonly {
+    readonly version: number
+    readonly name: string
+    readonly sha256: string
+  }[] {
+    return this.database
+      .query<{ version: number; name: string; sha256: string }, []>(
+        "SELECT version, name, sha256 FROM schema_migrations ORDER BY version",
+      )
+      .all()
+  }
+
+  listDurableBlobRoots(): readonly DurableBlobRoot[] {
+    const workspaces = this.database
+      .query<{ owner_id: string; digest: string; byte_size: number; storage_key: string }, []>(
+        "SELECT owner_id, digest, byte_size, storage_key FROM workspace_bundles",
+      )
+      .all()
+      .map(
+        (row): DurableBlobRoot => ({
+          kind: "workspace",
+          ownerId: row.owner_id,
+          digest: row.digest,
+          byteSize: row.byte_size,
+          storageKey: row.storage_key,
+        }),
+      )
+    const artifacts = this.database
+      .query<{ owner_id: string; digest: string; byte_size: number; storage_key: string }, []>(
+        "SELECT owner_id, digest, byte_size, storage_key FROM artifacts",
+      )
+      .all()
+      .map(
+        (row): DurableBlobRoot => ({
+          kind: "artifact",
+          ownerId: row.owner_id,
+          digest: row.digest,
+          byteSize: row.byte_size,
+          storageKey: row.storage_key,
+        }),
+      )
+    return [...workspaces, ...artifacts]
+  }
+
+  listLocalDeploymentIds(): readonly string[] {
+    return this.database
+      .query<{ id: string }, []>(
+        "SELECT id FROM deployments WHERE target = 'local-static' AND status = 'succeeded' ORDER BY id",
+      )
+      .all()
+      .map(({ id }) => id)
   }
 
   private migrate(): void {
@@ -776,9 +880,10 @@ export class Store {
         .query(`
           INSERT INTO runs(
             id, owner_id, workspace_json, agent_type, agent_spec_json, agent_catalog_digest,
+            execution_provenance_json,
             prompt, env_json, secret_refs_json, provider, artifact_paths_json, timeout_ms,
             status, status_version, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)
         `)
         .run(
           input.id,
@@ -787,6 +892,7 @@ export class Store {
           input.agentType,
           stringify(input.agentSpec),
           input.agentCatalogDigest,
+          stringify(input.executionProvenance),
           input.prompt,
           stringify(input.env),
           stringify(input.secretRefs),
@@ -907,6 +1013,7 @@ export class Store {
     readonly activeRuns: number
     readonly activeRuntimes: number
     readonly cleanupBacklog: number
+    readonly queuedDeployments: number
     readonly runningDeployments: number
   } {
     const row = this.database
@@ -916,6 +1023,7 @@ export class Store {
           active_runs: number
           active_runtimes: number
           cleanup_backlog: number
+          queued_deployments: number
           running_deployments: number
         },
         []
@@ -929,6 +1037,7 @@ export class Store {
           (SELECT COUNT(*) FROM runtime_instances
             WHERE cleanup_status != 'succeeded' AND cleanup_next_attempt_at IS NOT NULL)
             AS cleanup_backlog,
+          (SELECT COUNT(*) FROM deployments WHERE status = 'queued') AS queued_deployments,
           (SELECT COUNT(*) FROM deployments WHERE status = 'running') AS running_deployments
       `)
       .get()
@@ -939,6 +1048,7 @@ export class Store {
       activeRuns: row.active_runs,
       activeRuntimes: row.active_runtimes,
       cleanupBacklog: row.cleanup_backlog,
+      queuedDeployments: row.queued_deployments,
       runningDeployments: row.running_deployments,
     }
   }

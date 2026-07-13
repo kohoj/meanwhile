@@ -3,7 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Store } from "../../src/persistence/store"
-import { TEST_AGENT_CATALOG_DIGEST, testAgentSpec } from "../fixtures/agent-intent"
+import {
+  TEST_AGENT_CATALOG_DIGEST,
+  testAgentSpec,
+  testExecutionProvenanceFor,
+} from "../fixtures/agent-intent"
 
 const directories: string[] = []
 
@@ -27,6 +31,7 @@ describe("SQLite persistence", () => {
       agentType: "demo",
       agentSpec: testAgentSpec(),
       agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+      executionProvenance: testExecutionProvenanceFor("local"),
       prompt: "Create the artifact",
       env: {},
       secretRefs: {},
@@ -56,7 +61,10 @@ describe("SQLite persistence", () => {
     first.close()
 
     const second = new Store(path)
-    expect(second.getRun("owner-a", "run-a")?.status).toBe("queued")
+    expect(second.getRun("owner-a", "run-a")).toMatchObject({
+      status: "queued",
+      executionProvenance: testExecutionProvenanceFor("local"),
+    })
     expect(second.listRunLogs("owner-a", "run-a", 0, 10)).toHaveLength(1)
     expect(second.listAudit("owner-a", "run-a").map((record) => record.action)).toEqual([
       "run.create",
@@ -68,6 +76,7 @@ describe("SQLite persistence", () => {
       agentType: "demo",
       agentSpec: testAgentSpec(),
       agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+      executionProvenance: testExecutionProvenanceFor("local"),
       prompt: "Create the artifact",
       env: {},
       secretRefs: {},

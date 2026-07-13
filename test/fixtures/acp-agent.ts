@@ -99,7 +99,9 @@ const fixture = acp
     const responseText =
       oversizedBytes > 0
         ? "x".repeat(oversizedBytes)
-        : `fixture response: ${text}${leak ? ` secret=${leak}` : ""}`
+        : `fixture response: ${text}${leak ? ` secret=${leak}` : ""}${
+            environment("FIXTURE_REPORT_TZ") === "1" ? ` tz=${environment("TZ")}` : ""
+          }`
     await context.client.notify(acp.methods.client.session.update, {
       sessionId: context.params.sessionId,
       update: {

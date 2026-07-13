@@ -119,7 +119,7 @@ It never owns prompts, agent types, owner policy, run statuses, audit actions, a
 - ACP initialize, capability negotiation, session creation, prompting, events, cancellation, and shutdown;
 - applying a predeclared non-interactive permission policy;
 - translating ACP updates and agent stderr into bounded, sequenced protocol frames;
-- enforcing the persisted absolute deadline and terminating the child process group.
+- enforcing the accepted relative timeout budget with a monotonic clock and terminating the child process group.
 
 It never authenticates owners, selects providers, writes the control-plane database, decides durable run state, retains artifacts, or deploys. It is not a second control plane.
 
@@ -143,6 +143,7 @@ Contracts are serializable, provider-neutral, and executable against a determini
 interface RuntimeProvider {
   readonly name: string
   readonly capabilities: RuntimeCapabilities
+  readonly provenance: RuntimeProviderProvenance
 
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>
@@ -152,13 +153,13 @@ interface RuntimeProvider {
 
   spawn(runtime: RuntimeHandle, process: ProcessSpec): Promise<ProcessHandle>
   inspectProcess(process: ProcessHandle): Promise<ProcessState>
-  events(process: ProcessHandle, cursor: EventCursor): AsyncIterable<ProcessEvent>
+  events(process: ProcessHandle, cursor: EventCursor, signal?: AbortSignal): AsyncIterable<ProcessEvent>
   signal(process: ProcessHandle, signal: ProcessSignal): Promise<void>
   wait(process: ProcessHandle): Promise<ProcessExit>
 
   writeFiles(runtime: RuntimeHandle, files: RuntimeFile[]): Promise<void>
-  listFiles(runtime: RuntimeHandle, path: RelativePath): Promise<RuntimeFileInfo[]>
-  readFile(runtime: RuntimeHandle, path: RelativePath): Promise<Uint8Array>
+  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions): Promise<RuntimeFileInfo[]>
+  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions): Promise<Uint8Array>
 
   expose?(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint>
   health(): Promise<ProviderHealth>
@@ -181,7 +182,7 @@ Rules:
 
 `runner/protocol.ts` is the versioned control-plane-to-runner data contract.
 
-`RunnerSpec` contains run identity, validated agent argv and logical working-directory policy, prompt, permission policy, artifact declarations, absolute deadline, non-secret environment, and secret environment names. The provider sets the physical workspace as process cwd; no provider-private absolute path crosses the protocol. Resolved secret values travel only in the process environment, never in the serialized spec.
+`RunnerSpec` contains run identity, validated agent argv and logical working-directory policy, prompt, permission policy, artifact declarations, a remaining relative timeout budget, non-secret environment, and secret environment names. The control plane remains the owner of the persisted absolute deadline; immediately before spawn it converts remaining policy time into a bounded duration. The runner enforces that duration with `performance.now()`, so sandbox clock skew cannot extend or prematurely terminate a run. The provider sets the physical workspace as process cwd; no provider-private absolute path crosses the protocol. Resolved secret values travel only in the process environment, never in the serialized spec.
 
 Runner stdout is NDJSON protocol only. Every frame includes protocol version, run ID, monotonic runner sequence, timestamp, type, and a bounded validated payload. Runner diagnostics use stderr. The control plane validates and deduplicates by runner sequence, then durably stores accepted evidence.
 
@@ -189,17 +190,25 @@ The provider event stream is the live path and provider-owned replay buffer. The
 
 The same standalone Bun runner executable is installed outside the workspace for local and Cloudflare execution. This keeps behavior identical; it is an integrity and packaging choice, not a claimed sandbox boundary.
 
+Agent processes run with `TZ=UTC`. Public and durable timestamps are UTC ISO 8601 instants generated at the control-plane acceptance boundary; runner/provider wall-clock timestamps are diagnostic input, never authoritative ordering. User-local rendering belongs to the consuming SDK, CLI, or UI.
+
 ### 5.3 Agent catalog
 
 `config/agents.json` is the only source of agent launch configuration. Each entry declares ACP transport, executable, argv, working-directory policy, expected capabilities, and allowed non-secret environment names. Validate once at startup and fail fast. No hidden commands or agent conditionals belong in routes or the executor.
 
 Executables are bare portable PATH names, never control-plane host paths. At run creation, snapshot the selected non-secret launch definition, capability-derived permission policy, definition digest, and catalog digest into durable run intent and include that snapshot in idempotency. Execution and recovery use the snapshot rather than re-reading mutable catalog configuration. The shipped catalog lists only bundled runnable agents; examples for external ACP adapters live in documentation, and remote executable availability is proved by the provider image and live test.
 
-### 5.4 Store
+### 5.4 Execution provenance
+
+Run acceptance snapshots one self-verifying `ExecutionProvenance`: agent definition and catalog digests, runner digest when known, provider adapter version, capability digest, pinned runtime image reference/digest when known, and bridge protocol version. This snapshot participates in idempotency and persists with the run.
+
+Execution and recovery fail closed before compute if the configured adapter, capabilities, runner, image assertion, or bridge protocol no longer matches the accepted snapshot. Legacy rows without provenance remain readable but are not executable. Provenance is evidence of the configured execution identity; an unavailable platform image digest stays `null` rather than being fabricated.
+
+### 5.5 Store
 
 `src/persistence/store.ts` is the only SQL layer. Routes, services, providers, and deploy adapters issue no SQL directly. Public reads of owned resources require `ownerId` in their method signature; narrowly named internal reads exist only for trusted executors.
 
-### 5.5 ArtifactStore and DeployAdapter
+### 5.6 ArtifactStore and DeployAdapter
 
 Artifacts are content-addressed and record owner ID, run ID, logical path, kind, SHA-256, media type, byte size, storage key, and creation time. Writes are atomic; reads are owner-scoped; bytes never mutate in place.
 
@@ -242,7 +251,7 @@ A run records authenticated owner ID, immutable workspace input, agent type, pro
 
 ### 6.2 Timeout
 
-Timeout starts when provisioning is claimed, so provider startup is bounded. Persist the absolute deadline and give it to the runner. Runner and control plane independently enforce it. The winner atomically claims `timed_out`, terminates or stops compute as needed, and schedules cleanup. Late success cannot replace it.
+Timeout starts when provisioning is claimed, so provider startup is bounded. Persist the absolute deadline in the control plane; pass only the remaining relative budget to the provider and runner. Runner and control plane independently enforce the same policy using their own monotonic elapsed-time checks where possible. The winner atomically claims `timed_out`, terminates or stops compute as needed, and schedules cleanup. Late success cannot replace it.
 
 ### 6.3 Cancellation
 
@@ -304,11 +313,20 @@ GET  /runs/:id/logs
 POST /runs/:id/cancel
 GET  /runs/:id/artifacts
 
+GET  /artifacts/:id
+GET  /artifacts/:id/content
+
 POST /providers/test
 
 POST /deployments
+GET  /deployments
 GET  /deployments/:id
 GET  /deployments/:id/logs
+
+GET    /audit
+POST   /api-keys
+GET    /api-keys
+DELETE /api-keys/:id
 
 GET  /healthz
 GET  /readyz
@@ -342,7 +360,9 @@ The schema includes owners and hashed API keys, runs, immutable run-input refere
 
 Do not store artifact bodies or resolved secrets in SQLite. Use relational constraints for ownership, ordering, state, and uniqueness rather than hiding invariants in JSON. Owner-scoped indexes start with `owner_id`. State claims use compare-and-swap predicates or status versions.
 
-SQLite deliberately means one active writer. Horizontal control-plane scale is a trigger for a lease-capable shared database, not a reason to add distributed machinery now.
+SQLite deliberately means one active writer. An adjacent lease keyed by the data root's physical filesystem identity excludes a second control plane and all maintenance commands, including access through a symlink alias. Horizontal control-plane scale is a trigger for a lease-capable shared database, not a reason to add distributed machinery now.
+
+`MEANWHILE_DATA_DIR` is one ownership and recovery unit. `meanwhile data backup` requires quiescent durable work, takes a normalized SQLite snapshot, walks every referenced workspace/artifact blob, includes persisted preview bytes, and writes a hashed manifest atomically outside the live root. `data verify` checks every byte plus schema and object-graph consistency; `data restore` accepts only an absent or empty destination; `data gc` is explicit dry-run/apply mark-and-sweep and never removes referenced history. Ordinary copying of a live SQLite file is not a backup path.
 
 ## 10. Tenant and secret boundary
 
@@ -443,6 +463,8 @@ src/errors.ts                     structured error taxonomy
 src/auth.ts                       identity boundary
 src/secrets.ts                    resolution and redaction boundary
 src/telemetry.ts                  logs, metrics, traces, correlation
+src/provenance.ts                 immutable execution identity and drift check
+src/data-root.ts                  lease, backup, verify, restore, garbage collection
 
 src/api/contracts.ts              pure public Zod request/response contract
 src/api/                          thin routes and OpenAPI registration
@@ -450,6 +472,9 @@ src/services/run-executor.ts      only run-state owner
 src/services/run-service.ts       owner-scoped run use cases
 src/services/workspace-preparer.ts immutable input to provider workspace
 src/services/artifact-collector.ts
+src/services/artifact-service.ts  owner-scoped immutable artifact reads
+src/services/audit-service.ts     owner-scoped audit reads
+src/services/api-key-service.ts   owner-scoped API-key lifecycle
 src/services/deployment-executor.ts
 src/services/runtime-reaper.ts
 
@@ -479,6 +504,7 @@ test/fixtures/                    deterministic ACP agent and fakes
 scripts/demo.ts                   readable SDK create → logs → artifacts → deploy proof
 scripts/demo-environment.ts       hermetic local/live-agent proof setup and teardown
 scripts/container-smoke.ts        packaged-image agent and deployment proof
+scripts/release-proof.ts          run → deploy → cleanup → restart → backup release evidence
 docs/                             architecture, provider authoring, operations
 docs/threat-model.md              trust boundaries, attacker model, residual risk
 ```
@@ -499,10 +525,12 @@ Tests must prove:
 - cancellation signals the process and becomes immutable `cancelled`;
 - timeout becomes immutable `timed_out` despite a late exit;
 - identical idempotent requests create one run and conflicting reuse returns 409;
+- accepted execution provenance persists, participates in idempotency, and rejects adapter/capability drift before compute;
 - deployment writes record, ordered logs, immutable-source reference, and audit evidence;
 - exact secrets never persist in any log plane, audit metadata, or artifact;
 - cleanup never destroys a running runtime, is idempotent, and survives restart;
 - history survives reopening SQLite;
+- one data-root lease excludes concurrent writers; backup, verify, restore, and dry-run/apply garbage collection preserve the complete referenced graph;
 - replay cannot duplicate logs or transitions;
 - recoverable in-flight work reconnects; lost compute becomes `RUNTIME_LOST`;
 - public and provider failures always use the structured safe error contract;
@@ -514,7 +542,10 @@ Tests must prove:
 - the Cloudflare client passes mock-bridge integration;
 - a gated live test creates, starts, executes, reads files/logs, stops, and destroys a real Cloudflare sandbox;
 - the public client authenticates, validates contract responses, preserves structured safe errors, waits deterministically, and reconnects log streams without gaps or duplicates;
+- artifact inspection/download, deployment listing, audit queries, and API-key lifecycle are owner-scoped through API, SDK, and CLI;
+- sandbox clock skew cannot control durable log timestamps or runner timeout duration, and the ACP child timezone is UTC;
 - the no-account demo completes create → run → logs → artifact → local deployment;
+- the release proof additionally verifies cleanup audit, service restart, persisted preview, artifact integrity, and a restorable hashed data-root backup;
 - pinned OTel SDK/exporter packages initialize and export under Bun.
 
 Assert ordering, error codes, and side effects with injected clocks and deterministic adapters. Do not sleep and hope. A mock proves replaceability; only the gated live test proves real provider integration.
@@ -534,8 +565,14 @@ bun run demo:codex
 bun run demo:codex:serve
 bun run demo:claude
 bun run demo:claude:serve
+bun run proof:release
+bun run proof:release:cloudflare
 bun run doctor
 bun run runner:build
+bun run cli -- data backup --output <dir>
+bun run cli -- data verify <dir>
+bun run cli -- data restore <dir>
+bun run cli -- data gc --dry-run
 bun run cloudflare:check
 bun run cloudflare:dev
 bun run cloudflare:deploy
@@ -600,8 +637,8 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 
 ## 18. Current status
 
-- The Bun control plane, SQLite store/migrations, ACP runner, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, API, typed client, CLI, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
-- The no-account demo proves create → ACP run → durable logs/status → artifact capture → API-driven deployment → isolated preview.
+- The Bun control plane, SQLite store/migrations and data-root lifecycle, ACP runner, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, complete owner-facing API/SDK/CLI resources, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
+- The no-account demo proves create → ACP run → durable logs/status → artifact capture → API-driven deployment → isolated preview. The release proof extends that path through runtime destruction, service restart, persisted preview/history reads, and a verified complete backup.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
 - The Cloudflare package uses the real official Sandbox SDK and container image; bridge and container execution are verified locally, while the real-account lifecycle test remains explicitly credential-gated.
 - No tagged compatibility baseline or production-support promise exists yet. Current evolution limits are recorded in Section 17 and README.

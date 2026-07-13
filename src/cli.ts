@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 
 import { constants } from "node:fs"
-import { access, lstat } from "node:fs/promises"
-import { delimiter, dirname, resolve } from "node:path"
+import { access, link, lstat, mkdir, unlink } from "node:fs/promises"
+import { delimiter, dirname, join, resolve } from "node:path"
 import { AgentCatalog } from "./agents/catalog"
 import {
   apiKeyPrefix,
@@ -13,6 +13,12 @@ import {
 } from "./auth"
 import { Meanwhile, MeanwhileError, type Wait } from "./client"
 import { loadConfig, prepareDataDirectories } from "./config"
+import {
+  backupDataRoot,
+  garbageCollectDataRoot,
+  restoreDataRoot,
+  verifyDataBackup,
+} from "./data-root"
 import { AppError } from "./errors"
 import { type BootstrapIdentityStatus, Store } from "./persistence/store"
 import { CloudflareRuntimeProvider } from "./providers/cloudflare-provider"
@@ -141,13 +147,19 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
       await cancelRun(rest, context)
       return 0
     case "artifacts":
-      await listArtifacts(rest, context)
+      await artifactsCommand(rest, context)
       return 0
     case "deploy":
       await createDeployment(rest, context)
       return 0
-    case "deployment":
-      await deploymentCommand(rest, context)
+    case "deployments":
+      await deploymentsCommand(rest, context)
+      return 0
+    case "audit":
+      await auditCommand(rest, context)
+      return 0
+    case "api-keys":
+      await apiKeysCommand(rest, context)
       return 0
     case "providers":
       await providersCommand(rest, context)
@@ -156,6 +168,9 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
       return doctor(rest, context)
     case "key":
       await keyCommand(rest, context)
+      return 0
+    case "data":
+      await dataCommand(rest, context)
       return 0
     default:
       throw argumentError("Unknown command", { command })
@@ -279,11 +294,78 @@ async function cancelRun(args: readonly string[], context: CliContext): Promise<
   })
 }
 
-async function listArtifacts(args: readonly string[], context: CliContext): Promise<void> {
-  const parsed = parseArguments(args)
-  const runId = parsed.onlyPositional()
+async function artifactsCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  const client = apiClient(context)
+  if (subcommand === "list") {
+    const runId = parseArguments(rest).onlyPositional()
+    await printJson(context, {
+      items: await client.artifacts.list(runId, { signal: context.signal }),
+    })
+    return
+  }
+  if (subcommand === "get") {
+    const artifactId = parseArguments(rest).onlyPositional()
+    await printJson(context, await client.artifacts.get(artifactId, { signal: context.signal }))
+    return
+  }
+  if (subcommand !== "download") {
+    throw argumentError("Expected: artifacts list|get|download")
+  }
+  const parsed = parseArguments(rest, { values: ["path", "output"] })
+  const artifactId = parsed.onlyPositional()
+  const output = requiredOption(parsed, "output")
+  const path = parsed.one("path")
+  const content = await client.artifacts.download(artifactId, {
+    ...(path === undefined ? {} : { path }),
+    signal: context.signal,
+  })
+  const destination = resolve(context.cwd, output)
+  if (await Bun.file(destination).exists()) {
+    throw argumentError("Artifact output path already exists", { output: destination })
+  }
+  await mkdir(dirname(destination), { recursive: true })
+  const temporary = `${destination}.${crypto.randomUUID()}.tmp`
+  const sink = Bun.file(temporary).writer()
+  const digest = new Bun.CryptoHasher("sha256")
+  let bytes = 0
+  try {
+    for await (const chunk of content.body) {
+      digest.update(chunk)
+      bytes += chunk.byteLength
+      await sink.write(chunk)
+    }
+    await sink.end()
+    if (bytes !== content.byteSize || digest.digest("hex") !== content.digest) {
+      throw new CliError({
+        code: "ARTIFACT_INTEGRITY_FAILED",
+        message: "Downloaded artifact content does not match its immutable metadata",
+      })
+    }
+    try {
+      // A hard-link commit is atomic and refuses an output path created after
+      // the preflight check; rename would silently overwrite it on POSIX.
+      await link(temporary, destination)
+    } catch (cause) {
+      if (isFilesystemCode(cause, "EEXIST")) {
+        throw argumentError("Artifact output path already exists", { output: destination })
+      }
+      throw cause
+    }
+    await unlink(temporary).catch(() => undefined)
+  } catch (error) {
+    try {
+      await sink.end()
+    } catch {}
+    await unlink(temporary).catch(() => undefined)
+    throw error
+  }
   await printJson(context, {
-    items: await apiClient(context).runs.artifacts(runId, { signal: context.signal }),
+    artifactId,
+    output: destination,
+    digest: content.digest,
+    byteSize: content.byteSize,
+    mediaType: content.mediaType,
   })
 }
 
@@ -350,8 +432,22 @@ function deploymentSource(
   throw argumentError("Exactly one of --artifact or --workspace is required")
 }
 
-async function deploymentCommand(args: readonly string[], context: CliContext): Promise<void> {
+async function deploymentsCommand(args: readonly string[], context: CliContext): Promise<void> {
   const [subcommand, ...rest] = args
+  if (subcommand === "list") {
+    const parsed = parseArguments(rest, { values: ["limit", "before"] })
+    parsed.requireNoPositionals()
+    const before = parsed.one("before")
+    await printJson(
+      context,
+      await apiClient(context).deployments.list({
+        limit: parseInteger(parsed.one("limit") ?? "50", "--limit", 1, 100),
+        ...(before === undefined ? {} : { before }),
+        signal: context.signal,
+      }),
+    )
+    return
+  }
   if (subcommand === "logs") {
     const parsed = parseArguments(rest, { values: ["after", "limit"] })
     const deploymentId = parsed.onlyPositional()
@@ -371,14 +467,69 @@ async function deploymentCommand(args: readonly string[], context: CliContext): 
     )
     return
   }
-  const tokens = subcommand === "get" ? rest : args
-  const parsed = parseArguments(tokens)
+  if (subcommand !== "get") throw argumentError("Expected: deployments list|get|logs")
+  const parsed = parseArguments(rest)
   const deploymentId = parsed.onlyPositional()
   await printJson(context, {
     deployment: await apiClient(context).deployments.get(deploymentId, {
       signal: context.signal,
     }),
   })
+}
+
+async function auditCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  if (subcommand !== "list") throw argumentError("Expected: audit list")
+  const parsed = parseArguments(rest, {
+    values: ["limit", "before", "resource-type", "resource-id", "action"],
+  })
+  parsed.requireNoPositionals()
+  const before = parsed.one("before")
+  const resourceType = parsed.one("resource-type")
+  const allowed = ["owner", "api_key", "run", "runtime", "artifact", "deployment"] as const
+  if (resourceType !== undefined && !allowed.includes(resourceType as (typeof allowed)[number])) {
+    throw argumentError("--resource-type is invalid", { resourceType })
+  }
+  const resourceId = parsed.one("resource-id")
+  const action = parsed.one("action")
+  await printJson(
+    context,
+    await apiClient(context).audit.list({
+      limit: parseInteger(parsed.one("limit") ?? "50", "--limit", 1, 100),
+      ...(before === undefined ? {} : { before }),
+      ...(resourceType === undefined
+        ? {}
+        : { resourceType: resourceType as (typeof allowed)[number] }),
+      ...(resourceId === undefined ? {} : { resourceId }),
+      ...(action === undefined ? {} : { action }),
+      signal: context.signal,
+    }),
+  )
+}
+
+async function apiKeysCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  const client = apiClient(context)
+  if (subcommand === "create") {
+    const parsed = parseArguments(rest, { values: ["name"] })
+    parsed.requireNoPositionals()
+    await printJson(
+      context,
+      await client.apiKeys.create(requiredOption(parsed, "name"), { signal: context.signal }),
+    )
+    return
+  }
+  if (subcommand === "list") {
+    parseArguments(rest).requireNoPositionals()
+    await printJson(context, { items: await client.apiKeys.list({ signal: context.signal }) })
+    return
+  }
+  if (subcommand === "revoke") {
+    const id = parseArguments(rest).onlyPositional()
+    await printJson(context, { key: await client.apiKeys.revoke(id, { signal: context.signal }) })
+    return
+  }
+  throw argumentError("Expected: api-keys create|list|revoke")
 }
 
 async function providersCommand(args: readonly string[], context: CliContext): Promise<void> {
@@ -403,6 +554,53 @@ async function keyCommand(args: readonly string[], context: CliContext): Promise
     warning:
       "This key is shown once, generated locally, and not registered or persisted; use it only for initial local bootstrap.",
   })
+}
+
+async function dataCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  if (subcommand === "verify") {
+    const backup = parseArguments(rest).onlyPositional()
+    await printJson(context, { manifest: await verifyDataBackup(resolve(context.cwd, backup)) })
+    return
+  }
+  const paths = localDataRootPaths(context)
+  if (subcommand === "backup") {
+    const parsed = parseArguments(rest, { values: ["output"] })
+    parsed.requireNoPositionals()
+    const output = resolve(context.cwd, requiredOption(parsed, "output"))
+    await printJson(context, { output, manifest: await backupDataRoot(paths, output) })
+    return
+  }
+  if (subcommand === "restore") {
+    const backup = parseArguments(rest).onlyPositional()
+    await printJson(context, {
+      dataDir: paths.dataDir,
+      manifest: await restoreDataRoot(resolve(context.cwd, backup), paths),
+    })
+    return
+  }
+  if (subcommand === "gc") {
+    const parsed = parseArguments(rest, { flags: ["dry-run", "apply"] })
+    parsed.requireNoPositionals()
+    if (parsed.flag("dry-run") === parsed.flag("apply")) {
+      throw argumentError("Exactly one of --dry-run or --apply is required")
+    }
+    await printJson(context, await garbageCollectDataRoot(paths, parsed.flag("dry-run")))
+    return
+  }
+  throw argumentError("Expected: data backup|verify|restore|gc")
+}
+
+function localDataRootPaths(context: CliContext) {
+  const configured = context.environment["MEANWHILE_DATA_DIR"] ?? "./data"
+  const dataDir = resolve(context.cwd, configured)
+  return {
+    dataDir,
+    databasePath: join(dataDir, "meanwhile.sqlite"),
+    artifactDir: join(dataDir, "artifacts"),
+    runtimeDir: join(dataDir, "runtimes"),
+    deploymentDir: join(dataDir, "deployments"),
+  }
 }
 
 interface DoctorCheck {
@@ -863,6 +1061,14 @@ async function executableExists(
 
 function normalizeCliError(error: unknown): CliError {
   if (error instanceof CliError) return error
+  if (error instanceof AppError) {
+    return new CliError({
+      code: error.code,
+      message: error.message,
+      details: error.details ?? {},
+      ...(error.status >= 400 && error.status < 500 ? { exitCode: 2 } : {}),
+    })
+  }
   if (error instanceof MeanwhileError || error instanceof WorkspaceCaptureError) {
     return new CliError({
       code: error.code,
@@ -878,6 +1084,10 @@ function normalizeCliError(error: unknown): CliError {
     { code: "INTERNAL", message: "Command failed unexpectedly" },
     { cause: error },
   )
+}
+
+function isFilesystemCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code
 }
 
 function argumentError(message: string, details: Readonly<Record<string, unknown>> = {}): CliError {
@@ -904,13 +1114,24 @@ Usage:
   meanwhile get RUN_ID
   meanwhile logs RUN_ID [--follow] [--after N] [--limit N]
   meanwhile cancel RUN_ID
-  meanwhile artifacts RUN_ID
+  meanwhile artifacts list RUN_ID
+  meanwhile artifacts get ARTIFACT_ID
+  meanwhile artifacts download ARTIFACT_ID [--path PATH] --output FILE
   meanwhile deploy RUN_ID (--artifact PATH | --workspace PATH) --target NAME
-  meanwhile deployment [get] DEPLOYMENT_ID
-  meanwhile deployment logs DEPLOYMENT_ID [--after N] [--limit N]
+  meanwhile deployments list [--limit N] [--before CURSOR]
+  meanwhile deployments get DEPLOYMENT_ID
+  meanwhile deployments logs DEPLOYMENT_ID [--after N] [--limit N]
+  meanwhile audit list [--resource-type TYPE] [--resource-id ID] [--action ACTION]
+  meanwhile api-keys create --name NAME
+  meanwhile api-keys list
+  meanwhile api-keys revoke KEY_ID
   meanwhile providers test PROVIDER
   meanwhile doctor
   meanwhile key generate
+  meanwhile data backup --output BACKUP_DIR
+  meanwhile data verify BACKUP_DIR
+  meanwhile data restore BACKUP_DIR
+  meanwhile data gc (--dry-run | --apply)
 
 Run options:
   --provider NAME             Runtime provider (default: MEANWHILE_DEFAULT_PROVIDER or local)

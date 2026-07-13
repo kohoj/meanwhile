@@ -27,7 +27,8 @@ The adapter owns:
 - relative workspace file write, list, and read;
 - optional port exposure;
 - health and provider-native diagnostics;
-- translation of provider failures into `ProviderError`.
+- immutable adapter/runner/image/bridge provenance declarations;
+- translation of provider failures into `RuntimeProviderError`.
 
 The adapter never owns:
 
@@ -48,6 +49,7 @@ Conceptually:
 interface RuntimeProvider {
   readonly name: string
   readonly capabilities: RuntimeCapabilities
+  readonly provenance: RuntimeProviderProvenance
 
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>
@@ -57,13 +59,13 @@ interface RuntimeProvider {
 
   spawn(runtime: RuntimeHandle, process: ProcessSpec): Promise<ProcessHandle>
   inspectProcess(process: ProcessHandle): Promise<ProcessState>
-  events(process: ProcessHandle, cursor: EventCursor): AsyncIterable<ProcessEvent>
+  events(process: ProcessHandle, cursor: EventCursor, signal?: AbortSignal): AsyncIterable<ProcessEvent>
   signal(process: ProcessHandle, signal: ProcessSignal): Promise<void>
   wait(process: ProcessHandle): Promise<ProcessExit>
 
   writeFiles(runtime: RuntimeHandle, files: RuntimeFile[]): Promise<void>
-  listFiles(runtime: RuntimeHandle, path: RelativePath): Promise<RuntimeFileInfo[]>
-  readFile(runtime: RuntimeHandle, path: RelativePath): Promise<Uint8Array>
+  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions): Promise<RuntimeFileInfo[]>
+  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions): Promise<Uint8Array>
 
   expose?(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint>
   health(): Promise<ProviderHealth>
@@ -71,6 +73,12 @@ interface RuntimeProvider {
 ```
 
 Do not widen this interface with provider settings that belong in adapter construction. Do not return provider SDK objects across it.
+
+## Provenance and capabilities
+
+Capabilities are provider-neutral behavioral facts used by policy: isolation class, process recovery, event replay, port exposure, and exact signal semantics. Provenance identifies the accepted implementation: adapter version, runner digest when known, pinned runtime image reference/digest when known, and bridge protocol version.
+
+The control plane hashes capabilities and snapshots both structures into every accepted run. Execution and recovery fail before compute if the active provider differs. Do not mutate these declarations after construction, infer stronger behavior from provider names, or fabricate an image digest that the platform does not expose.
 
 ## Handles
 
@@ -147,8 +155,10 @@ A process specification contains:
 - a non-empty argv array whose first entry is the executable;
 - normalized relative working directory;
 - non-secret and resolved secret environment for that process;
-- absolute deadline or bounded timeout as defined by the source type;
+- remaining relative timeout duration plus an explicit bounded hard-termination grace;
 - optional bounded initial stdin.
+
+No absolute control-plane deadline crosses this boundary. The control plane computes remaining policy time immediately before spawn; providers treat it as a duration and must not reinterpret it using sandbox wall-clock time.
 
 Never accept a shell string. Never interpolate a prompt into argv or a shell. The fixed runner receives one validated specification through initial stdin; the prompt then travels to the child as ACP data.
 
@@ -299,6 +309,7 @@ Every adapter, including local and fake, runs the same deterministic suite:
 12. normalize authentication, unavailable, expired cursor, and invalid-handle errors;
 13. ensure diagnostics and handles contain no injected secret;
 14. reconnect according to declared capabilities.
+15. keep provenance immutable and reject configuration drift before an execution uses the adapter.
 
 Use injected identities and bounded event-driven waits; do not use arbitrary sleeps. A fake proves core replaceability. A local adapter proves real host process semantics. Each remote adapter additionally needs a credential-gated live test that creates, starts, executes, reads, stops, and destroys actual provider compute.
 
@@ -308,6 +319,7 @@ Use injected identities and bounded event-driven waits; do not use arbitrary sle
 - [ ] Provider construction owns all provider-specific configuration.
 - [ ] Handles are versioned, persistable, opaque, and secret-free.
 - [ ] Capabilities state limitations truthfully.
+- [ ] Provenance names the exact adapter, runner, image evidence, and bridge protocol without guessing unavailable digests.
 - [ ] Process launch uses executable plus argv.
 - [ ] Events are ordered, bounded, resumable, and channel-aware.
 - [ ] Stop and destroy are idempotent and distinct.

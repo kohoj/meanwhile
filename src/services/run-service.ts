@@ -2,6 +2,7 @@ import type { PreparedWorkspaceBundle, UploadedWorkspaceFile } from "../artifact
 import {
   type AgentLaunchSnapshot,
   type Artifact,
+  type ExecutionProvenance,
   isSafeRepositoryRevision,
   isTerminalRunStatus,
   type RequestContext,
@@ -39,6 +40,14 @@ export interface RunProviderNames {
   has(name: string): boolean
 }
 
+export interface RunExecutionProvenance {
+  capture(input: {
+    provider: string
+    agentSpec: AgentLaunchSnapshot
+    agentCatalogDigest: string
+  }): ExecutionProvenance
+}
+
 export interface CreateRunCommand {
   readonly workspace: WorkspaceSource | UploadedFilesWorkspaceSource
   readonly agentType: string
@@ -67,6 +76,7 @@ export interface RunServiceOptions {
   readonly agentIntents: RunAgentIntentResolver
   readonly secretReferences: SecretReferenceValidator
   readonly providerNames: RunProviderNames
+  readonly executionProvenance: RunExecutionProvenance
   readonly defaultProvider: string
   readonly clock?: () => Date
   readonly id?: () => string
@@ -93,6 +103,7 @@ export class RunService {
   readonly #agentIntents: RunAgentIntentResolver
   readonly #secretReferences: SecretReferenceValidator
   readonly #providerNames: RunProviderNames
+  readonly #executionProvenance: RunExecutionProvenance
   readonly #defaultProvider: string
   readonly #clock: () => Date
   readonly #id: () => string
@@ -106,6 +117,7 @@ export class RunService {
     this.#agentIntents = options.agentIntents
     this.#secretReferences = options.secretReferences
     this.#providerNames = options.providerNames
+    this.#executionProvenance = options.executionProvenance
     this.#defaultProvider = options.defaultProvider
     this.#clock = options.clock ?? (() => new Date())
     this.#id = options.id ?? (() => crypto.randomUUID())
@@ -165,6 +177,11 @@ export class RunService {
         details: { provider },
       })
     }
+    const executionProvenance = this.#executionProvenance.capture({
+      provider,
+      agentSpec: agentIntent.agentSpec,
+      agentCatalogDigest: agentIntent.agentCatalogDigest,
+    })
     let preparedWorkspace: PreparedWorkspaceBundle | null = null
     let workspace: WorkspaceSource
     if (input.workspace.type === "files") {
@@ -173,7 +190,7 @@ export class RunService {
     } else {
       workspace = input.workspace
     }
-    const normalizedInput = { ...input, provider, ...agentIntent }
+    const normalizedInput = { ...input, provider, ...agentIntent, executionProvenance }
     const requestHash =
       idempotencyKey === undefined ? undefined : hashCanonical({ ...normalizedInput, workspace })
 
@@ -197,6 +214,7 @@ export class RunService {
         agentType: input.agentType,
         agentSpec: agentIntent.agentSpec,
         agentCatalogDigest: agentIntent.agentCatalogDigest,
+        executionProvenance,
         prompt: input.prompt,
         env: input.env,
         secretRefs: input.secretRefs,

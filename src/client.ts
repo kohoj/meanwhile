@@ -1,14 +1,26 @@
 import type { z } from "zod"
 import {
+  type ApiKey,
+  ApiKeyPageSchema,
+  ApiKeyResponseSchema,
   type Artifact,
+  type ArtifactDetail,
+  ArtifactDetailSchema,
+  ArtifactIdentifierSchema,
   ArtifactPageSchema,
+  type AuditPage,
+  AuditPageSchema,
+  CreateApiKeyRequestSchema,
   type CreateDeploymentRequest,
   CreateDeploymentRequestSchema,
+  CreatedApiKeyResponseSchema,
   type CreateRunRequest,
   CreateRunRequestSchema,
   type Deployment,
   type DeploymentLogPage,
   DeploymentLogPageSchema,
+  type DeploymentPage,
+  DeploymentPageSchema,
   DeploymentResponseSchema,
   ErrorEnvelopeSchema,
   IdentifierSchema,
@@ -40,7 +52,7 @@ export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promi
 export type Wait = (milliseconds: number, signal: AbortSignal) => Promise<void>
 
 export interface ClientResponseEvidence {
-  readonly method: "GET" | "POST"
+  readonly method: "GET" | "POST" | "DELETE"
   readonly path: string
   readonly status: number
   readonly requestId: string
@@ -69,6 +81,11 @@ export interface ListRunsOptions extends RequestOptions {
   readonly before?: string
 }
 
+export interface ListCreatedOptions extends RequestOptions {
+  readonly limit?: number
+  readonly before?: string
+}
+
 export interface ListLogsOptions extends RequestOptions {
   readonly after?: number
   readonly limit?: number
@@ -88,15 +105,50 @@ export interface RunsClient {
   cancel(id: string, options?: RequestOptions): Promise<Run>
   logs(id: string, options?: ListLogsOptions): Promise<RunLogPage>
   followLogs(id: string, options?: FollowLogsOptions): AsyncIterable<RunLog>
-  artifacts(id: string, options?: RequestOptions): Promise<readonly Artifact[]>
   wait(id: string, options?: WaitOptions): Promise<Run>
+}
+
+export interface ArtifactDownload {
+  readonly body: ReadableStream<Uint8Array>
+  readonly digest: string
+  readonly mediaType: string
+  readonly byteSize: number
+}
+
+export interface ArtifactsClient {
+  list(runId: string, options?: RequestOptions): Promise<readonly Artifact[]>
+  get(id: string, options?: RequestOptions): Promise<ArtifactDetail>
+  download(
+    id: string,
+    options?: RequestOptions & { readonly path?: string },
+  ): Promise<ArtifactDownload>
 }
 
 export interface DeploymentsClient {
   create(input: CreateDeploymentRequest, options?: RequestOptions): Promise<Deployment>
+  list(options?: ListCreatedOptions): Promise<DeploymentPage>
   get(id: string, options?: RequestOptions): Promise<Deployment>
   logs(id: string, options?: ListLogsOptions): Promise<DeploymentLogPage>
   wait(id: string, options?: WaitOptions): Promise<Deployment>
+}
+
+export interface AuditClient {
+  list(
+    options?: ListCreatedOptions & {
+      readonly resourceType?: "owner" | "api_key" | "run" | "runtime" | "artifact" | "deployment"
+      readonly resourceId?: string
+      readonly action?: string
+    },
+  ): Promise<AuditPage>
+}
+
+export interface ApiKeysClient {
+  create(
+    name: string,
+    options?: RequestOptions,
+  ): Promise<{ readonly key: ApiKey; readonly secret: string }>
+  list(options?: RequestOptions): Promise<readonly ApiKey[]>
+  revoke(id: string, options?: RequestOptions): Promise<ApiKey>
 }
 
 export interface ProvidersClient {
@@ -131,14 +183,20 @@ export class MeanwhileError extends Error {
 /** A Web-standard client for the complete public Meanwhile control-plane contract. */
 export class Meanwhile {
   readonly runs: RunsClient
+  readonly artifacts: ArtifactsClient
   readonly deployments: DeploymentsClient
   readonly providers: ProvidersClient
+  readonly audit: AuditClient
+  readonly apiKeys: ApiKeysClient
 
   constructor(options: MeanwhileOptions) {
     const transport = new Transport(options)
     this.runs = new Runs(transport)
+    this.artifacts = new Artifacts(transport)
     this.deployments = new Deployments(transport)
     this.providers = new Providers(transport)
+    this.audit = new Audit(transport)
+    this.apiKeys = new ApiKeys(transport)
   }
 }
 
@@ -266,15 +324,6 @@ class Runs implements RunsClient {
     }
   }
 
-  async artifacts(id: string, options: RequestOptions = {}): Promise<readonly Artifact[]> {
-    const result = await this.transport.json(
-      `${runPath(id)}/artifacts`,
-      ArtifactPageSchema,
-      signalInput(options.signal),
-    )
-    return result.items
-  }
-
   wait(id: string, options: WaitOptions = {}): Promise<Run> {
     return waitForTerminal(
       "run",
@@ -284,6 +333,56 @@ class Runs implements RunsClient {
       this.transport,
       options,
     )
+  }
+}
+
+class Artifacts implements ArtifactsClient {
+  constructor(private readonly transport: Transport) {}
+
+  async list(id: string, options: RequestOptions = {}): Promise<readonly Artifact[]> {
+    const result = await this.transport.json(
+      `${runPath(id)}/artifacts`,
+      ArtifactPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  get(id: string, options: RequestOptions = {}): Promise<ArtifactDetail> {
+    return this.transport.json(artifactPath(id), ArtifactDetailSchema, signalInput(options.signal))
+  }
+
+  async download(
+    id: string,
+    options: RequestOptions & { readonly path?: string } = {},
+  ): Promise<ArtifactDownload> {
+    const query = new URLSearchParams()
+    if (options.path !== undefined) query.set("path", options.path)
+    const response = await this.transport.response(
+      `${artifactPath(id)}/content${query.size === 0 ? "" : `?${query}`}`,
+      signalInput(options.signal),
+    )
+    if (response.headers.get("Content-Type")?.split(";", 1)[0] !== "application/octet-stream") {
+      await response.body?.cancel().catch(() => undefined)
+      throw protocolError("Artifact download has an invalid content type")
+    }
+    const digest = response.headers.get("X-Meanwhile-Artifact-Digest")
+    if (digest === null || !/^[a-f0-9]{64}$/.test(digest)) {
+      await response.body?.cancel().catch(() => undefined)
+      throw protocolError("Artifact download has an invalid digest")
+    }
+    const contentLength = response.headers.get("Content-Length")
+    const byteSize = contentLength === null ? Number.NaN : Number(contentLength)
+    if (!Number.isSafeInteger(byteSize) || byteSize < 0 || response.body === null) {
+      await response.body?.cancel().catch(() => undefined)
+      throw protocolError("Artifact download has invalid length metadata")
+    }
+    return {
+      body: response.body,
+      digest,
+      mediaType: response.headers.get("X-Meanwhile-Media-Type") ?? "application/octet-stream",
+      byteSize,
+    }
   }
 }
 
@@ -298,6 +397,14 @@ class Deployments implements DeploymentsClient {
       ...signalInput(options.signal),
     })
     return result.deployment
+  }
+
+  list(options: ListCreatedOptions = {}): Promise<DeploymentPage> {
+    return this.transport.json(
+      `deployments?${createdPageQuery(options)}`,
+      DeploymentPageSchema,
+      signalInput(options.signal),
+    )
   }
 
   async get(id: string, options: RequestOptions = {}): Promise<Deployment> {
@@ -330,6 +437,49 @@ class Deployments implements DeploymentsClient {
   }
 }
 
+class Audit implements AuditClient {
+  constructor(private readonly transport: Transport) {}
+
+  list(options: Parameters<AuditClient["list"]>[0] = {}): Promise<AuditPage> {
+    const query = createdPageQuery(options)
+    if (options.resourceType !== undefined) query.set("resourceType", options.resourceType)
+    if (options.resourceId !== undefined) query.set("resourceId", options.resourceId)
+    if (options.action !== undefined) query.set("action", options.action)
+    return this.transport.json(`audit?${query}`, AuditPageSchema, signalInput(options.signal))
+  }
+}
+
+class ApiKeys implements ApiKeysClient {
+  constructor(private readonly transport: Transport) {}
+
+  create(name: string, options: RequestOptions = {}) {
+    const body = parseInput(CreateApiKeyRequestSchema, { name })
+    return this.transport.json("api-keys", CreatedApiKeyResponseSchema, {
+      method: "POST",
+      body,
+      ...signalInput(options.signal),
+    })
+  }
+
+  async list(options: RequestOptions = {}): Promise<readonly ApiKey[]> {
+    const result = await this.transport.json(
+      "api-keys",
+      ApiKeyPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async revoke(id: string, options: RequestOptions = {}): Promise<ApiKey> {
+    const result = await this.transport.json(
+      `api-keys/${encodeURIComponent(validId(id))}`,
+      ApiKeyResponseSchema,
+      { method: "DELETE", ...signalInput(options.signal) },
+    )
+    return result.key
+  }
+}
+
 class Providers implements ProvidersClient {
   constructor(private readonly transport: Transport) {}
 
@@ -344,7 +494,7 @@ class Providers implements ProvidersClient {
 }
 
 interface TransportRequest {
-  readonly method?: "GET" | "POST"
+  readonly method?: "GET" | "POST" | "DELETE"
   readonly headers?: Headers
   readonly body?: unknown
   readonly signal?: AbortSignal
@@ -588,6 +738,13 @@ function deploymentPath(id: string): string {
   return `deployments/${encodeURIComponent(validId(id))}`
 }
 
+function artifactPath(id: string): string {
+  const result = ArtifactIdentifierSchema.safeParse(id)
+  if (!result.success)
+    throw invalidArgument("Artifact id must be a SHA-256 digest", { field: "id" })
+  return `artifacts/${encodeURIComponent(result.data)}`
+}
+
 function validId(id: string): string {
   const result = IdentifierSchema.safeParse(id)
   if (!result.success) throw invalidArgument("Resource id must be a UUID", { field: "id" })
@@ -603,6 +760,14 @@ function cursorQuery(options: ListLogsOptions): URLSearchParams {
     after: String(boundedInteger(options.after ?? 0, 0, Number.MAX_SAFE_INTEGER, "after")),
     limit: String(boundedInteger(options.limit ?? 100, 1, 1_000, "limit")),
   })
+}
+
+function createdPageQuery(options: ListCreatedOptions): URLSearchParams {
+  const query = new URLSearchParams({
+    limit: String(boundedInteger(options.limit ?? 50, 1, 100, "limit")),
+  })
+  if (options.before !== undefined) query.set("before", options.before)
+  return query
 }
 
 function boundedInteger(value: number, minimum: number, maximum: number, field: string): number {

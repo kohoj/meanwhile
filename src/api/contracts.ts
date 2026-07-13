@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { isSafeRepositoryRevision, RUN_STATUSES } from "../domain"
+import { executionProvenanceSchema } from "../provenance"
 import { relativePath } from "../providers/runtime-provider"
 
 const timestamp = z.iso.datetime({ offset: true })
@@ -188,6 +189,10 @@ export const AgentLaunchSnapshotSchema = z
   .strict()
   .meta({ id: "AgentLaunchSnapshot" })
 
+export const ExecutionProvenanceSchema = executionProvenanceSchema.meta({
+  id: "ExecutionProvenance",
+})
+
 export const RunSchema = z
   .object({
     id: IdentifierSchema,
@@ -196,6 +201,7 @@ export const RunSchema = z
     agentType: z.string(),
     agentSpec: AgentLaunchSnapshotSchema,
     agentCatalogDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    executionProvenance: ExecutionProvenanceSchema.nullable(),
     prompt: z.string(),
     env: z.record(z.string(), z.string()),
     secretRefs: z.record(z.string(), z.string()),
@@ -397,9 +403,7 @@ export const AuditRecordSchema = z
   .meta({ id: "AuditRecord" })
 
 export const AuditQuerySchema = CreatedPageQuerySchema.extend({
-  resourceType: z
-    .enum(["owner", "api_key", "run", "runtime", "artifact", "deployment"])
-    .optional(),
+  resourceType: z.enum(["owner", "api_key", "run", "runtime", "artifact", "deployment"]).optional(),
   resourceId: z.string().min(1).max(256).optional(),
   action: z.string().min(1).max(128).optional(),
 })

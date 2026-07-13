@@ -12,11 +12,12 @@ import {
 } from "../../src/agents/runner-session"
 import { LocalArtifactStore } from "../../src/artifacts/local-artifact-store"
 import { Store } from "../../src/persistence/store"
+import { ExecutionProvenanceCatalog } from "../../src/provenance"
 import { RuntimeProviderRegistry } from "../../src/providers/registry"
 import { relativePath } from "../../src/providers/runtime-provider"
 import { EnvironmentSecretResolver } from "../../src/secrets"
 import { RunExecutor } from "../../src/services/run-executor"
-import { RunService } from "../../src/services/run-service"
+import { type RunExecutionProvenance, RunService } from "../../src/services/run-service"
 import { WorkspacePreparer } from "../../src/services/workspace-preparer"
 import { StructuredLogger } from "../../src/telemetry"
 import { MockRuntimeProvider } from "../fixtures/mock-provider"
@@ -107,6 +108,36 @@ describe("immutable agent launch intent", () => {
     expect(store.listRuns(OWNER_ID, { limit: 10 }).items).toHaveLength(1)
     store.close()
   })
+
+  test("execution provenance participates in idempotency", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "meanwhile-provenance-idempotency-"))
+    directories.push(directory)
+    const catalogPath = join(directory, "agents.json")
+    await writeCatalog(catalogPath, "accepted-agent", false)
+    const catalog = await AgentCatalog.load(catalogPath)
+    const store = new Store(":memory:")
+    createIdentity(store)
+    const provider = new MockRuntimeProvider()
+
+    await runService(
+      store,
+      catalog,
+      new ExecutionProvenanceCatalog(new RuntimeProviderRegistry([provider])),
+    ).create(context(), command(), "same-provenance-key")
+    Object.defineProperty(provider, "provenance", {
+      value: { ...provider.provenance, adapterVersion: "replacement-adapter" },
+    })
+
+    await expect(
+      runService(
+        store,
+        catalog,
+        new ExecutionProvenanceCatalog(new RuntimeProviderRegistry([provider])),
+      ).create(context(), command(), "same-provenance-key"),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 })
+    expect(store.listRuns(OWNER_ID, { limit: 10 }).items).toHaveLength(1)
+    store.close()
+  })
 })
 
 class CapturingRunner extends RunnerSessionController {
@@ -134,7 +165,13 @@ class CapturingRunner extends RunnerSessionController {
   }
 }
 
-function runService(store: Store, catalog: AgentCatalog): RunService {
+function runService(
+  store: Store,
+  catalog: AgentCatalog,
+  executionProvenance: RunExecutionProvenance = new ExecutionProvenanceCatalog(
+    new RuntimeProviderRegistry([new MockRuntimeProvider()]),
+  ),
+): RunService {
   return new RunService({
     store,
     commands: { enqueue() {}, async cancel() {} },
@@ -154,6 +191,7 @@ function runService(store: Store, catalog: AgentCatalog): RunService {
     agentIntents: catalog,
     secretReferences: secretResolver(),
     providerNames: { has: (name) => name === "mock" },
+    executionProvenance,
     defaultProvider: "mock",
   })
 }

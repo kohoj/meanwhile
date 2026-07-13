@@ -6,9 +6,11 @@ import { DeploymentExecutionError } from "../services/deployment-executor"
 import {
   type ApiEnv,
   CreateDeploymentRequestSchema,
+  CreatedPageQuerySchema,
   CursorQuerySchema,
   createApiRouter,
   DeploymentLogPageSchema,
+  DeploymentPageSchema,
   DeploymentResponseSchema,
   errorResponses,
   IdParamSchema,
@@ -44,6 +46,10 @@ interface DeploymentLogPage {
 
 export interface DeploymentApi {
   create(input: CreateDeploymentCommand): Promise<Deployment>
+  list(
+    ownerId: string,
+    options: { limit: number; before?: string },
+  ): Promise<{ readonly items: readonly Deployment[]; readonly nextCursor: string | null }>
   get(ownerId: string, deploymentId: string): Promise<Deployment>
   logs(input: {
     ownerId: string
@@ -88,6 +94,19 @@ const getDeploymentRoute = createRoute({
   },
 })
 
+const listDeploymentsRoute = createRoute({
+  method: "get",
+  path: "/deployments",
+  operationId: "listDeployments",
+  tags: ["Deployments"],
+  summary: "List deployments owned by the caller",
+  request: { query: CreatedPageQuerySchema },
+  responses: {
+    200: jsonResponse(DeploymentPageSchema, "Owner-scoped deployment page"),
+    ...errorResponses,
+  },
+})
+
 const getDeploymentLogsRoute = createRoute({
   method: "get",
   path: "/deployments/{id}/logs",
@@ -126,6 +145,18 @@ export const createDeploymentRoutes = (
     )
     commands.enqueue(deployment.id)
     return context.json(DeploymentResponseSchema.parse({ deployment }), 202)
+  })
+
+  routes.openapi(listDeploymentsRoute, async (context) => {
+    const { ownerId } = context.get("requestContext")
+    const query = context.req.valid("query")
+    const page = await mapDeploymentErrors(() =>
+      service.list(ownerId, {
+        limit: query.limit,
+        ...(query.before === undefined ? {} : { before: query.before }),
+      }),
+    )
+    return context.json(DeploymentPageSchema.parse(page), 200)
   })
 
   routes.openapi(getDeploymentRoute, async (context) => {

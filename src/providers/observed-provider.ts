@@ -101,6 +101,7 @@ export function observeRuntimeProvider(
   return Object.freeze({
     name: provider.name,
     capabilities: provider.capabilities,
+    provenance: provider.provenance,
     create: (input: CreateRuntimeInput): Promise<RuntimeHandle> =>
       observe("create", () => provider.create(input)),
     start: (runtime: RuntimeHandle): Promise<void> =>

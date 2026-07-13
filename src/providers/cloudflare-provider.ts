@@ -2,6 +2,7 @@ import type { z } from "zod"
 import {
   BRIDGE_PROTOCOL_VERSION,
   bridgeErrorResponseSchema,
+  CLOUDFLARE_SANDBOX_VERSION,
   exposedEndpointSchema,
   INITIAL_EVENT_CURSOR,
   processEventsResponseSchema,
@@ -11,6 +12,7 @@ import {
   runtimeIdSchema,
   runtimeSnapshotSchema,
 } from "../../providers/cloudflare-sandbox/src/protocol"
+import { SERVICE_VERSION } from "../version"
 import {
   assertRuntimeId,
   type CreateRuntimeInput,
@@ -61,6 +63,8 @@ export interface CloudflareRuntimeProviderOptions {
   readonly eventPollIntervalMs?: number
   readonly eventPageCharacters?: number
   readonly waitRequestMs?: number
+  readonly runtimeImageDigest?: string
+  readonly runnerDigest?: string
 }
 
 /**
@@ -69,6 +73,7 @@ export interface CloudflareRuntimeProviderOptions {
  */
 export class CloudflareRuntimeProvider implements RuntimeProvider {
   readonly name = PROVIDER_NAME
+  readonly provenance: RuntimeProvider["provenance"]
   readonly capabilities = Object.freeze({
     isolation: "container" as const,
     processRecovery: true,
@@ -88,6 +93,22 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
   readonly #waitRequestMs: number
 
   constructor(options: CloudflareRuntimeProviderOptions) {
+    if (
+      options.runtimeImageDigest !== undefined &&
+      !/^sha256:[a-f0-9]{64}$/.test(options.runtimeImageDigest)
+    ) {
+      throw new TypeError("runtimeImageDigest must be a sha256: digest")
+    }
+    if (options.runnerDigest !== undefined && !/^[a-f0-9]{64}$/.test(options.runnerDigest)) {
+      throw new TypeError("runnerDigest must be a SHA-256 digest")
+    }
+    this.provenance = Object.freeze({
+      adapterVersion: SERVICE_VERSION,
+      runnerDigest: options.runnerDigest ?? null,
+      runtimeImageReference: `docker.io/cloudflare/sandbox:${CLOUDFLARE_SANDBOX_VERSION}`,
+      runtimeImageDigest: options.runtimeImageDigest ?? null,
+      bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
+    })
     this.#bridgeUrl = parseBridgeUrl(options.bridgeUrl)
     if (new TextEncoder().encode(options.bridgeToken).byteLength < 32) {
       throw new TypeError("bridgeToken must contain at least 32 UTF-8 bytes")
