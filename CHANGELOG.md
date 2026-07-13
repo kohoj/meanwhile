@@ -39,6 +39,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Changed
 
 - The complete quality gate now builds the standalone runner and bundled demo agent before tests, so a clean checkout proves the same executables used by local and remote runtimes.
+- CI uses the current Node 24-based checkout action and emits no deprecated-action runtime warning.
 - Container CI now boots the packaged image and drives a complete SDK run, ACP evidence, artifact capture, deployment, and separate-origin preview flow instead of stopping at readiness.
 - Agent launch configuration is now strict, portable, capability-derived, content-digested, and snapshotted into each run's durable idempotent intent; recovering runs no longer change behavior after catalog edits. The shipped catalog advertises only the bundled demo agent, with external ACP adapter entries supplied as documentation templates.
 - Run creation may omit `provider`; the configured default is resolved and validated before any run or uploaded workspace state is persisted.
