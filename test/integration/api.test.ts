@@ -205,9 +205,23 @@ test("deployment and provider routes preserve owner and adapter boundaries", asy
   )
   installStructuredErrors(app)
 
-  const queued = await app.request("/deployments", {
+  const missingIdempotency = await app.request("/deployments", {
     method: "POST",
     headers: requestHeaders(OWNER_A),
+    body: JSON.stringify({
+      runId: "10000000-0000-4000-8000-000000000001",
+      artifactPath: "dist",
+      deployTarget: "local-static",
+    }),
+  })
+  expect(missingIdempotency.status).toBe(400)
+  expect(await missingIdempotency.json()).toMatchObject({
+    error: { code: "INVALID_REQUEST" },
+  })
+
+  const queued = await app.request("/deployments", {
+    method: "POST",
+    headers: requestHeaders(OWNER_A, { "Idempotency-Key": "deployment-request-a" }),
     body: JSON.stringify({
       runId: "10000000-0000-4000-8000-000000000001",
       artifactPath: "dist",
@@ -223,9 +237,23 @@ test("deployment and provider routes preserve owner and adapter boundaries", asy
     targetConfig: { index: "index.html" },
     status: "queued",
   })
+
+  const replayed = await app.request("/deployments", {
+    method: "POST",
+    headers: requestHeaders(OWNER_A, { "Idempotency-Key": "deployment-request-a" }),
+    body: JSON.stringify({
+      runId: "10000000-0000-4000-8000-000000000001",
+      artifactPath: "dist",
+      deployTarget: "local-static",
+      config: { index: "index.html" },
+    }),
+  })
+  expect(replayed.status).toBe(200)
+  expect(await replayed.json()).toEqual(queuedBody)
   expect(enqueued).toEqual([queuedBody.deployment.id])
   expect(deployments.lastCreate).toMatchObject({
     ownerId: OWNER_A,
+    idempotencyKey: "deployment-request-a",
     source: { artifactPath: "dist" },
     targetName: "local-static",
     targetConfig: { index: "index.html" },
@@ -238,7 +266,7 @@ test("deployment and provider routes preserve owner and adapter boundaries", asy
   expect(await hidden.json()).toMatchObject({ error: { code: "NOT_FOUND" } })
 
   const logs = await app.request(`/deployments/${queuedBody.deployment.id}/logs`, {
-    headers: requestHeaders(OWNER_A),
+    headers: requestHeaders(OWNER_A, { "Idempotency-Key": "deployment-request-invalid" }),
   })
   expect(await logs.json()).toMatchObject({ items: [{ sequence: 1, event: "deployment.queued" }] })
 
@@ -443,10 +471,14 @@ const requestHeaders = (
 
 class MemoryDeploymentApi implements DeploymentApi {
   readonly records = new Map<string, Deployment>()
+  readonly idempotency = new Map<string, Deployment>()
   lastCreate: Parameters<DeploymentApi["create"]>[0] | null = null
 
-  async create(input: Parameters<DeploymentApi["create"]>[0]): Promise<Deployment> {
+  async create(input: Parameters<DeploymentApi["create"]>[0]): ReturnType<DeploymentApi["create"]> {
     this.lastCreate = input
+    const identity = `${input.ownerId}\0${input.idempotencyKey}`
+    const existing = this.idempotency.get(identity)
+    if (existing !== undefined) return { deployment: existing, replayed: true }
     const timestamp = "2026-07-13T00:00:00.000Z"
     const targetConfig: { readonly index?: unknown } = input.targetConfig ?? {}
     const deployment: Deployment = {
@@ -466,7 +498,8 @@ class MemoryDeploymentApi implements DeploymentApi {
       updatedAt: timestamp,
     }
     this.records.set(deployment.id, deployment)
-    return deployment
+    this.idempotency.set(identity, deployment)
+    return { deployment, replayed: false }
   }
 
   async list(

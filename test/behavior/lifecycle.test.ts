@@ -52,7 +52,10 @@ describe("complete run lifecycle", () => {
 
     const deployResponse = await harness.request("/deployments", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `lifecycle-deployment-${terminal.id}`,
+      },
       body: JSON.stringify({
         runId: terminal.id,
         artifactPath: "dist",

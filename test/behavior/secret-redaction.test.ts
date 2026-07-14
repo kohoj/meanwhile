@@ -14,6 +14,12 @@ import {
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+const resolutionScope = (ownerId: string, purpose: "agent" | "repository" | "deployment") => ({
+  ownerId,
+  purpose,
+  resourceType: purpose === "deployment" ? ("deployment" as const) : ("run" as const),
+  resourceId: "resource-a",
+})
 
 describe("secret boundary", () => {
   test("resolves only env references and constructs redaction before output", () => {
@@ -29,7 +35,7 @@ describe("secret boundary", () => {
 
     const resolved = resolver.resolve(
       { OPENAI_API_KEY: "env://OPENAI_API_KEY" },
-      { ownerId: "owner-a", purpose: "agent" },
+      resolutionScope("owner-a", "agent"),
     )
 
     expect(resolved.environment).toEqual({ OPENAI_API_KEY: "token-value-123" })
@@ -37,7 +43,8 @@ describe("secret boundary", () => {
       resolved.redactor.redactString("agent said token-value-123 twice: token-value-123"),
     ).toBe(`agent said ${REDACTED_VALUE} twice: ${REDACTED_VALUE}`)
 
-    resolved.dispose()
+    resolved.release()
+    resolved.release()
     expect(Object.keys(resolved.environment)).toEqual([])
     expect(() => resolved.redactor.redactString("anything")).toThrow("disposed")
   })
@@ -50,7 +57,7 @@ describe("secret boundary", () => {
     })
 
     expect(() =>
-      resolver.resolve({ TOKEN: "literal-secret" }, { ownerId: "owner-a", purpose: "agent" }),
+      resolver.resolve({ TOKEN: "literal-secret" }, resolutionScope("owner-a", "agent")),
     ).toThrow(
       new SecretResolutionError(
         "INVALID_SECRET_REFERENCE",
@@ -58,8 +65,14 @@ describe("secret boundary", () => {
       ),
     )
     expect(() =>
-      resolver.resolve({ ABSENT: "env://ABSENT" }, { ownerId: "owner-a", purpose: "agent" }),
+      resolver.resolve({ ABSENT: "env://ABSENT" }, resolutionScope("owner-a", "agent")),
     ).toThrow("env://ABSENT is not configured")
+    expect(() =>
+      resolver.resolve(
+        { ABSENT: "env://ABSENT" },
+        { ...resolutionScope("owner-a", "agent"), resourceId: "" },
+      ),
+    ).toThrow("durable resource identity")
   })
 
   test("is deny-all by default and never catalogs reserved control-plane sources", () => {
@@ -99,13 +112,13 @@ describe("secret boundary", () => {
     expect(() =>
       resolver.resolve(
         { FLY_API_TOKEN: "env://FLY_API_TOKEN" },
-        { ownerId: "owner-b", purpose: "deployment" },
+        resolutionScope("owner-b", "deployment"),
       ),
     ).toThrow("authenticated owner")
     expect(() =>
       resolver.resolve(
         { OPENAI_API_KEY: "env://FLY_API_TOKEN" },
-        { ownerId: "owner-a", purpose: "agent" },
+        resolutionScope("owner-a", "agent"),
       ),
     ).toThrow("must reference env://OPENAI_API_KEY")
     expect(reads).toBe(0)

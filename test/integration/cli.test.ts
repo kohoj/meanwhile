@@ -5,7 +5,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { issueApiKey } from "../../src/auth"
 import { type CliOptions, runCli } from "../../src/cli"
-import { API_RUN_ID, API_SESSION_ID, apiRun, apiRunLog, apiSession, apiTurn } from "../fixtures/api"
+import {
+  API_RUN_ID,
+  API_SESSION_ID,
+  apiDeployment,
+  apiRun,
+  apiRunLog,
+  apiSession,
+  apiTurn,
+} from "../fixtures/api"
 
 const temporaryDirectories: string[] = []
 
@@ -176,6 +184,70 @@ describe("Meanwhile CLI", () => {
           },
         },
       ])
+    } finally {
+      await server.stop(true)
+    }
+  })
+
+  test("requires and forwards deployment admission identity", async () => {
+    const requests: Array<{ body: unknown; idempotency: string | null }> = []
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests.push({
+          body: await request.json(),
+          idempotency: request.headers.get("Idempotency-Key"),
+        })
+        return Response.json({ deployment: apiDeployment() }, { status: 202 })
+      },
+    })
+    const key = await issueApiKey()
+    const environment = { MEANWHILE_URL: server.url.origin, MEANWHILE_API_KEY: key.key }
+    try {
+      const invocation = capture()
+      expect(
+        await runCli(
+          [
+            "deploy",
+            API_RUN_ID,
+            "--artifact",
+            "dist",
+            "--target",
+            "local-static",
+            "--config",
+            'index="index.html"',
+            "--idempotency-key",
+            "deployment-once",
+          ],
+          invocation.options(environment),
+        ),
+      ).toBe(0)
+      expect(JSON.parse(invocation.stdout)).toEqual({ deployment: apiDeployment() })
+      expect(requests).toEqual([
+        {
+          idempotency: "deployment-once",
+          body: {
+            runId: API_RUN_ID,
+            artifactPath: "dist",
+            deployTarget: "local-static",
+            config: { index: "index.html" },
+            secretRefs: {},
+          },
+        },
+      ])
+
+      const missing = capture()
+      expect(
+        await runCli(
+          ["deploy", API_RUN_ID, "--artifact", "dist", "--target", "local-static"],
+          missing.options(environment),
+        ),
+      ).toBe(2)
+      expect(JSON.parse(missing.stderr)).toMatchObject({
+        error: { code: "INVALID_ARGUMENT", message: expect.stringContaining("idempotency-key") },
+      })
+      expect(requests).toHaveLength(1)
     } finally {
       await server.stop(true)
     }

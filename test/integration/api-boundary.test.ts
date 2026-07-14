@@ -130,6 +130,11 @@ test("the OpenAPI document represents durable run intent, nullable errors, deplo
     additionalProperties: false,
   })
 
+  const deploymentParameters = specification.paths["/deployments"]?.post?.parameters ?? []
+  expect(deploymentParameters).toContainEqual(
+    expect.objectContaining({ name: "idempotency-key", in: "header", required: true }),
+  )
+
   const logParameters = specification.paths["/runs/{id}/logs"]?.get?.parameters ?? []
   expect(logParameters).toContainEqual(
     expect.objectContaining({ name: "Last-Event-ID", in: "header", required: false }),

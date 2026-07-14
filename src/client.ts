@@ -98,6 +98,10 @@ export interface CreateRunOptions extends RequestOptions {
   readonly idempotencyKey?: string
 }
 
+export interface CreateDeploymentOptions extends RequestOptions {
+  readonly idempotencyKey: string
+}
+
 export interface ListCreatedOptions extends RequestOptions {
   readonly limit?: number
   readonly before?: string
@@ -177,7 +181,7 @@ export interface ArtifactsClient {
 }
 
 export interface DeploymentsClient {
-  create(input: CreateDeploymentRequest, options?: RequestOptions): Promise<Deployment>
+  create(input: CreateDeploymentRequest, options: CreateDeploymentOptions): Promise<Deployment>
   list(options?: ListCreatedOptions): Promise<DeploymentPage>
   get(id: string, options?: RequestOptions): Promise<Deployment>
   logs(id: string, options?: ListLogsOptions): Promise<DeploymentLogPage>
@@ -652,12 +656,27 @@ class Artifacts implements ArtifactsClient {
 class Deployments implements DeploymentsClient {
   constructor(private readonly transport: Transport) {}
 
-  async create(input: CreateDeploymentRequest, options: RequestOptions = {}): Promise<Deployment> {
+  async create(
+    input: CreateDeploymentRequest,
+    options?: CreateDeploymentOptions,
+  ): Promise<Deployment> {
     const body = parseInput(CreateDeploymentRequestSchema, input)
+    const idempotencyKey = options?.idempotencyKey
+    if (
+      typeof idempotencyKey !== "string" ||
+      idempotencyKey.length < 1 ||
+      idempotencyKey.length > 255
+    ) {
+      throw invalidArgument("Idempotency key must contain between 1 and 255 characters", {
+        field: "idempotencyKey",
+      })
+    }
+    const headers = new Headers({ "Idempotency-Key": idempotencyKey })
     const result = await this.transport.json("deployments", DeploymentResponseSchema, {
       method: "POST",
       body,
-      ...signalInput(options.signal),
+      headers,
+      ...signalInput(options?.signal),
     })
     return result.deployment
   }

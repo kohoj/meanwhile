@@ -81,6 +81,8 @@ interface LiveProcess {
   completion: Promise<ProcessExit>
   cancelHardTimeout: (() => void) | null
   requestedSignal: ProcessSignal | null
+  groupKillAttempted: boolean
+  groupKillError: unknown | null
   timedOut: boolean
 }
 
@@ -385,6 +387,8 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         }),
         cancelHardTimeout: null,
         requestedSignal: null,
+        groupKillAttempted: false,
+        groupKillError: null,
         timedOut: false,
       }
       this.#liveProcesses.set(this.#processKey(identity), live)
@@ -394,7 +398,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         live.cancelHardTimeout = scheduleLongTimeout(hardTimeoutMs, () => {
           live.timedOut = true
           live.requestedSignal = "SIGKILL"
-          live.killGroup("SIGKILL")
+          this.#killLiveProcessGroupOnce(live)
         })
       }
 
@@ -408,14 +412,22 @@ export class LocalRuntimeProvider implements RuntimeProvider {
           stdin.end()
         } catch (cause) {
           live.requestedSignal = "SIGKILL"
-          live.killGroup("SIGKILL")
-          await live.completion
+          this.#killLiveProcessGroupOnce(live)
+          const terminationError = await live.completion.then(
+            () => null,
+            (error: unknown) => error,
+          )
           await rm(directory, { recursive: true, force: true })
           throw this.#error(
             "spawn",
             "PROCESS_STDIN_FAILED",
             "Initial process input could not be written",
-            cause,
+            terminationError === null
+              ? cause
+              : new AggregateError(
+                  [cause, terminationError],
+                  "Initial process input and process-group termination failed",
+                ),
           )
         }
       }
@@ -534,7 +546,16 @@ export class LocalRuntimeProvider implements RuntimeProvider {
       if (live !== undefined) {
         live.requestedSignal = signal
         if (signal === "SIGKILL") {
-          live.killGroup(signal)
+          this.#killLiveProcessGroupOnce(live)
+          if (live.groupKillError !== null) {
+            throw this.#error(
+              "signal",
+              "PROCESS_SIGNAL_FAILED",
+              "Local process group could not be signalled",
+              live.groupKillError,
+              true,
+            )
+          }
         } else {
           live.killLeader(signal)
         }
@@ -547,6 +568,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         globalThis.process.kill(metadata.pid, signal)
       }
     } catch (cause) {
+      if (cause instanceof RuntimeProviderError) throw cause
       if (isErrno(cause, "ESRCH")) return
       throw this.#error(
         "signal",
@@ -1001,7 +1023,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     live.cancelHardTimeout = null
     // The provider process is a session leader. Once it exits, no descendant
     // may outlive the provider-owned process lifecycle.
-    live.killGroup("SIGKILL")
+    this.#killLiveProcessGroupOnce(live)
     const signal = normalizeProcessSignal(live.getSignalCode()) ?? live.requestedSignal
     const exit: ProcessExit = {
       exitCode: signal === null ? exitCode : null,
@@ -1011,7 +1033,36 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     }
     await this.#writeExitOnce(identity, exit)
     this.#liveProcesses.delete(this.#processKey(identity))
+    if (live.groupKillError !== null) {
+      throw this.#error(
+        "wait",
+        "PROCESS_SIGNAL_FAILED",
+        "Local process group could not be terminated",
+        live.groupKillError,
+        true,
+      )
+    }
     return exit
+  }
+
+  #killLiveProcessGroupOnce(live: LiveProcess): void {
+    if (live.groupKillAttempted) return
+    live.groupKillAttempted = true
+    try {
+      live.killGroup("SIGKILL")
+    } catch (cause) {
+      live.groupKillError = cause
+      try {
+        live.killLeader("SIGKILL")
+      } catch (leaderCause) {
+        if (!isErrno(leaderCause, "ESRCH")) {
+          live.groupKillError = new AggregateError(
+            [cause, leaderCause],
+            "Process group and leader termination both failed",
+          )
+        }
+      }
+    }
   }
 
   async #writeExitOnce(identity: ProcessIdentity, exit: ProcessExit): Promise<void> {

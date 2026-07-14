@@ -130,11 +130,14 @@ const bytes = new Uint8Array(await new Response(download.body).arrayBuffer())
 const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
 if (digest !== download.digest) throw new Error("artifact digest mismatch")
 
-const deployment = await meanwhile.deployments.create({
-  runId: finished.id,
-  artifactPath: "dist",
-  deployTarget: "local-static",
-})
+const deployment = await meanwhile.deployments.create(
+  {
+    runId: finished.id,
+    artifactPath: "dist",
+    deployTarget: "local-static",
+  },
+  { idempotencyKey: `deploy-dist-${finished.id}` },
+)
 
 console.log((await meanwhile.deployments.wait(deployment.id)).url)
 ```
@@ -371,10 +374,13 @@ To add Daytona, Fly Machines, Modal, or another backend, implement `RuntimeProvi
 
 `POST /deployments` resolves exactly one `artifactPath` or logical `workspacePath` to immutable stored bytes before invoking a target adapter. It never reads an arbitrary host path or a runtime that may already have been destroyed.
 
+Deployment creation requires an owner-scoped `Idempotency-Key`. The canonical request binds the normalized source selector, target, caller configuration, and secret references. First admission resolves that selector to immutable bytes and atomically commits the binding, deployment record, and create audit. Exact retries return the original record before consulting mutable adapters; conflicting reuse returns `409`.
+
 ```console
 curl --fail-with-body \
   -X POST http://127.0.0.1:7331/deployments \
   -H "Authorization: Bearer $MEANWHILE_API_KEY" \
+  -H 'Idempotency-Key: deploy-dist-1' \
   -H 'Content-Type: application/json' \
   --data '{
     "runId": "<run-id>",
@@ -420,7 +426,7 @@ queued → provisioning → running → succeeded
 | --- | --- |
 | Tenant isolation | Bearer keys derive identity; all public reads and mutations include `ownerId`; cross-owner access returns `NOT_FOUND` |
 | Secrets | Public input stores references only; values resolve immediately before use, are redacted before output consumption, and never enter SQLite or artifacts |
-| Idempotency | `(ownerId, Idempotency-Key)` and a canonical request hash commit with the run; conflicting reuse returns `409` |
+| Idempotency | Run, session, turn, and deployment admission independently bind `(ownerId, Idempotency-Key)` to a canonical request hash; conflicting reuse returns `409` |
 | Timeout | Provisioning starts a persisted absolute deadline; the runner receives only a remaining monotonic duration, and post-terminal artifact reads remain bounded by the same deadline |
 | Cancellation | One atomic outcome claim commits request audit, immutable `cancelled`, terminal evidence, and cleanup eligibility before signalling |
 | Restart recovery | Durable create intents reacquire the same provider runtime by id; persisted handles/cursors then reconnect and deduplicate replay where capabilities permit |
@@ -429,6 +435,8 @@ queued → provisioning → running → succeeded
 | Timezones | Durable timestamps are UTC instants accepted by the control plane; agent processes receive `TZ=UTC`; local rendering belongs to clients |
 
 Session and turn creation use the same owner-scoped idempotency rule independently. Session events bind runner evidence, control-plane transitions, and turn identity to one contiguous durable sequence. A session runtime is never cleanup-eligible while its session is operational; a timed-out or interrupted turn does not destroy continuity.
+
+Run, session, and deployment executors depend on one `SecretResolver` contract that binds resolution to a stable durable resource identity and returns local sensitive material plus its matching redactor. Awaited release zeroizes only those control-plane copies; it never revokes or rotates a credential already injected into compute that may survive a control-plane restart. Recovery reacquisition must still redact every value previously injected into a still-existing resource, and live artifact scanning reuses the exact values injected into that run rather than resolving a potentially different credential. The built-in process-environment resolver remains a bootstrap-only static credential source. Short-lived issuance, renewal, and revocation require a separate resource-lifecycle credential broker; this implementation does not claim that boundary.
 
 Redaction prevents accidental known-value leakage. It cannot stop an agent from transforming or exfiltrating a credential it was intentionally given. Use short-lived, least-privilege, per-run credentials.
 
@@ -484,6 +492,8 @@ bun run proof:release:cloudflare:pi     # real Pi, same complete evidence
 The release proof sends a revision-bound token through ACP, structurally verifies the durable response, downloads immutable agent output through the public SDK, deploys those bytes through the SDK, and fetches the returned URL. It also validates OTLP trace and metric semantics, correlated structured logs, byte-scans the live data root and backup for exact private values, verifies exact status and replay evidence, destroys the runtime, restarts, restores into an empty data root, and boots again successfully.
 
 `proof:release:cloudflare` isolates provider/control-plane compatibility with the deterministic ACP fixture. The agent-specific commands are acceptance proofs for real work: each agent receives the task inside Cloudflare Sandbox, creates `site/index.html`, preserves one ACP identity across two turns and a control-plane restart, and exposes the captured output only through immutable storage and the public SDK. A health response, skipped account test, lifecycle-only check, or deterministic response is never described as real-model proof.
+
+Cloudflare proof admission does not treat `wrangler deploy` completion or another HTTP client as bridge readiness. It waits within a fixed budget for the authenticated production Bun `RuntimeProvider.health()` path, then starts lifecycle work. Health proves protocol availability, not hidden compute creation; the first Sandbox start remains an idempotent, deadline-bounded provider mutation and absorbs Cloudflare-classified transient container rollout errors through bounded backoff.
 
 The deterministic suite separately covers owner isolation, lifecycle transitions, run/session replay, cross-turn ACP continuity, conflict policy, interrupt, timeout, artifacts, cancellation, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence.
 

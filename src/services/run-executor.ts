@@ -31,7 +31,7 @@ import {
   restoreProcessHandle,
   restoreRuntimeHandle,
 } from "../providers/runtime-provider"
-import type { EnvironmentSecretResolver, SecretPurpose, SecretRedactor } from "../secrets"
+import type { ResolvedSecretMaterial, SecretPurpose, SecretResolver } from "../secrets"
 import type { OperationSpan, StructuredLogger, Telemetry, TelemetryScope } from "../telemetry"
 import {
   ArtifactCollectionError,
@@ -55,7 +55,7 @@ export interface RunExecutorOptions {
   readonly workspace: WorkspacePreparer
   readonly artifactStore: ArtifactStore
   readonly artifactLimits: ArtifactCollectionLimits
-  readonly secrets: EnvironmentSecretResolver
+  readonly secrets: SecretResolver
   readonly logger: StructuredLogger
   readonly telemetry?: Telemetry
   readonly concurrency?: number
@@ -73,7 +73,7 @@ export class RunExecutor implements ManagedComponent {
   readonly #workspace: WorkspacePreparer
   readonly #artifactStore: ArtifactStore
   readonly #artifactLimits: ArtifactCollectionLimits
-  readonly #secrets: EnvironmentSecretResolver
+  readonly #secrets: SecretResolver
   readonly #logger: StructuredLogger
   readonly #telemetry: Telemetry | undefined
   readonly #concurrency: number
@@ -485,7 +485,10 @@ export class RunExecutor implements ManagedComponent {
         createdAt: this.#now(),
       })
       if (launch === null) return
-      const secrets = this.#secrets.resolve(run.secretRefs, secretScope(run.ownerId, "agent"))
+      const secrets = await this.#secrets.resolve(
+        run.secretRefs,
+        secretScope(run.ownerId, "agent", run.id),
+      )
       try {
         const timeoutBudgetMs = launch.timeoutBudgetMs
         const spec: RunnerSpec = {
@@ -553,25 +556,20 @@ export class RunExecutor implements ManagedComponent {
           createdAt: at,
         })
         this.#assertRunning()
-        await this.#consume(run, provider, runtime, process, session, secrets.redactor, scope)
+        await this.#consume(run, provider, runtime, process, session, secrets, scope)
       } finally {
-        secrets.dispose()
+        await secrets.release()
       }
       return
     }
 
-    const recoverySecrets = this.#secrets.resolve(run.secretRefs, secretScope(run.ownerId, "agent"))
+    const recoverySecrets = await this.#secrets.resolve(
+      run.secretRefs,
+      secretScope(run.ownerId, "agent", run.id),
+    )
     try {
       try {
-        await this.#consume(
-          run,
-          provider,
-          runtime,
-          process,
-          session,
-          recoverySecrets.redactor,
-          scope,
-        )
+        await this.#consume(run, provider, runtime, process, session, recoverySecrets, scope)
       } catch (error) {
         if (reconnecting && isMissingProcess(error)) {
           throw runtimeLost(provider.name, "process")
@@ -579,7 +577,7 @@ export class RunExecutor implements ManagedComponent {
         throw error
       }
     } finally {
-      recoverySecrets.dispose()
+      await recoverySecrets.release()
     }
   }
 
@@ -693,11 +691,11 @@ export class RunExecutor implements ManagedComponent {
     runtime: RuntimeHandle,
   ): Promise<void> {
     let repositoryCredential: string | undefined
-    let repositorySecrets: ReturnType<EnvironmentSecretResolver["resolve"]> | null = null
+    let repositorySecrets: ResolvedSecretMaterial | null = null
     if (run.workspace.type === "repository" && run.workspace.credentialRef !== undefined) {
-      repositorySecrets = this.#secrets.resolve(
+      repositorySecrets = await this.#secrets.resolve(
         { MEANWHILE_REPOSITORY_CREDENTIAL: run.workspace.credentialRef },
-        secretScope(run.ownerId, "repository"),
+        secretScope(run.ownerId, "repository", run.id),
       )
       repositoryCredential = repositorySecrets.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
     }
@@ -737,7 +735,7 @@ export class RunExecutor implements ManagedComponent {
       }
       this.#appendSystem(run, "workspace.ready", "Workspace prepared", this.#now())
     } finally {
-      repositorySecrets?.dispose()
+      await repositorySecrets?.release()
     }
   }
 
@@ -747,9 +745,10 @@ export class RunExecutor implements ManagedComponent {
     runtime: RuntimeHandle,
     process: ProcessHandle,
     session: NonNullable<ReturnType<Store["getRunnerSession"]>>,
-    redactor: SecretRedactor,
+    secrets: Pick<ResolvedSecretMaterial, "environment" | "redactor">,
     scope?: TelemetryScope,
   ): Promise<void> {
+    const { redactor } = secrets
     let acceptedSequence = session.runnerSequence
     let acceptedTerminal: RunnerTerminalPayload | undefined
     if (session.terminalResult !== null) {
@@ -887,7 +886,7 @@ export class RunExecutor implements ManagedComponent {
     let current = this.#store.getRunInternal(initialRun.id)
     this.#assertTerminalCanFinalize(current, acceptedTerminal)
     if (current === null || isTerminalRunStatus(current.status)) return
-    await this.#collectArtifacts(current, provider, runtime, scope)
+    await this.#collectArtifacts(current, provider, runtime, scope, undefined, secrets.environment)
     if (!this.#running) return
     current = this.#store.getRunInternal(initialRun.id)
     if (current === null || isTerminalRunStatus(current.status)) return
@@ -947,6 +946,7 @@ export class RunExecutor implements ManagedComponent {
     runtime: RuntimeHandle,
     scope?: TelemetryScope,
     signal?: AbortSignal,
+    knownSecretValues?: Readonly<Record<string, string>>,
   ): Promise<void> {
     if (run.artifactPaths.length === 0) return
     const captureSignal = signal ?? this.#artifactCaptureSignal(run)
@@ -955,7 +955,13 @@ export class RunExecutor implements ManagedComponent {
       "meanwhile.artifact.collect",
       { "run.id": run.id, "provider.name": provider.name },
       async (span) => {
-        const failure = await this.#collectArtifactsInternal(run, provider, runtime, captureSignal)
+        const failure = await this.#collectArtifactsInternal(
+          run,
+          provider,
+          runtime,
+          captureSignal,
+          knownSecretValues,
+        )
         if (failure === null) span?.setOutcome("succeeded")
         else span?.setOutcome("failed", stableTelemetryCode(failure))
       },
@@ -967,15 +973,23 @@ export class RunExecutor implements ManagedComponent {
     provider: RuntimeProvider,
     runtime: RuntimeHandle,
     signal: AbortSignal,
+    knownSecretValues?: Readonly<Record<string, string>>,
   ): Promise<string | null> {
     const values: Record<string, string> = {}
-    // SecretRedactor intentionally does not expose values; resolve again only
-    // inside this operation to construct the exact-byte artifact scanner.
-    let secrets: ReturnType<EnvironmentSecretResolver["resolve"]> | null = null
+    // Recovery may need to reacquire the durable run's credential boundary;
+    // live execution passes the exact injected values instead.
+    let secrets: ResolvedSecretMaterial | null = null
     try {
       signal.throwIfAborted()
-      secrets = this.#secrets.resolve(run.secretRefs, secretScope(run.ownerId, "agent"))
-      Object.assign(values, secrets.environment)
+      if (knownSecretValues === undefined) {
+        secrets = await this.#secrets.resolve(
+          run.secretRefs,
+          secretScope(run.ownerId, "agent", run.id),
+        )
+        Object.assign(values, secrets.environment)
+      } else {
+        Object.assign(values, knownSecretValues)
+      }
       const collector = new ArtifactCollector({
         store: this.#artifactStore,
         limits: this.#artifactLimits,
@@ -1027,7 +1041,7 @@ export class RunExecutor implements ManagedComponent {
       this.#recordArtifactCaptureFailed(run, code)
       return code
     } finally {
-      secrets?.dispose()
+      await secrets?.release()
       for (const key of Object.keys(values)) values[key] = ""
     }
     return null
@@ -1500,7 +1514,12 @@ const runtimeLost = (provider: string, resource: string): AppError =>
     details: { provider, resource },
   })
 
-const secretScope = (ownerId: string, purpose: SecretPurpose) => ({ ownerId, purpose })
+const secretScope = (ownerId: string, purpose: SecretPurpose, resourceId: string) => ({
+  ownerId,
+  purpose,
+  resourceType: "run" as const,
+  resourceId,
+})
 
 const jsonObject = (value: object): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject
 

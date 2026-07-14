@@ -12,6 +12,7 @@ import {
   type WorkspaceSource,
 } from "../domain"
 import { AppError } from "../errors"
+import { hashCanonical } from "../idempotency"
 import type { CreateRunInput, Page, Store } from "../persistence/store"
 import type { SecretReferenceValidator } from "../secrets"
 
@@ -419,23 +420,6 @@ export class RunService {
     }
     return run
   }
-}
-
-export const hashCanonical = (value: unknown): string =>
-  new Bun.CryptoHasher("sha256").update(canonicalJson(value)).digest("hex")
-
-export const canonicalJson = (value: unknown): string => {
-  if (value === null || typeof value !== "object") {
-    const serialized = JSON.stringify(value)
-    if (serialized === undefined) throw new TypeError("Run idempotency input must be JSON")
-    return serialized
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
-  const record = value as Record<string, unknown>
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-    .join(",")}}`
 }
 
 const abortableDelay = (milliseconds: number, signal: AbortSignal): Promise<void> => {

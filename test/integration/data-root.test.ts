@@ -143,6 +143,7 @@ describe("data-root lifecycle", () => {
         metadata: {},
         createdAt: "2026-07-13T00:00:02.000Z",
       },
+      { key: "data-root-deployment", requestHash: "data-root-deployment-hash" },
     )
     store.close()
     await mkdir(join(source.deploymentDir, deploymentId, "public"), { recursive: true })

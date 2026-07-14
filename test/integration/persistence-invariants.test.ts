@@ -28,7 +28,7 @@ describe("SQLite ownership invariants", () => {
       createAgentSessionRecord(store, OWNER_A, "session-owner-a")
       const mismatches = [
         `INSERT INTO run_status_events VALUES ('event-x','owner-b','run-a',NULL,'queued',99,'x','${AT}')`,
-        `INSERT INTO idempotency_keys VALUES ('owner-b','key-x','hash-x','run-a','${AT}')`,
+        `INSERT INTO run_idempotency_keys VALUES ('owner-b','key-x','hash-x','run-a','${AT}')`,
         `INSERT INTO runtime_instances(id,owner_id,run_id,provider,handle_json,cleanup_status,created_at,updated_at)
           VALUES ('runtime-x','owner-b','run-a','local','{}','pending','${AT}','${AT}')`,
         `INSERT INTO runtime_provisioning_intents(runtime_id,owner_id,run_id,provider,status,next_attempt_at,created_at,updated_at)
@@ -47,6 +47,7 @@ describe("SQLite ownership invariants", () => {
           VALUES ('deployment-x','owner-b','run-a','artifact-a','local-static','{}','{}','queued','${AT}','${AT}')`,
         `INSERT INTO deployments(id,owner_id,run_id,artifact_id,target,target_config_json,secret_refs_json,status,created_at,updated_at)
           VALUES ('deployment-y','owner-a','run-a','artifact-b','local-static','{}','{}','queued','${AT}','${AT}')`,
+        `INSERT INTO deployment_idempotency_keys VALUES ('owner-b','key-x','hash-x','deployment-a','${AT}')`,
         `INSERT INTO deployment_logs(owner_id,deployment_id,sequence,stream,data,created_at)
           VALUES ('owner-b','deployment-a',1,'system','x','${AT}')`,
         `INSERT INTO audit_records(id,owner_id,actor_api_key_id,action,resource_type,resource_id,request_id,metadata_json,created_at)
@@ -72,6 +73,42 @@ describe("SQLite ownership invariants", () => {
       expect(
         store.listAudit(OWNER_A, "run-a").some((record) => record.id === "audit-system"),
       ).toBeTrue()
+    } finally {
+      store.close()
+    }
+  })
+
+  test("deployment admission is owner-scoped and atomic with its audit", () => {
+    const store = seededStore()
+    try {
+      const retry = store.createDeployment(
+        deploymentRecord("deployment-retry", OWNER_A, "run-a", "artifact-a"),
+        audit(OWNER_A, "deployment.create", "deployment-retry"),
+        { key: "deployment-a", requestHash: "deployment-a-hash" },
+      )
+      expect(retry).toMatchObject({ replayed: true, deployment: { id: "deployment-a" } })
+      expect(store.listDeployments(OWNER_A, { limit: 10 }).items).toHaveLength(1)
+      expect(
+        store
+          .listAudit(OWNER_A, "deployment-a")
+          .filter(({ action }) => action === "deployment.create"),
+      ).toHaveLength(1)
+
+      expect(() =>
+        store.createDeployment(
+          deploymentRecord("deployment-conflict", OWNER_A, "run-a", "artifact-a"),
+          audit(OWNER_A, "deployment.create", "deployment-conflict"),
+          { key: "deployment-a", requestHash: "different-hash" },
+        ),
+      ).toThrow(AppError)
+      expect(store.listDeployments(OWNER_A, { limit: 10 }).items).toHaveLength(1)
+
+      const otherOwner = store.createDeployment(
+        deploymentRecord("deployment-b", OWNER_B, "run-b", "artifact-b"),
+        audit(OWNER_B, "deployment.create", "deployment-b"),
+        { key: "deployment-a", requestHash: "owner-b-hash" },
+      )
+      expect(otherOwner).toMatchObject({ replayed: false, deployment: { id: "deployment-b" } })
     } finally {
       store.close()
     }
@@ -726,8 +763,28 @@ function seededStore(): Store {
       updatedAt: AT,
     },
     audit(OWNER_A, "deployment.create", "deployment-a"),
+    { key: "deployment-a", requestHash: "deployment-a-hash" },
   )
   return store
+}
+
+function deploymentRecord(id: string, ownerId: string, runId: string, artifactId: string) {
+  return {
+    id,
+    ownerId,
+    runId,
+    artifactId,
+    target: "local-static",
+    targetConfig: {},
+    secretRefs: {},
+    status: "queued" as const,
+    url: null,
+    error: null,
+    createdAt: AT,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: AT,
+  }
 }
 
 function createRun(store: Store, ownerId: string, id: string): void {

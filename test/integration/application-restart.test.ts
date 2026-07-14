@@ -50,11 +50,14 @@ describe("application restart", () => {
       expect(run.status).toBe("succeeded")
       const deployment = await application.client.deployments.wait(
         (
-          await application.client.deployments.create({
-            runId: run.id,
-            artifactPath: "site",
-            deployTarget: "local-static",
-          })
+          await application.client.deployments.create(
+            {
+              runId: run.id,
+              artifactPath: "site",
+              deployTarget: "local-static",
+            },
+            { idempotencyKey: "application-restart-deployment" },
+          )
         ).id,
         { timeoutMs: 20_000, pollIntervalMs: 25 },
       )

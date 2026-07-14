@@ -93,11 +93,14 @@ try {
     )
   }
 
-  const queuedDeployment = await meanwhile.deployments.create({
-    runId: run.id,
-    artifactPath: "site",
-    deployTarget: "local-static",
-  })
+  const queuedDeployment = await meanwhile.deployments.create(
+    {
+      runId: run.id,
+      artifactPath: "site",
+      deployTarget: "local-static",
+    },
+    { idempotencyKey: `demo-deployment-${run.id}` },
+  )
   const deployment = await meanwhile.deployments.wait(queuedDeployment.id, {
     timeoutMs,
     pollIntervalMs: 25,

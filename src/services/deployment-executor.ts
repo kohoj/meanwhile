@@ -23,13 +23,13 @@ import type {
   Run,
 } from "../domain"
 import { AppError } from "../errors"
+import { hashCanonical } from "../idempotency"
 import type { Store } from "../persistence/store"
 import {
-  type SecretAccessScope,
-  type SecretEnvironment,
+  type ResolvedSecretMaterial,
   type SecretRedactor,
-  type SecretReferenceValidator,
   SecretResolutionError,
+  type SecretResolver,
 } from "../secrets"
 import type { StructuredLogger, Telemetry } from "../telemetry"
 import { normalizeArtifactPath } from "./artifact-collector"
@@ -200,13 +200,6 @@ export class StoreDeploymentSourceResolver implements DeploymentSourceResolver {
   }
 }
 
-export interface DeploymentSecretResolver extends SecretReferenceValidator {
-  resolve(
-    references: Readonly<Record<string, string>>,
-    scope: SecretAccessScope,
-  ): SecretEnvironment | Promise<SecretEnvironment>
-}
-
 export interface DeploymentFailure {
   code: string
   message: string
@@ -236,10 +229,17 @@ export type DeploymentAuditRecord = AuditRecord & {
 }
 
 export interface DeploymentRepository {
+  findIdempotent(input: {
+    ownerId: string
+    idempotencyKey: string
+    requestHash: string
+  }): Promise<DeploymentRecord | null>
   createWithAudit(input: {
     deployment: DeploymentRecord
     audit: DeploymentAuditRecord
-  }): Promise<DeploymentRecord>
+    idempotencyKey: string
+    requestHash: string
+  }): Promise<CreateDeploymentResult>
   getForOwner(ownerId: string, deploymentId: string): Promise<DeploymentRecord | null>
   getForExecution(deploymentId: string): Promise<DeploymentRecord | null>
   listForOwner(input: {
@@ -281,11 +281,28 @@ export class StoreDeploymentRepository implements DeploymentRepository {
     this.#store = store
   }
 
+  async findIdempotent(input: {
+    ownerId: string
+    idempotencyKey: string
+    requestHash: string
+  }): Promise<DeploymentRecord | null> {
+    return this.#store.getIdempotentDeployment(
+      input.ownerId,
+      input.idempotencyKey,
+      input.requestHash,
+    )
+  }
+
   async createWithAudit(input: {
     deployment: DeploymentRecord
     audit: DeploymentAuditRecord
-  }): Promise<DeploymentRecord> {
-    return this.#store.createDeployment(input.deployment, input.audit)
+    idempotencyKey: string
+    requestHash: string
+  }): Promise<CreateDeploymentResult> {
+    return this.#store.createDeployment(input.deployment, input.audit, {
+      key: input.idempotencyKey,
+      requestHash: input.requestHash,
+    })
   }
 
   async getForOwner(ownerId: string, deploymentId: string): Promise<DeploymentRecord | null> {
@@ -387,6 +404,7 @@ interface DeploymentExecutionOptions {
 
 export interface CreateDeploymentInput extends DeploymentMutationContext {
   ownerId: string
+  idempotencyKey: string
   runId: string
   source: DeploymentSourceSelector
   targetName: string
@@ -394,11 +412,16 @@ export interface CreateDeploymentInput extends DeploymentMutationContext {
   secretRefs?: Readonly<Record<string, string>>
 }
 
+export interface CreateDeploymentResult {
+  readonly deployment: DeploymentRecord
+  readonly replayed: boolean
+}
+
 export interface DeploymentExecutorOptions {
   repository: DeploymentRepository
   runs: DeploymentRunCatalog
   sourceResolver: DeploymentSourceResolver
-  secretResolver: DeploymentSecretResolver
+  secretResolver: SecretResolver
   adapters: DeployAdapterRegistry
   now?: () => Date
   id?: () => string
@@ -430,7 +453,7 @@ export class DeploymentExecutor {
   readonly #repository: DeploymentRepository
   readonly #runs: DeploymentRunCatalog
   readonly #sourceResolver: DeploymentSourceResolver
-  readonly #secretResolver: DeploymentSecretResolver
+  readonly #secretResolver: SecretResolver
   readonly #adapters: DeployAdapterRegistry
   readonly #now: () => Date
   readonly #id: () => string
@@ -445,13 +468,34 @@ export class DeploymentExecutor {
     this.#id = options.id ?? (() => crypto.randomUUID())
   }
 
-  async create(input: CreateDeploymentInput): Promise<DeploymentRecord> {
+  async create(input: CreateDeploymentInput): Promise<CreateDeploymentResult> {
+    assertIdempotencyKey(input.idempotencyKey)
+    const sourceSelector = canonicalSourceSelector(input.source)
+    const requestedTargetConfig = input.targetConfig ?? {}
+    assertJsonObject(requestedTargetConfig)
+    const targetConfigInput = structuredClone(requestedTargetConfig) as JsonObject
+    const secretRefs = { ...(input.secretRefs ?? {}) }
+    assertSecretReferences(secretRefs)
+    const requestHash = hashCanonical({
+      version: 1,
+      runId: input.runId,
+      source: sourceSelector,
+      target: input.targetName,
+      targetConfig: targetConfigInput,
+      secretRefs,
+    })
+    const existing = await this.#repository.findIdempotent({
+      ownerId: input.ownerId,
+      idempotencyKey: input.idempotencyKey,
+      requestHash,
+    })
+    if (existing !== null) return { deployment: existing, replayed: true }
+
     if ((await this.#runs.getRun(input.ownerId, input.runId)) === null) throw notFound()
-    assertSourceSelector(input.source)
     const adapter = this.#adapters.get(input.targetName)
     let targetConfig: Readonly<Record<string, unknown>>
     try {
-      targetConfig = adapter.validate(input.targetConfig ?? {})
+      targetConfig = adapter.validate(targetConfigInput)
     } catch (error) {
       if (error instanceof DeployAdapterFailure) {
         throw new DeploymentExecutionError(
@@ -464,10 +508,9 @@ export class DeploymentExecutor {
       throw error
     }
     assertJsonObject(targetConfig)
-    assertSecretReferences(input.secretRefs ?? {})
-    assertAdapterSecretTargets(adapter.secretEnvNames, input.secretRefs ?? {})
+    assertAdapterSecretTargets(adapter.secretEnvNames, secretRefs)
     try {
-      this.#secretResolver.validate(input.secretRefs ?? {}, {
+      this.#secretResolver.validate(secretRefs, {
         ownerId: input.ownerId,
         purpose: "deployment",
       })
@@ -478,7 +521,7 @@ export class DeploymentExecutor {
     const source = await this.#sourceResolver.resolve({
       ownerId: input.ownerId,
       runId: input.runId,
-      selector: input.source,
+      selector: sourceSelector,
     })
     const timestamp = this.#now().toISOString()
     const id = this.#id()
@@ -489,7 +532,7 @@ export class DeploymentExecutor {
       artifactId: source.artifactId,
       target: input.targetName,
       targetConfig: structuredClone(targetConfig) as JsonObject,
-      secretRefs: { ...(input.secretRefs ?? {}) },
+      secretRefs,
       status: "queued",
       url: null,
       error: null,
@@ -500,6 +543,8 @@ export class DeploymentExecutor {
     }
     return this.#repository.createWithAudit({
       deployment,
+      idempotencyKey: input.idempotencyKey,
+      requestHash,
       audit: auditRecord("deployment.create", deployment, input, timestamp, {
         runId: input.runId,
         target: input.targetName,
@@ -611,7 +656,7 @@ export class DeploymentExecutor {
     options: DeploymentExecutionOptions,
   ): Promise<DeploymentRecord> {
     const deploymentId = running.id
-    let resolvedSecrets: SecretEnvironment | null = null
+    let resolvedSecrets: ResolvedSecretMaterial | null = null
     let guard = new DeploymentOutputGuard()
     const activeEmissions = new Set<Promise<void>>()
     let evidenceWriteFailed = false
@@ -627,6 +672,8 @@ export class DeploymentExecutor {
       resolvedSecrets = await this.#secretResolver.resolve(running.secretRefs, {
         ownerId: running.ownerId,
         purpose: "deployment",
+        resourceType: "deployment",
+        resourceId: running.id,
       })
       assertExecutionContinues(signal, options)
       guard = new DeploymentOutputGuard(resolvedSecrets.redactor)
@@ -730,7 +777,7 @@ export class DeploymentExecutor {
       }
       return failed
     } finally {
-      resolvedSecrets?.dispose()
+      await resolvedSecrets?.release()
     }
   }
 
@@ -1255,6 +1302,24 @@ function assertSourceSelector(source: DeploymentSourceSelector): void {
   const selected = hasArtifact ? value.artifactPath : value.workspacePath
   if (typeof selected !== "string" || selected.length === 0) {
     throw invalidInput("Deployment source path must not be empty.")
+  }
+}
+
+function canonicalSourceSelector(source: DeploymentSourceSelector): DeploymentSourceSelector {
+  assertSourceSelector(source)
+  const selected = "artifactPath" in source ? source.artifactPath : source.workspacePath
+  let logicalPath: string
+  try {
+    logicalPath = normalizeArtifactPath(selected, true)
+  } catch (error) {
+    throw invalidInput("Deployment source path is invalid.", error)
+  }
+  return "artifactPath" in source ? { artifactPath: logicalPath } : { workspacePath: logicalPath }
+}
+
+function assertIdempotencyKey(key: string): void {
+  if (key.length < 1 || key.length > 255) {
+    throw invalidInput("Deployment idempotency key must contain between 1 and 255 characters.")
   }
 }
 

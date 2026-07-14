@@ -1291,7 +1291,7 @@ export class Store {
         }
         const existing = this.database
           .query<{ request_hash: string; run_id: string }, [string, string]>(
-            "SELECT request_hash, run_id FROM idempotency_keys WHERE owner_id = ? AND key = ?",
+            "SELECT request_hash, run_id FROM run_idempotency_keys WHERE owner_id = ? AND key = ?",
           )
           .get(input.ownerId, input.idempotencyKey)
         if (existing !== null) {
@@ -1356,7 +1356,7 @@ export class Store {
       if (input.idempotencyKey !== undefined && input.requestHash !== undefined) {
         this.database
           .query(
-            "INSERT INTO idempotency_keys(owner_id, key, request_hash, run_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO run_idempotency_keys(owner_id, key, request_hash, run_id, created_at) VALUES (?, ?, ?, ?, ?)",
           )
           .run(input.ownerId, input.idempotencyKey, input.requestHash, input.id, input.createdAt)
       }
@@ -1382,7 +1382,7 @@ export class Store {
   getIdempotentRun(ownerId: string, key: string, requestHash: string): Run | null {
     const existing = this.database
       .query<{ request_hash: string; run_id: string }, [string, string]>(
-        "SELECT request_hash, run_id FROM idempotency_keys WHERE owner_id = ? AND key = ?",
+        "SELECT request_hash, run_id FROM run_idempotency_keys WHERE owner_id = ? AND key = ?",
       )
       .get(ownerId, key)
     if (existing === null) return null
@@ -3023,8 +3023,21 @@ export class Store {
       .map(artifactFromRow)
   }
 
-  createDeployment(deployment: Deployment, audit: AuditRecord): Deployment {
+  createDeployment(
+    deployment: Deployment,
+    audit: AuditRecord,
+    idempotency: { readonly key: string; readonly requestHash: string },
+  ): { readonly deployment: Deployment; readonly replayed: boolean } {
     const transaction = this.database.transaction(() => {
+      const existing = this.getIdempotentDeployment(
+        deployment.ownerId,
+        idempotency.key,
+        idempotency.requestHash,
+      )
+      if (existing !== null) {
+        return { deployment: existing, replayed: true }
+      }
+
       this.database
         .query(`
           INSERT INTO deployments(
@@ -3048,12 +3061,49 @@ export class Store {
           deployment.finishedAt,
           deployment.updatedAt,
         )
+      this.database
+        .query(`
+          INSERT INTO deployment_idempotency_keys(
+            owner_id, key, request_hash, deployment_id, created_at
+          ) VALUES (?, ?, ?, ?, ?)
+        `)
+        .run(
+          deployment.ownerId,
+          idempotency.key,
+          idempotency.requestHash,
+          deployment.id,
+          deployment.createdAt,
+        )
       this.insertAudit(audit)
+      const created = this.getDeployment(deployment.ownerId, deployment.id)
+      if (created === null) throw new Error("Created deployment is missing")
+      return { deployment: created, replayed: false }
     })
-    transaction()
-    const created = this.getDeployment(deployment.ownerId, deployment.id)
-    if (created === null) throw new Error("Created deployment is missing")
-    return created
+    return transaction()
+  }
+
+  getIdempotentDeployment(ownerId: string, key: string, requestHash: string): Deployment | null {
+    const existing = this.database
+      .query<{ request_hash: string; deployment_id: string }, [string, string]>(`
+        SELECT request_hash, deployment_id FROM deployment_idempotency_keys
+        WHERE owner_id = ? AND key = ?
+      `)
+      .get(ownerId, key)
+    if (existing === null) return null
+    if (existing.request_hash !== requestHash) {
+      throw new AppError({
+        code: "IDEMPOTENCY_CONFLICT",
+        message: "Idempotency key was already used with different input",
+      })
+    }
+    const deployment = this.getDeployment(ownerId, existing.deployment_id)
+    if (deployment === null) {
+      throw new AppError({
+        code: "INTERNAL",
+        message: "Deployment idempotency record is inconsistent",
+      })
+    }
+    return deployment
   }
 
   getDeployment(ownerId: string, deploymentId: string): Deployment | null {

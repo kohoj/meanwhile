@@ -48,7 +48,11 @@ const MAX_FILE_RESPONSE_BYTES = 64 * 1024 * 1024
 const MAX_FILE_ENCODED_BYTES = 8 * 1024 * 1024
 const MAX_WRITE_ENCODED_BYTES = 16 * 1024 * 1024
 const MAX_FILES_PER_WRITE = 32
-const DEFAULT_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1_000, 2_000])
+// Cloudflare may accept a Worker revision before the newly bound container
+// application can materialize its first Sandbox. Every retried bridge mutation
+// carries a stable operation/request identity, so bounded backoff is safe and
+// keeps this platform propagation detail inside the provider boundary.
+const DEFAULT_RETRY_DELAYS_MS = Object.freeze([100, 250, 500, 1_000, 2_000, 4_000, 8_000, 12_000])
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 

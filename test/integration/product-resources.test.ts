@@ -46,13 +46,40 @@ describe("complete public resource boundary", () => {
 
     const run = await createDemoRun(harness)
     await client.runs.wait(run.id, { timeoutMs: 10_000, pollIntervalMs: 10 })
-    const deployment = await client.deployments.create({
-      runId: run.id,
-      artifactPath: "dist",
-      deployTarget: "local-static",
-    })
+    const deployment = await client.deployments.create(
+      {
+        runId: run.id,
+        artifactPath: "dist",
+        deployTarget: "local-static",
+      },
+      { idempotencyKey: "product-resources-deployment" },
+    )
+    const replayed = await client.deployments.create(
+      {
+        runId: run.id,
+        artifactPath: "dist",
+        deployTarget: "local-static",
+      },
+      { idempotencyKey: "product-resources-deployment" },
+    )
+    expect(replayed.id).toBe(deployment.id)
+    await expect(
+      client.deployments.create(
+        {
+          runId: run.id,
+          workspacePath: "dist",
+          deployTarget: "local-static",
+        },
+        { idempotencyKey: "product-resources-deployment" },
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 })
     await client.deployments.wait(deployment.id, { timeoutMs: 10_000, pollIntervalMs: 10 })
     expect((await client.deployments.list()).items.map(({ id }) => id)).toContain(deployment.id)
+    expect(
+      (
+        await client.audit.list({ resourceType: "deployment", resourceId: deployment.id })
+      ).items.filter(({ action }) => action === "deployment.create"),
+    ).toHaveLength(1)
 
     const revoked = await client.apiKeys.revoke(createdKey.key.id)
     expect(revoked.revokedAt).not.toBeNull()

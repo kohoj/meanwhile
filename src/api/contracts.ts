@@ -458,8 +458,14 @@ export const CreateRunRequestSchema = z
   })
   .meta({ id: "CreateRunRequest" })
 
+const IdempotencyKeySchema = z.string().min(1).max(255)
+
 export const IdempotencyHeaderSchema = z.object({
-  "idempotency-key": z.string().min(1).max(255).optional(),
+  "idempotency-key": IdempotencyKeySchema.optional(),
+})
+
+export const RequiredIdempotencyHeaderSchema = z.object({
+  "idempotency-key": IdempotencyKeySchema,
 })
 
 export const RunResponseSchema = z.object({ run: RunSchema })

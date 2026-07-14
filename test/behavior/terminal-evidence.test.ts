@@ -30,7 +30,12 @@ import {
   RuntimeProviderError,
   relativePath,
 } from "../../src/providers/runtime-provider"
-import { EnvironmentSecretResolver } from "../../src/secrets"
+import {
+  EnvironmentSecretResolver,
+  SecretRedactor,
+  type SecretReferenceValidator,
+  type SecretResolver,
+} from "../../src/secrets"
 import { RunExecutor } from "../../src/services/run-executor"
 import { RunService } from "../../src/services/run-service"
 import { WorkspacePreparer } from "../../src/services/workspace-preparer"
@@ -61,6 +66,82 @@ afterEach(async () => {
 })
 
 describe("durable runner terminal evidence", () => {
+  test("releases only local secret material when supervision detaches from a live run", async () => {
+    const provider = new MockRuntimeProvider()
+    const ready = deferred()
+    const externalGrant = { active: true }
+    const environment: Record<string, string> = { [AGENT_SECRET]: "resource-bound-value" }
+    const redactor = new SecretRedactor(["resource-bound-value"])
+    const scopes: Array<Parameters<SecretResolver["resolve"]>[1]> = []
+    let releases = 0
+    const secrets: SecretResolver = {
+      validate() {},
+      resolve(_references, scope) {
+        scopes.push(scope)
+        return {
+          environment,
+          redactor,
+          async release() {
+            await Promise.resolve()
+            for (const name of Object.keys(environment)) {
+              environment[name] = ""
+              delete environment[name]
+            }
+            redactor.dispose()
+            releases += 1
+          },
+        }
+      },
+    }
+    const runner: RunnerSessionController = {
+      async start(input) {
+        return processHandle(input.provider.name, `${input.runtime.opaque}.${input.processId}`)
+      },
+      async consume(input) {
+        const signal = input.signal
+        if (signal === undefined) throw new Error("Run observation signal is required")
+        await input.onFrame(
+          frame(input.runId, input.runnerSessionId, 1, "session.started", {
+            sessionId: "detached-session",
+          }),
+          "1",
+        )
+        await input.onCursor("1")
+        ready.resolve()
+        return new Promise<RunnerConsumptionResult>((_resolve, reject) => {
+          const aborted = () => reject(signal.reason)
+          if (signal.aborted) aborted()
+          else signal.addEventListener("abort", aborted, { once: true })
+        })
+      },
+      async cancel() {},
+    }
+    const fixture = await createFixture({ provider, runner, secrets })
+    const run = createRun(
+      fixture.store,
+      { secretRefs: { [AGENT_SECRET]: `env://${AGENT_SECRET}` } },
+      provider,
+    )
+
+    await fixture.executor.start()
+    await bounded(ready.promise)
+    await fixture.executor.stop()
+
+    expect(fixture.store.getRun(OWNER_ID, run.id)?.status).toBe("running")
+    expect(scopes).toEqual([
+      {
+        ownerId: OWNER_ID,
+        purpose: "agent",
+        resourceType: "run",
+        resourceId: run.id,
+      },
+    ])
+    expect(releases).toBe(1)
+    expect(environment).toEqual({})
+    expect(redactor.active).toBeFalse()
+    expect(externalGrant.active).toBeTrue()
+  })
+
   test("uses control-plane acceptance time instead of a sandbox wall clock", async () => {
     const provider = new MockRuntimeProvider()
     const fixture = await createFixture({
@@ -421,7 +502,7 @@ describe("durable runner terminal evidence", () => {
 interface Fixture {
   readonly store: ObservedStore
   readonly executor: RunExecutor
-  readonly secrets: EnvironmentSecretResolver
+  readonly secrets: SecretReferenceValidator
   readonly providers: RuntimeProviderRegistry
   readonly operationalLogs: string[]
 }
@@ -430,6 +511,7 @@ async function createFixture(input: {
   provider: RuntimeProvider
   runner?: RunnerSessionController
   secret?: string
+  secrets?: SecretResolver
   workspaceFiles?: readonly { path: string; content: Uint8Array }[]
 }): Promise<Fixture> {
   const directory = await mkdtemp(join(tmpdir(), "meanwhile-terminal-evidence-"))
@@ -445,11 +527,13 @@ async function createFixture(input: {
     name: "Terminal evidence test key",
     createdAt: now(),
   })
-  const secrets = new EnvironmentSecretResolver({
-    source: { get: (name) => (name === AGENT_SECRET ? input.secret : undefined) },
-    allowedSourceNames: [AGENT_SECRET],
-    allowedOwnerIds: [OWNER_ID],
-  })
+  const secrets =
+    input.secrets ??
+    new EnvironmentSecretResolver({
+      source: { get: (name) => (name === AGENT_SECRET ? input.secret : undefined) },
+      allowedSourceNames: [AGENT_SECRET],
+      allowedOwnerIds: [OWNER_ID],
+    })
   const providers = new RuntimeProviderRegistry([input.provider])
   const operationalLogs: string[] = []
   const executor = new RunExecutor({
@@ -868,7 +952,7 @@ function withEventStreamProcessLoss(provider: MockRuntimeProvider): RuntimeProvi
 
 function runApi(
   store: Store,
-  secrets: EnvironmentSecretResolver,
+  secrets: SecretReferenceValidator,
   providers: RuntimeProviderRegistry,
 ): ReturnType<typeof createApiRouter> {
   const service = new RunService({

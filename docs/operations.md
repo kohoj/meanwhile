@@ -243,6 +243,8 @@ Before enabling it in the control plane:
 9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require real generation, two-turn continuity across control-plane restart, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, backup/restore, and second boot for every bundled toolchain;
 10. inspect Cloudflare for leaked test resources.
 
+Wrangler upload completion is not bridge readiness. The live test and release proofs use the same authenticated Bun `RuntimeProvider.health()` transport as production and wait within a fixed budget before beginning lifecycle assertions. Health proves bridge protocol availability, not compute materialization: a newly bound container application may still return a provider-classified transient error on its first Sandbox start. The Cloudflare adapter retries that idempotent mutation with bounded backoff under the run's provisioning deadline. A different client or an arbitrary delay is not accepted as readiness evidence.
+
 The configured runner digest and matching custom-image reference/digest are operator/platform assertions used to pin execution identity. A base-image tag is never paired with a custom-image digest. These values are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
 
 Do not confuse a sleeping container with a destroyed sandbox. Do not place Cloudflare account credentials in the agent runtime. Rotate the bridge token as a control-plane credential and ensure old revisions fail closed on protocol mismatch.

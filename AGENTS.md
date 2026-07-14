@@ -15,7 +15,7 @@ The user supplies a repository or files, an ACP agent, work, and a runtime provi
 ```text
 meanwhile run --agent codex --provider cloudflare --repo <url> -- <task>
 meanwhile logs <run-id> --follow
-meanwhile deploy <run-id> --artifact dist --target local-static
+meanwhile deploy <run-id> --artifact dist --target local-static --idempotency-key <key>
 meanwhile sessions create --agent codex --provider cloudflare --repo <url>
 meanwhile sessions send <session-id> --conflict reject -- <task>
 meanwhile sessions watch <session-id> --json
@@ -354,7 +354,7 @@ Every workspace path crossing a boundary is relative, normalized, size-limited, 
 
 Artifact collection is declared, not an unrestricted filesystem dump. Enforce file count, per-file and total byte limits, path and symlink safety, deterministic manifests and hashes, secret scanning before persistence, and abortable provider reads bounded by the original run deadline. Failed runs may still produce artifacts. Collection failure is separate evidence and does not rewrite the agent result unless an explicit policy says so.
 
-`POST /deployments` accepts `runId`, exactly one of `artifactPath` or logical `workspacePath`, a `deployTarget`, non-secret configuration, and secret references. The service resolves the source to immutable stored bytes before invoking the adapter. If the source was not captured before runtime cleanup, return `DEPLOYMENT_SOURCE_UNAVAILABLE`.
+`POST /deployments` requires `Idempotency-Key`, scoped to `(ownerId, key)`, and accepts `runId`, exactly one of `artifactPath` or logical `workspacePath`, a `deployTarget`, non-secret configuration, and secret references. The canonical hash binds normalized caller intent. First admission resolves the source to immutable stored bytes and atomically commits the binding, deployment record, immutable artifact reference, and create audit. An exact replay returns the original deployment before consulting mutable adapters or source catalogs; conflicting reuse returns `IDEMPOTENCY_CONFLICT`. If the source was not captured before runtime cleanup, return `DEPLOYMENT_SOURCE_UNAVAILABLE`.
 
 Deployment statuses are `queued`, `running`, `succeeded`, and `failed`. Store sequenced deployment logs, structured terminal errors, audit evidence, and preview/deployment URLs.
 
@@ -453,9 +453,9 @@ Tenant isolation is structural:
 - previews do not expose authenticated control-plane routes;
 - audit queries are owner-scoped until an explicit operator role exists.
 
-Public run input has `env` for persistable non-secret values and `secretRefs` such as `env://OPENAI_API_KEY`. Resolve a secret only immediately before the operation that needs it, retain it only for that operation, and never persist it.
+Public run input has `env` for persistable non-secret values and `secretRefs` such as `env://OPENAI_API_KEY`. Resolve a secret only immediately before injection or adapter use, retain the control-plane copy only for its active attachment, and never persist it. A runtime process necessarily retains its injected environment until that process exits; local material release does not alter it.
 
-The built-in process-environment resolver is a local-bootstrap boundary, not a shared tenant namespace: it is deny-all without an explicit catalog, grants only the bootstrap owner, requires agent/deployment source names to match their trusted targets, and permanently reserves control-plane/provider variable names. It does not authorize repository credentials because checkout requires a grant bound to both owner and destination host. Additional tenants and private checkout use a tenant secret-manager or credential-broker adapter implementing the same scoped contract.
+Executors depend on one `SecretResolver` contract that binds resolution to the durable run, session, or deployment identity and returns local sensitive material, its matching redactor, and an awaited release boundary. Release only zeroizes control-plane copies; it never revokes or rotates a credential already injected into compute that may survive a control-plane restart. Reacquiring a recoverable resource must redact every credential value previously injected into that still-existing resource, and live artifact scanning uses the exact values injected into the process rather than resolving again. The built-in process-environment resolver is a local-bootstrap boundary, not a shared tenant namespace: it is deny-all without an explicit catalog, grants only the bootstrap owner, requires agent/deployment source names to match their trusted targets, and permanently reserves control-plane/provider variable names. It does not authorize repository credentials because checkout requires a grant bound to both owner and destination host. Short-lived issuance, renewal, and revocation require a separate resource-lifecycle credential broker; do not impersonate that boundary through resolver material cleanup.
 
 Use the narrowest exposure:
 
@@ -619,7 +619,7 @@ Tests must prove:
 - timeout becomes immutable `timed_out` despite a late exit;
 - identical idempotent requests create one run and conflicting reuse returns 409;
 - accepted execution provenance persists, participates in idempotency, and rejects adapter/capability drift before compute;
-- deployment writes record, ordered logs, immutable-source reference, and audit evidence;
+- deployment admission is owner-scoped and idempotent, and atomically writes one record, immutable-source reference, and create audit;
 - an ambiguous deployment success remains `running` and converges through exact-id reconciliation instead of becoming falsely failed;
 - exact secrets never persist in any log plane, audit metadata, or artifact;
 - cleanup never destroys a running runtime, is idempotent, and survives restart;
@@ -642,6 +642,7 @@ Tests must prove:
 - the Cloudflare client passes mock-bridge integration;
 - retryable Cloudflare transport operations preserve request identity, and event reads resume from the same cursor without duplicating accepted evidence;
 - a gated live test creates, starts, executes, reads files/logs, stops, and destroys a real Cloudflare sandbox;
+- Cloudflare live and release proofs gate on bounded authenticated bridge readiness from the production Bun `RuntimeProvider.health()` path; health does not materialize compute, and the first idempotent Sandbox start absorbs provider-classified transient rollout errors under the caller's deadline;
 - the public client authenticates, validates contract responses, preserves structured safe errors, waits deterministically, and reconnects log streams without gaps or duplicates;
 - artifact inspection/download, deployment listing, audit queries, and API-key lifecycle are owner-scoped through API, SDK, and CLI;
 - sandbox clock skew cannot control durable log timestamps or runner timeout duration, and the ACP child timezone is UTC;

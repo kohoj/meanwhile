@@ -6,7 +6,8 @@ import {
   type ImmutableDeploymentSource,
 } from "../../src/deployments/deploy-adapter"
 import { DeployAdapterRegistry } from "../../src/deployments/registry"
-import { EnvironmentSecretResolver } from "../../src/secrets"
+import { AppError } from "../../src/errors"
+import { EnvironmentSecretResolver, SecretRedactor, type SecretResolver } from "../../src/secrets"
 import {
   type DeploymentAuditRecord,
   DeploymentDispatcher,
@@ -23,9 +24,129 @@ import {
 import { StructuredLogger } from "../../src/telemetry"
 
 describe("deployment records and audit evidence", () => {
+  test("admits one deployment for concurrent canonical retries", async () => {
+    const harness = createHarness(successAdapter())
+    const input = {
+      ...createInput(),
+      targetConfig: { nested: { beta: 2, alpha: 1 }, enabled: true },
+    }
+
+    const [first, second] = await Promise.all([
+      harness.executor.create(input),
+      harness.executor.create({
+        ...input,
+        targetConfig: { enabled: true, nested: { alpha: 1, beta: 2 } },
+      }),
+    ])
+
+    expect([first.replayed, second.replayed].sort()).toEqual([false, true])
+    expect(first.deployment.id).toBe(second.deployment.id)
+    expect(harness.repository.records.size).toBe(1)
+    expect(harness.repository.audits.map(({ action }) => action)).toEqual(["deployment.create"])
+  })
+
+  test("rejects reuse of a deployment key for different immutable intent", async () => {
+    const harness = createHarness(successAdapter())
+    await harness.executor.create(createInput())
+
+    await expect(
+      harness.executor.create({ ...createInput(), targetConfig: { index: "other.html" } }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" })
+    expect(harness.repository.records.size).toBe(1)
+    expect(harness.repository.audits).toHaveLength(1)
+  })
+
+  test("replays durable admission before consulting mutable dependencies", async () => {
+    let available = true
+    const source = fixtureSource()
+    const harness = createHarness(
+      {
+        ...successAdapter(),
+        validate(config) {
+          if (!available) throw new Error("adapter unavailable")
+          return config
+        },
+      },
+      {
+        runs: {
+          getRun(ownerId, runId) {
+            return available && ownerId === "owner-a" && runId === "run-a"
+              ? { id: runId, ownerId }
+              : null
+          },
+        },
+        sourceResolver: {
+          async resolve() {
+            if (!available) throw new Error("source unavailable")
+            return {
+              artifactId: source.artifactId,
+              manifestDigest: source.manifestDigest,
+              logicalPath: source.logicalPath,
+            }
+          },
+          async open() {
+            return source
+          },
+        },
+      },
+    )
+    const first = await harness.executor.create(createInput())
+    available = false
+
+    const replayed = await harness.executor.create(createInput())
+    expect(replayed).toMatchObject({ replayed: true, deployment: { id: first.deployment.id } })
+    await expect(
+      harness.executor.create({ ...createInput(), targetConfig: { changed: true } }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" })
+    expect(harness.repository.records.size).toBe(1)
+    expect(harness.repository.audits).toHaveLength(1)
+  })
+
+  test("awaits asynchronous local material release without claiming credential revocation", async () => {
+    let released = false
+    const externalGrant = { active: true }
+    const environment: Record<string, string> = { DEPLOY_TOKEN: "short-lived-value" }
+    const redactor = new SecretRedactor(["short-lived-value"])
+    const resolvedScopes: Array<Parameters<SecretResolver["resolve"]>[1]> = []
+    const resolver: SecretResolver = {
+      validate() {},
+      async resolve(_references, scope) {
+        resolvedScopes.push(scope)
+        return {
+          environment,
+          redactor,
+          async release() {
+            await Promise.resolve()
+            environment["DEPLOY_TOKEN"] = ""
+            delete environment["DEPLOY_TOKEN"]
+            redactor.dispose()
+            released = true
+          },
+        }
+      },
+    }
+    const harness = createHarness(successAdapter(), { secretResolver: resolver })
+    const created = (await harness.executor.create(createInput())).deployment
+
+    await harness.executor.execute(created.id, { requestId: "request-execute" })
+
+    expect(released).toBeTrue()
+    expect(environment).toEqual({})
+    expect(redactor.active).toBeFalse()
+    expect(externalGrant.active).toBeTrue()
+    expect(resolvedScopes).toEqual([
+      {
+        ownerId: "owner-a",
+        purpose: "deployment",
+        resourceType: "deployment",
+        resourceId: created.id,
+      },
+    ])
+  })
+
   test("records create, start, ordered logs, and success atomically", async () => {
     const harness = createHarness(successAdapter())
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
 
     expect(created.status).toBe("queued")
     expect(harness.repository.audits.map((audit) => audit.action)).toEqual(["deployment.create"])
@@ -52,7 +173,7 @@ describe("deployment records and audit evidence", () => {
 
   test("persists a structured redacted failure and failure audit", async () => {
     const harness = createHarness(failingAdapter())
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     const failed = await harness.executor.execute(created.id, {
       requestId: "request-execute",
     })
@@ -76,7 +197,7 @@ describe("deployment records and audit evidence", () => {
 
   test("owner-scopes deployment reads and logs without disclosure", async () => {
     const harness = createHarness(successAdapter())
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
 
     await expect(harness.executor.get("owner-b", created.id)).rejects.toMatchObject({
       code: "DEPLOYMENT_NOT_FOUND",
@@ -184,7 +305,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     const finished = await harness.executor.execute(created.id, { requestId: "execute" })
 
     expect(finished.status).toBe("succeeded")
@@ -224,7 +345,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     const failed = await harness.executor.execute(created.id, { requestId: "execute" })
 
     expect(failed).toMatchObject({
@@ -255,7 +376,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     await harness.executor.execute(created.id, { requestId: "request-execute" })
 
     expect(retained).toEqual({})
@@ -274,7 +395,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     secretEnvNames.length = 0
 
     const failed = await harness.executor.execute(created.id, { requestId: "execute" })
@@ -303,7 +424,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     const first = harness.executor.execute(created.id, { requestId: "request-1" })
     await waitFor(() => calls === 1)
     const second = await harness.executor.execute(created.id, {
@@ -327,7 +448,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     harness.repository.failNextSuccessTransition = true
 
     await expect(
@@ -363,7 +484,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     harness.repository.failNextLogAppend = true
 
     await expect(
@@ -400,7 +521,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     const dispatcher = new DeploymentDispatcher({
       store: {
         listQueuedDeployments: () =>
@@ -463,7 +584,7 @@ describe("deployment records and audit evidence", () => {
       },
     }
     const harness = createHarness(adapter)
-    const created = await harness.executor.create(createInput())
+    const created = (await harness.executor.create(createInput())).deployment
     const dispatcher = new DeploymentDispatcher({
       store: {
         listQueuedDeployments: () =>
@@ -507,6 +628,7 @@ function createHarness(
   options: {
     runs?: DeploymentRunCatalog
     sourceResolver?: DeploymentSourceResolver
+    secretResolver?: SecretResolver
   } = {},
 ) {
   const repository = new MemoryDeploymentRepository()
@@ -532,13 +654,15 @@ function createHarness(
         return source
       },
     },
-    secretResolver: new EnvironmentSecretResolver({
-      source: {
-        get: (name) => (name === "DEPLOY_TOKEN" ? "resolved-value" : undefined),
-      },
-      allowedSourceNames: ["DEPLOY_TOKEN"],
-      allowedOwnerIds: ["owner-a"],
-    }),
+    secretResolver:
+      options.secretResolver ??
+      new EnvironmentSecretResolver({
+        source: {
+          get: (name) => (name === "DEPLOY_TOKEN" ? "resolved-value" : undefined),
+        },
+        allowedSourceNames: ["DEPLOY_TOKEN"],
+        allowedOwnerIds: ["owner-a"],
+      }),
     id: () => "deployment_0123456789",
     now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)),
   })
@@ -548,6 +672,7 @@ function createHarness(
 function createInput() {
   return {
     ownerId: "owner-a",
+    idempotencyKey: "deployment-request-a",
     runId: "run-a",
     source: { artifactPath: "dist" } as const,
     targetName: "test-target",
@@ -618,6 +743,7 @@ class MemoryDeploymentRepository implements DeploymentRepository {
   readonly records = new Map<string, DeploymentRecord>()
   readonly audits: DeploymentAuditRecord[] = []
   readonly logs: DeploymentLogRecord[] = []
+  readonly idempotency = new Map<string, { requestHash: string; deploymentId: string }>()
   accessesAfterShutdown = 0
   failNextSuccessTransition = false
   failNextLogAppend = false
@@ -633,15 +759,49 @@ class MemoryDeploymentRepository implements DeploymentRepository {
     throw new Error("Deployment repository was accessed after dispatcher shutdown")
   }
 
+  async findIdempotent(input: { ownerId: string; idempotencyKey: string; requestHash: string }) {
+    this.#assertAccessible()
+    const existing = this.idempotency.get(`${input.ownerId}\0${input.idempotencyKey}`)
+    if (existing === undefined) return null
+    if (existing.requestHash !== input.requestHash) {
+      throw new AppError({
+        code: "IDEMPOTENCY_CONFLICT",
+        message: "Idempotency key was already used with different input",
+      })
+    }
+    const deployment = this.records.get(existing.deploymentId)
+    if (deployment === undefined) throw new Error("inconsistent idempotency fixture")
+    return deployment
+  }
+
   async createWithAudit(input: {
     deployment: DeploymentRecord
     audit: DeploymentAuditRecord
-  }): Promise<DeploymentRecord> {
+    idempotencyKey: string
+    requestHash: string
+  }) {
     this.#assertAccessible()
+    const identity = `${input.deployment.ownerId}\0${input.idempotencyKey}`
+    const existing = this.idempotency.get(identity)
+    if (existing !== undefined) {
+      if (existing.requestHash !== input.requestHash) {
+        throw new AppError({
+          code: "IDEMPOTENCY_CONFLICT",
+          message: "Idempotency key was already used with different input",
+        })
+      }
+      const deployment = this.records.get(existing.deploymentId)
+      if (deployment === undefined) throw new Error("inconsistent idempotency fixture")
+      return { deployment, replayed: true }
+    }
     if (this.records.has(input.deployment.id)) throw new Error("duplicate fixture id")
     this.records.set(input.deployment.id, input.deployment)
+    this.idempotency.set(identity, {
+      requestHash: input.requestHash,
+      deploymentId: input.deployment.id,
+    })
     this.audits.push(input.audit)
-    return input.deployment
+    return { deployment: input.deployment, replayed: false }
   }
 
   async getForOwner(ownerId: string, deploymentId: string) {

@@ -235,13 +235,17 @@ owner request
     │ authorize run and requested logical source
     ▼
 resolve captured source → immutable artifact ID + digest
-    │ create deployment + audit
+    │ canonical hash + owner-scoped idempotency claim
+    ▼
+atomic deployment + create audit
     ▼
 DeployAdapter.publish(immutable bytes, validated target config + declared secrets)
     │ ordered logs + structured result
     ▼
 validated canonical HTTP(S) URL or safe structured error
 ```
+
+HTTP admission requires an `Idempotency-Key` scoped to the authenticated owner. Its canonical hash binds the normalized source selector, target, caller configuration, and secret references. First admission resolves immutable bytes, then the binding, deployment row, immutable artifact reference, and create audit share one SQLite transaction. Exact retries return the original record before consulting mutable adapters or source catalogs; conflicting reuse fails before a second target identity exists.
 
 The adapter cannot read a live runtime, public owner identity, or database handle. This keeps deployment replayable after runtime destruction and makes promotion auditable. The durable `running` state surrounds the external side effect: after target success becomes possible, a deployment-log or success-transaction write failure leaves the record recoverable rather than claiming false failure. Restart replays the idempotent adapter with the stable deployment ID and immutable source.
 

@@ -100,7 +100,7 @@ CREATE TABLE run_status_events (
 
 CREATE INDEX run_status_events_owner_run_idx ON run_status_events(owner_id, run_id, status_version);
 
-CREATE TABLE idempotency_keys (
+CREATE TABLE run_idempotency_keys (
         owner_id TEXT NOT NULL,
         key TEXT NOT NULL,
         request_hash TEXT NOT NULL,
@@ -224,6 +224,16 @@ CREATE TABLE deployments (
 CREATE INDEX deployments_owner_created_idx ON deployments(owner_id, created_at DESC, id);
 
 CREATE INDEX deployments_status_idx ON deployments(status, created_at);
+
+CREATE TABLE deployment_idempotency_keys (
+        owner_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        deployment_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(owner_id, key),
+        FOREIGN KEY(owner_id, deployment_id) REFERENCES deployments(owner_id, id)
+      ) WITHOUT ROWID, STRICT;
 
 CREATE TABLE deployment_logs (
         owner_id TEXT NOT NULL,

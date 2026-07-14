@@ -26,6 +26,8 @@ const bridgeUrl = liveEnvironment.CLOUDFLARE_BRIDGE_URL?.replace(/\/$/, "")
 const bridgeToken = liveEnvironment.CLOUDFLARE_BRIDGE_TOKEN
 const liveTestEnabled = liveEnvironment.MEANWHILE_LIVE_CLOUDFLARE === "1"
 const liveCredentialsReady = Boolean(bridgeUrl && bridgeToken)
+const providerReadyTimeoutMs = 120_000
+const providerReadyPollMs = 500
 
 if (liveTestEnabled && !liveCredentialsReady) {
   test("Cloudflare live proof has explicit credentials", () => {
@@ -52,7 +54,7 @@ liveTest(
     let runtime: RuntimeHandle | undefined
 
     try {
-      expect(await provider.health()).toMatchObject({ status: "healthy" })
+      await waitForProviderReady(provider)
 
       runtime = await provider.create({ runtimeId: `live-${crypto.randomUUID()}` })
       await provider.start(runtime)
@@ -264,8 +266,27 @@ liveTest(
       }
     }
   },
-  120_000,
+  300_000,
 )
+
+async function waitForProviderReady(provider: CloudflareRuntimeProvider): Promise<void> {
+  const deadline = performance.now() + providerReadyTimeoutMs
+  let lastHealth = await provider.health()
+
+  while (lastHealth.status !== "healthy" && performance.now() < deadline) {
+    await Bun.sleep(providerReadyPollMs)
+    lastHealth = await provider.health()
+  }
+
+  if (lastHealth.status !== "healthy") {
+    throw new Error(
+      `Cloudflare provider did not become ready: ${JSON.stringify({
+        status: lastHealth.status,
+        message: lastHealth.message,
+      })}`,
+    )
+  }
+}
 
 async function waitForProcessOutput(
   provider: CloudflareRuntimeProvider,

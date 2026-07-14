@@ -303,6 +303,33 @@ describe("CloudflareRuntimeProvider", () => {
     expect(cursors).toEqual(["v2.0.0.0", "v2.0.0.0", "v2.0.0.0"])
     expect(new Set(requestIds).size).toBe(1)
   })
+
+  test("retries transient lifecycle mutations with one stable request identity", async () => {
+    const bridge = new BridgeStub(TOKEN)
+    const startRequestIds: string[] = []
+    let startAttempts = 0
+    const provider = new CloudflareRuntimeProvider({
+      bridgeUrl: "https://bridge.example.test/",
+      bridgeToken: TOKEN,
+      retryDelaysMs: [1, 1, 1, 1, 1, 1],
+      fetch: async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init)
+        if (request.method === "POST" && new URL(request.url).pathname.endsWith("/start")) {
+          startRequestIds.push(request.headers.get("x-request-id") ?? "")
+          startAttempts += 1
+          if (startAttempts < 7) return errorResponse(503, "PROVIDER_BUSY", true)
+        }
+        return bridge.fetch(request)
+      },
+    })
+
+    const runtime = await provider.create({ runtimeId: "rollout-transient-runtime" })
+    await provider.start(runtime)
+
+    expect(startAttempts).toBe(7)
+    expect(new Set(startRequestIds).size).toBe(1)
+    expect(startRequestIds[0]).not.toBe("")
+  })
 })
 
 function createProvider(bridge: BridgeStub): CloudflareRuntimeProvider {

@@ -19,7 +19,7 @@ import {
   restoreProcessHandle,
   restoreRuntimeHandle,
 } from "../providers/runtime-provider"
-import type { EnvironmentSecretResolver, SecretRedactor } from "../secrets"
+import type { ResolvedSecretMaterial, SecretRedactor, SecretResolver } from "../secrets"
 import type { StructuredLogger, Telemetry, TelemetryScope } from "../telemetry"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
@@ -37,7 +37,7 @@ export interface SessionExecutorOptions {
   readonly providers: RuntimeProviderRegistry
   readonly runner: SessionRunnerController
   readonly workspace: WorkspacePreparer
-  readonly secrets: EnvironmentSecretResolver
+  readonly secrets: SecretResolver
   readonly logger: StructuredLogger
   readonly telemetry?: Telemetry
   readonly concurrency?: number
@@ -52,7 +52,7 @@ export class SessionExecutor implements ManagedComponent {
   readonly #providers: RuntimeProviderRegistry
   readonly #runner: SessionRunnerController
   readonly #workspace: WorkspacePreparer
-  readonly #secrets: EnvironmentSecretResolver
+  readonly #secrets: SecretResolver
   readonly #logger: StructuredLogger
   readonly #telemetry: Telemetry | undefined
   readonly #concurrency: number
@@ -318,9 +318,11 @@ export class SessionExecutor implements ManagedComponent {
       )
     }
 
-    const agentSecrets = this.#secrets.resolve(session.secretRefs, {
+    const agentSecrets = await this.#secrets.resolve(session.secretRefs, {
       ownerId: session.ownerId,
       purpose: "agent",
+      resourceType: "session",
+      resourceId: session.id,
     })
     try {
       if (!lease?.processHandle) {
@@ -394,7 +396,7 @@ export class SessionExecutor implements ManagedComponent {
       }
       await this.#cleanup(observedSession.id, provider)
     } finally {
-      agentSecrets.dispose()
+      await agentSecrets.release()
     }
   }
 
@@ -483,12 +485,17 @@ export class SessionExecutor implements ManagedComponent {
     provider: RuntimeProvider,
     runtime: RuntimeHandle,
   ): Promise<void> {
-    let repositorySecrets: ReturnType<EnvironmentSecretResolver["resolve"]> | null = null
+    let repositorySecrets: ResolvedSecretMaterial | null = null
     let repositoryCredential: string | undefined
     if (session.workspace.type === "repository" && session.workspace.credentialRef) {
-      repositorySecrets = this.#secrets.resolve(
+      repositorySecrets = await this.#secrets.resolve(
         { MEANWHILE_REPOSITORY_CREDENTIAL: session.workspace.credentialRef },
-        { ownerId: session.ownerId, purpose: "repository" },
+        {
+          ownerId: session.ownerId,
+          purpose: "repository",
+          resourceType: "session",
+          resourceId: session.id,
+        },
       )
       repositoryCredential = repositorySecrets.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
     }
@@ -514,7 +521,7 @@ export class SessionExecutor implements ManagedComponent {
         },
       })
     } finally {
-      repositorySecrets?.dispose()
+      await repositorySecrets?.release()
     }
   }
 

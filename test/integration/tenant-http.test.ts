@@ -70,7 +70,10 @@ test("bearer identity enforces tenant isolation at every run-derived HTTP bounda
 
     const deployment = await asOwnerB("/deployments", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `cross-owner-deployment-${run.id}`,
+      },
       body: JSON.stringify({
         runId: run.id,
         workspacePath: "dist",

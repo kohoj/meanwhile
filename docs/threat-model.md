@@ -152,8 +152,8 @@ Artifact capture is not a general recursive copy. The collector reads only decla
 
 | Threat | Control | Residual risk |
 | --- | --- | --- |
-| Persist resolved value | Store only `secretRefs`; resolve immediately before use; retain only for operation lifetime | Process/runtime memory and provider internals can observe injected values |
-| Leak through logs/errors/audit/telemetry | Runner redaction plus an independent control-plane redactor retained across the full observation lifetime; safe structured errors; forbidden telemetry fields | Unknown, transformed, fragmented, encoded, or rotated pre-restart values may pass |
+| Persist resolved value | Store only `secretRefs`; bind resolution to a durable resource identity; keep exact injected values in the live redaction/artifact-scan boundary; await local material release | Process/runtime memory and provider internals can observe injected values; release does not revoke credentials in surviving compute |
+| Leak through logs/errors/audit/telemetry | Runner redaction plus an independent control-plane redactor retained across the full observation lifetime; recovery material must include prior injected values; safe structured errors; forbidden telemetry fields | Unknown, transformed, fragmented, or encoded values may pass; a resolver that drops prior redaction material violates the recovery contract |
 | Leak control-plane/provider credential to workload | Provider, bridge, artifact-store, and deploy credentials stay outside agent runtime | Adapter implementation defects can violate the boundary |
 | Cross-tenant environment lookup | Process-environment catalog is bootstrap-owner only, deny-by-default, target-bound, and reserves platform names | Additional tenants require a tenant secret-manager adapter; this catalog is intentionally not one |
 | Repository credential confused deputy | Environment resolver rejects checkout credentials; a future broker must bind owner, repository host, and lifetime | Private checkout is unavailable until that stronger boundary exists |
@@ -195,7 +195,7 @@ Control-plane policy may branch on declared capabilities, never provider name. A
 
 | Threat | Control | Residual risk |
 | --- | --- | --- |
-| Duplicate run/session/turn or terminal race | Independently scoped idempotency keys, canonical hashes, CAS state/version transitions | Database compromise bypasses invariants |
+| Duplicate run/session/turn/deployment admission or terminal race | Independently scoped idempotency keys, canonical hashes, atomic record/audit commits, and CAS state/version transitions | Database compromise bypasses invariants |
 | Late success overwrites cancel/timeout | Atomic runner-result reservation plus one immutable public terminal claim | Incorrect transaction ownership is a critical implementation defect |
 | Cleanup destroys active runtime | Eligibility joined to authoritative run or session state in claim transaction | Provider handle aliasing must be prevented by adapter validation |
 | Audit diverges from mutation | State change and audit record share one transaction | Local administrator can rewrite SQLite; audit is not externally tamper-proof |

@@ -8,6 +8,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Owner-scoped request idempotency for deployment admission across HTTP/OpenAPI, SDK, CLI, service, and SQLite, with canonical immutable-intent hashing and atomic create audit evidence.
+- A common resource-bound `SecretResolver` material contract with awaited local zeroization, without coupling executors to the bootstrap environment resolver or conflating observation cleanup with credential revocation.
+- Cloudflare live and release proofs now wait on bounded production-transport provider readiness, while idempotent lifecycle mutations absorb provider-classified container rollout transients without wall-clock readiness assumptions.
 - Durable run/session runtime-provisioning intents and one-shot process-launch intents that close allocation/spawn-before-handle-persistence crash windows through exact-id provider reconciliation.
 - Durable `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent` resources across SQLite, HTTP/OpenAPI, the typed SDK, and CLI, preserving one ACP context across ordered prompts.
 - Explicit turn conflict policies (`reject`, `enqueue`, `interrupt_and_send`), independent session/turn idempotency, per-turn deadlines, interruption without continuity loss, idempotent close, and durable session-runtime cleanup.
@@ -19,6 +22,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- Run and deployment idempotency bindings now use explicit resource-specific relational tables with strong owner/resource foreign keys in the single current schema.
 - Run state now has only three write paths: dedicated provisioning claim, atomic `session.started` acceptance, and one public terminal-status commit. Atomic runner-terminal reservation is kept distinct from status mutation so artifact capture and restart finalization remain explicit. The generic transition API, persisted cancellation flag, restart-time evidence repair, and unscheduled-cleanup repair path were removed.
 - SQLite now has one current schema initialized atomically on an empty database and bound to an exact source fingerprint. Every foreign, partial, or differently fingerprinted database is rejected without upgrade, backfill, repair, or dual reads.
 - Invalid provenance and deployment-log rows now fail as persisted-contract violations instead of entering alternate read fallbacks.
@@ -31,6 +35,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- Local POSIX process-group hard termination is now a single idempotent lifecycle operation, eliminating the macOS race where exit observation attempted a second group kill; process-tree tests synchronize on a validated ready PID instead of a 25 ms output assumption.
 - Run terminal races now use an explicit two-phase runner path: terminal-frame acceptance atomically reserves the runner result before artifact capture, then the sole public terminal-status transaction commits status, events, audit, terminal log, and cleanup eligibility together. Cancellation, timeout, and control-plane failure lose to an existing reservation; late terminal frames remain diagnostic.
 - Recovery now fails closed on the impossible split state of a terminal log without its atomic runner-session reservation instead of reconstructing lifecycle authority from logs.
 - Interrupted run/session provisioning and cleanup claims are recovered on restart, including bounded reconciliation and destruction of compute that may have been allocated before its handle was persisted.

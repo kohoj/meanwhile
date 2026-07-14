@@ -603,7 +603,7 @@ function assertDisjointEnvironment(
 
 async function createDeployment(args: readonly string[], context: CliContext): Promise<void> {
   const parsed = parseArguments(args, {
-    values: ["artifact", "workspace", "target", "config", "secret"],
+    values: ["artifact", "workspace", "target", "config", "secret", "idempotency-key"],
   })
   const runId = parsed.onlyPositional()
   const artifactPath = parsed.one("artifact")
@@ -628,7 +628,10 @@ async function createDeployment(args: readonly string[], context: CliContext): P
     config,
     secretRefs: parseAssignments(parsed.many("secret"), "--secret", parseSecretReference),
   }
-  const deployment = await apiClient(context).deployments.create(body, { signal: context.signal })
+  const deployment = await apiClient(context).deployments.create(body, {
+    idempotencyKey: requiredOption(parsed, "idempotency-key"),
+    signal: context.signal,
+  })
   await printJson(context, { deployment })
 }
 
@@ -1348,7 +1351,7 @@ Usage:
   meanwhile artifacts list RUN_ID
   meanwhile artifacts get ARTIFACT_ID
   meanwhile artifacts download ARTIFACT_ID [--path PATH] --output FILE
-  meanwhile deploy RUN_ID (--artifact PATH | --workspace PATH) --target NAME
+  meanwhile deploy RUN_ID (--artifact PATH | --workspace PATH) --target NAME --idempotency-key KEY
   meanwhile deployments list [--limit N] [--before CURSOR]
   meanwhile deployments get DEPLOYMENT_ID
   meanwhile deployments logs DEPLOYMENT_ID [--after N] [--limit N]
@@ -1381,6 +1384,7 @@ Session options:
 Deployment options:
   --config NAME=JSON          Target configuration; repeatable
   --secret NAME=env://VAR     Deployment secret reference; repeatable
+  --idempotency-key KEY       Required safe retry identity
 
 API commands read MEANWHILE_URL (default ${DEFAULT_URL}) and MEANWHILE_API_KEY.
 The local provider executes on this host and is not a security sandbox.

@@ -46,11 +46,14 @@ if (
   throw new Error("Packaged agent run did not produce complete durable evidence")
 }
 
-const queued = await meanwhile.deployments.create({
-  runId: run.id,
-  artifactPath: "site",
-  deployTarget: "local-static",
-})
+const queued = await meanwhile.deployments.create(
+  {
+    runId: run.id,
+    artifactPath: "site",
+    deployTarget: "local-static",
+  },
+  { idempotencyKey: `container-smoke-deployment-${run.id}` },
+)
 const deployment = await meanwhile.deployments.wait(queued.id, {
   timeoutMs: 30_000,
   pollIntervalMs: 25,

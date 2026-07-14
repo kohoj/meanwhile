@@ -76,6 +76,8 @@ class ProofError extends Error {
 const provider = selectedProvider(process.argv.slice(2))
 const proofAgentType = selectedProofAgent(process.argv.slice(2))
 const requireProvenance = process.argv.includes("--require-provenance")
+const providerReadyTimeoutMs = 120_000
+const providerReadyPollMs = 500
 const root = await mkdtemp(join(tmpdir(), "meanwhile-release-proof-"))
 const dataDir = join(root, "data")
 const backupDir = join(root, "backup")
@@ -113,12 +115,7 @@ try {
   const prompt = proofAgent.prompt(roundTripToken)
   const previewText = proofAgent.previewText(roundTripToken, prompt)
   running = await startInstance(config, key.key)
-  const providerDiagnostics = await running.client.providers.test(provider)
-  if (providerDiagnostics.health.status !== "healthy") {
-    throw new ProofError("PROVIDER_UNHEALTHY", "The selected provider is not healthy", {
-      health: providerDiagnostics.health,
-    })
-  }
+  await waitForProviderReady(running.client, provider)
 
   const created = await running.client.runs.create(
     {
@@ -217,11 +214,14 @@ try {
 
   const deployment = await running.client.deployments.wait(
     (
-      await running.client.deployments.create({
-        runId: run.id,
-        artifactPath: "site",
-        deployTarget: "local-static",
-      })
+      await running.client.deployments.create(
+        {
+          runId: run.id,
+          artifactPath: "site",
+          deployTarget: "local-static",
+        },
+        { idempotencyKey: `release-proof-deployment-${run.id}` },
+      )
     ).id,
     { timeoutMs: 30_000, pollIntervalMs: 50 },
   )
@@ -582,6 +582,22 @@ try {
   proofAgent.restore()
   await rm(root, { recursive: true, force: true })
   await rm(`${dataDir}.lock`, { recursive: true, force: true })
+}
+
+async function waitForProviderReady(client: Meanwhile, provider: ProofProvider): Promise<void> {
+  const deadline = performance.now() + providerReadyTimeoutMs
+  let diagnostics = await client.providers.test(provider)
+
+  while (diagnostics.health.status !== "healthy" && performance.now() < deadline) {
+    await Bun.sleep(providerReadyPollMs)
+    diagnostics = await client.providers.test(provider)
+  }
+
+  if (diagnostics.health.status !== "healthy") {
+    throw new ProofError("PROVIDER_UNHEALTHY", "The selected provider did not become ready", {
+      health: diagnostics.health,
+    })
+  }
 }
 
 function proofConfig(input: {
@@ -1023,8 +1039,13 @@ async function prepareProofAgent(
           contentBase64: encode("<!doctype html><title>Unverified input</title>"),
         },
       ],
-      timeoutMs: 60_000,
-      waitTimeoutMs: provider === "cloudflare" ? 120_000 : 30_000,
+      // Run timeout includes provisioning. A fresh Cloudflare deployment may
+      // need to materialize its container application after the authenticated
+      // bridge is already reachable, so the remote proof must budget that
+      // owned lifecycle instead of asserting a fictitious 60-second platform
+      // startup SLA.
+      timeoutMs: provider === "cloudflare" ? 3 * 60_000 : 60_000,
+      waitTimeoutMs: provider === "cloudflare" ? 4 * 60_000 : 30_000,
       prompt: (token) => `Return this exact release token: ${token}`,
       previewText: (_token, prompt) => `fixture response: ${prompt}`,
       restore() {},

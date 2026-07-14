@@ -159,22 +159,28 @@ describe("Meanwhile client contract", () => {
 
   test("promotes immutable output through the deployment namespace", async () => {
     let requestBody: unknown
+    let requestHeaders: Headers | undefined
     const client = new Meanwhile({
       baseUrl: "http://127.0.0.1:7331",
       apiKey: "key",
       fetch: async (_input, init) => {
         requestBody = JSON.parse(String(init?.body)) as unknown
+        requestHeaders = new Headers(init?.headers)
         return Response.json({ deployment: apiDeployment() }, { status: 202 })
       },
     })
 
-    const deployment = await client.deployments.create({
-      runId: API_RUN_ID,
-      artifactPath: "dist",
-      deployTarget: "local-static",
-    })
+    const deployment = await client.deployments.create(
+      {
+        runId: API_RUN_ID,
+        artifactPath: "dist",
+        deployTarget: "local-static",
+      },
+      { idempotencyKey: "deploy-dist" },
+    )
 
     expect(deployment.id).toBe(API_DEPLOYMENT_ID)
+    expect(requestHeaders?.get("Idempotency-Key")).toBe("deploy-dist")
     expect(requestBody).toEqual({
       runId: API_RUN_ID,
       artifactPath: "dist",

@@ -29,10 +29,25 @@ export interface SecretAccessScope {
   readonly purpose: SecretPurpose
 }
 
-export interface SecretEnvironment {
+export type SecretResourceType = "run" | "session" | "deployment"
+
+export interface SecretResolutionScope extends SecretAccessScope {
+  /** Stable durable identity used to reacquire the complete redaction boundary after restart. */
+  readonly resourceType: SecretResourceType
+  readonly resourceId: string
+}
+
+/**
+ * Sensitive values held by one control-plane attachment to a durable resource.
+ * Idempotent `release()` zeroizes only these local copies and the matching redactor. It
+ * must never revoke or rotate a credential already injected into surviving
+ * compute; external credential lifetime belongs to a separate resource-cleanup
+ * contract.
+ */
+export interface ResolvedSecretMaterial {
   readonly environment: Record<string, string>
   readonly redactor: SecretRedactor
-  dispose(): void
+  release(): void | Promise<void>
 }
 
 export interface SecretSource {
@@ -41,6 +56,20 @@ export interface SecretSource {
 
 export interface SecretReferenceValidator {
   validate(references: SecretReferences, scope: SecretAccessScope): void
+}
+
+/**
+ * Resolves local secret material for one attachment to a durable resource.
+ * Reacquisition for the same still-existing resource must redact every value
+ * previously injected into its compute. Resolution and local release do not
+ * own external credential revocation because control-plane observation may end
+ * while that compute intentionally survives for restart recovery.
+ */
+export interface SecretResolver extends SecretReferenceValidator {
+  resolve(
+    references: SecretReferences,
+    scope: SecretResolutionScope,
+  ): ResolvedSecretMaterial | Promise<ResolvedSecretMaterial>
 }
 
 export interface EnvironmentSecretResolverOptions {
@@ -71,11 +100,11 @@ export class SecretResolutionError extends Error {
 /**
  * Resolves the deliberately small `env://NAME` reference language.
  *
- * Resolution returns an operation-scoped environment and its matching
- * redactor together so callers cannot accidentally begin consuming output
- * before constructing the redaction boundary.
+ * Resolution returns resource-bound local material and its matching redactor
+ * together so callers cannot accidentally begin consuming output before
+ * constructing the redaction boundary.
  */
-export class EnvironmentSecretResolver {
+export class EnvironmentSecretResolver implements SecretResolver {
   readonly #source: SecretSource
   readonly #allowedSourceNames: ReadonlySet<string>
   readonly #allowedOwnerIds: ReadonlySet<string>
@@ -102,7 +131,13 @@ export class EnvironmentSecretResolver {
     }
   }
 
-  resolve(references: SecretReferences, scope: SecretAccessScope): SecretEnvironment {
+  resolve(references: SecretReferences, scope: SecretResolutionScope): ResolvedSecretMaterial {
+    if (scope.resourceId.length === 0) {
+      throw new SecretResolutionError(
+        "SECRET_SCOPE_NOT_ALLOWED",
+        "Secret resolution requires a durable resource identity",
+      )
+    }
     const environment: Record<string, string> = Object.create(null)
     const values: string[] = []
 
@@ -128,14 +163,14 @@ export class EnvironmentSecretResolver {
     }
 
     const redactor = new SecretRedactor(values)
-    let disposed = false
+    let released = false
 
     return {
       environment,
       redactor,
-      dispose() {
-        if (disposed) return
-        disposed = true
+      release() {
+        if (released) return
+        released = true
 
         for (const target of Object.keys(environment)) {
           environment[target] = ""

@@ -296,9 +296,7 @@ describe("LocalRuntimeProvider", () => {
       cwd: relativePath("."),
     })
 
-    const iterator = provider.events(process, null)[Symbol.asyncIterator]()
-    const grandchildPid = Number((await iterator.next()).value?.data.trim())
-    expect(Number.isSafeInteger(grandchildPid)).toBeTrue()
+    const grandchildPid = await requireProcessPid(provider.events(process, null))
 
     await provider.stop(runtime)
     expect(await provider.wait(process)).toMatchObject({ signal: "SIGKILL", reason: "signaled" })
@@ -310,24 +308,41 @@ describe("LocalRuntimeProvider", () => {
     expect(await processDisappeared(grandchildPid)).toBeTrue()
   })
 
-  test("hard timeout reaps descendants that ignore graceful process lifetime", async () => {
+  test("SIGKILL terminates a ready process group exactly once", async () => {
     const provider = await localProvider()
-    const runtime = await provider.create({ runtimeId: "run-process-group-timeout" })
+    const runtime = await provider.create({ runtimeId: "run-process-group-kill" })
     await provider.start(runtime)
     const process = await provider.spawn(runtime, {
-      processId: "process-group-timeout",
+      processId: "process-group-kill",
       argv: [globalThis.process.execPath, "-e", processTreeSource()],
       cwd: relativePath("."),
-      timeoutMs: 25,
-      terminationGraceMs: 25,
     })
 
-    const grandchildPid = Number(
-      (await provider.events(process, null)[Symbol.asyncIterator]().next()).value?.data.trim(),
-    )
-    expect(await provider.wait(process)).toMatchObject({ signal: "SIGKILL", reason: "timed_out" })
+    const grandchildPid = await requireProcessPid(provider.events(process, null))
+    await provider.signal(process, "SIGKILL")
+    expect(await provider.wait(process)).toMatchObject({ signal: "SIGKILL", reason: "signaled" })
     expect(await processDisappeared(grandchildPid)).toBeTrue()
   })
+
+  test("hard timeout reaps descendants after explicit child-ready evidence", async () => {
+    const provider = await localProvider()
+    const runtime = await provider.create({ runtimeId: "run-ready-process-group-timeout" })
+    await provider.start(runtime)
+    const process = await provider.spawn(runtime, {
+      processId: "ready-process-group-timeout",
+      argv: [globalThis.process.execPath, "-e", processTreeSource()],
+      cwd: relativePath("."),
+      timeoutMs: 5_000,
+      terminationGraceMs: 100,
+    })
+
+    const grandchildPid = await requireProcessPid(provider.events(process, null))
+    expect(await provider.wait(process)).toMatchObject({
+      signal: "SIGKILL",
+      reason: "timed_out",
+    })
+    expect(await processDisappeared(grandchildPid)).toBeTrue()
+  }, 10_000)
 
   test("wrong-provider handles and unsafe paths fail with safe provider errors", async () => {
     const provider = await localProvider()
@@ -365,6 +380,9 @@ function processTreeSource(): string {
 }
 
 async function processDisappeared(pid: number): Promise<boolean> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new TypeError("Process identifier must be a positive safe integer")
+  }
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       globalThis.process.kill(pid, 0)
@@ -375,4 +393,16 @@ async function processDisappeared(pid: number): Promise<boolean> {
     await Bun.sleep(5)
   }
   return false
+}
+
+async function requireProcessPid(
+  events: AsyncIterable<{ readonly data: string }>,
+): Promise<number> {
+  const first = await events[Symbol.asyncIterator]().next()
+  if (first.done) throw new Error("Process exited before publishing its child-ready event")
+  const pid = Number(first.value.data.trim())
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error("Child-ready event did not contain a positive process identifier")
+  }
+  return pid
 }

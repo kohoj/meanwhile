@@ -15,10 +15,12 @@ import {
   errorResponses,
   IdParamSchema,
   jsonResponse,
+  RequiredIdempotencyHeaderSchema,
 } from "./schemas"
 
 interface CreateDeploymentCommand {
   readonly ownerId: string
+  readonly idempotencyKey: string
   readonly runId: string
   readonly source:
     | { readonly artifactPath: string; readonly workspacePath?: never }
@@ -45,7 +47,9 @@ interface DeploymentLogPage {
 }
 
 export interface DeploymentApi {
-  create(input: CreateDeploymentCommand): Promise<Deployment>
+  create(
+    input: CreateDeploymentCommand,
+  ): Promise<{ readonly deployment: Deployment; readonly replayed: boolean }>
   list(
     ownerId: string,
     options: { limit: number; before?: string },
@@ -70,12 +74,14 @@ const createDeploymentRoute = createRoute({
   tags: ["Deployments"],
   summary: "Deploy immutable output from a run",
   request: {
+    headers: RequiredIdempotencyHeaderSchema,
     body: {
       required: true,
       content: { "application/json": { schema: CreateDeploymentRequestSchema } },
     },
   },
   responses: {
+    200: jsonResponse(DeploymentResponseSchema, "Existing deployment returned"),
     202: jsonResponse(DeploymentResponseSchema, "Deployment queued"),
     ...errorResponses,
   },
@@ -129,10 +135,12 @@ export const createDeploymentRoutes = (
   routes.openapi(createDeploymentRoute, async (context) => {
     const request = context.get("requestContext")
     const input = context.req.valid("json")
+    const headers = context.req.valid("header")
     const source = sourceSelector(input)
-    const deployment = await mapDeploymentErrors(() =>
+    const result = await mapDeploymentErrors(() =>
       service.create({
         ownerId: request.ownerId,
+        idempotencyKey: headers["idempotency-key"],
         runId: input.runId,
         source,
         targetName: input.deployTarget,
@@ -143,8 +151,11 @@ export const createDeploymentRoutes = (
         actorApiKeyId: request.apiKeyId,
       }),
     )
-    commands.enqueue(deployment.id)
-    return context.json(DeploymentResponseSchema.parse({ deployment }), 202)
+    if (!result.replayed) commands.enqueue(result.deployment.id)
+    return context.json(
+      DeploymentResponseSchema.parse({ deployment: result.deployment }),
+      result.replayed ? 200 : 202,
+    )
   })
 
   routes.openapi(listDeploymentsRoute, async (context) => {

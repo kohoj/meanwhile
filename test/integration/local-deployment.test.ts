@@ -80,18 +80,19 @@ describe("durable local deployment", () => {
     const firstExecutor = executor(store, artifactStore, adapters, clock)
     const queued = await firstExecutor.create({
       ownerId: "owner-a",
+      idempotencyKey: "deployment-request-a",
       runId: "run-a",
       source: { artifactPath: "dist" },
       targetName: "local-static",
       targetConfig: {},
       requestId: "request-create",
     })
-    expect(queued.status).toBe("queued")
+    expect(queued.deployment.status).toBe("queued")
 
     const startedAt = clock().toISOString()
     const running = required(
       store.transitionDeployment({
-        deploymentId: queued.id,
+        deploymentId: queued.deployment.id,
         fromStatus: "queued",
         toStatus: "running",
         at: startedAt,
@@ -101,7 +102,7 @@ describe("durable local deployment", () => {
           actorApiKeyId: null,
           action: "deployment.start",
           resourceType: "deployment",
-          resourceId: queued.id,
+          resourceId: queued.deployment.id,
           requestId: "request-start-before-crash",
           traceId: null,
           metadata: { target: "local-static" },
@@ -151,7 +152,7 @@ describe("durable local deployment", () => {
     await dispatcher.drain()
     await dispatcher.stop()
 
-    const deployed = await restartedExecutor.get("owner-a", queued.id)
+    const deployed = await restartedExecutor.get("owner-a", queued.deployment.id)
 
     expect(deployed.status).toBe("succeeded")
     const deploymentUrl = required(deployed.url)

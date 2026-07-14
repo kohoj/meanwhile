@@ -9,15 +9,15 @@ import {
   type WorkspaceSource,
 } from "../domain"
 import { AppError } from "../errors"
+import { hashCanonical } from "../idempotency"
 import type { Store } from "../persistence/store"
 import type { SecretReferenceValidator } from "../secrets"
-import {
-  hashCanonical,
-  type RunAgentIntentResolver,
-  type RunExecutionProvenance,
-  type RunProviderNames,
-  type UploadedFilesWorkspaceSource,
-  type WorkspaceInputStore,
+import type {
+  RunAgentIntentResolver,
+  RunExecutionProvenance,
+  RunProviderNames,
+  UploadedFilesWorkspaceSource,
+  WorkspaceInputStore,
 } from "./run-service"
 
 export interface CreateSessionCommand {
