@@ -56,6 +56,7 @@ describe("durable local deployment", () => {
       ownerId: "owner-a",
       runId: "run-a",
       declaredPaths: ["dist"],
+      signal: new AbortController().signal,
       workspace: workspace(
         [
           { path: "dist", type: "directory", size: 0 },
@@ -132,7 +133,8 @@ describe("durable local deployment", () => {
 
     const restartedServer = new LocalStaticServer({ root: join(root, "previews") })
     disposals.push(() => restartedServer.stop())
-    const restartedAdapters = new DeployAdapterRegistry([new LocalStaticAdapter(restartedServer)])
+    const restartedAdapter = new LocalStaticAdapter(restartedServer)
+    const restartedAdapters = new DeployAdapterRegistry([restartedAdapter])
     const restartedExecutor = executor(store, artifactStore, restartedAdapters, clock)
     const dispatcher = new DeploymentDispatcher({
       store,
@@ -171,6 +173,27 @@ describe("durable local deployment", () => {
     await expect(restartedExecutor.get("owner-b", deployed.id)).rejects.toMatchObject({
       code: "DEPLOYMENT_NOT_FOUND",
     })
+
+    await Bun.write(
+      join(root, "previews", deployed.id, "public", "index.html"),
+      "<h1>Tampered</h1>",
+    )
+    const sourceAfterTamper = await new StoreDeploymentSourceResolver(store, artifactStore).open({
+      ownerId: deployed.ownerId,
+      runId: deployed.runId,
+      artifactId: deployed.artifactId,
+    })
+    await expect(
+      restartedAdapter.deploy(
+        {
+          deploymentId: deployed.id,
+          source: sourceAfterTamper,
+          target: { name: deployed.target, config: deployed.targetConfig },
+          secrets: {},
+        },
+        { signal: new AbortController().signal, async emit() {} },
+      ),
+    ).rejects.toMatchObject({ code: "DEPLOYMENT_TARGET_FAILED" })
   })
 })
 
@@ -209,37 +232,70 @@ function createSucceededRun(store: Store): void {
     createdAt: "2026-01-01T00:00:01.000Z",
     audit: audit("run-create"),
   }).run
-  const provisioning = required(
-    store.transitionRun({
+  const provisioningAt = "2026-01-01T00:00:02.000Z"
+  required(
+    store.claimRunProvisioning({
       runId: created.id,
-      expectedStatus: "queued",
       expectedVersion: created.statusVersion,
-      toStatus: "provisioning",
-      reason: "test.provision",
-      at: "2026-01-01T00:00:02.000Z",
+      at: provisioningAt,
+      deadlineAt: "2026-01-01T00:01:02.000Z",
       audit: { ...audit("run-provision"), action: "run.provision" },
+      systemLog: { eventType: "run.provisioning", data: "Provisioning runtime" },
     }),
   )
-  const running = required(
-    store.transitionRun({
-      runId: created.id,
-      expectedStatus: "provisioning",
-      expectedVersion: provisioning.statusVersion,
-      toStatus: "running",
-      reason: "test.running",
-      at: "2026-01-01T00:00:03.000Z",
-      audit: { ...audit("run-running"), action: "agent.start" },
-    }),
-  )
-  store.transitionRun({
+  const runnerSessionId = `runner-${created.id}`
+  store.createRunnerSession({
     runId: created.id,
-    expectedStatus: "running",
-    expectedVersion: running.statusVersion,
-    toStatus: "succeeded",
-    reason: "test.succeeded",
-    at: "2026-01-01T00:00:04.000Z",
-    audit: { ...audit("run-succeed"), action: "run.succeed" },
+    ownerId: created.ownerId,
+    runnerSessionId,
+    protocolVersion: 1,
+    createdAt: provisioningAt,
   })
+  const runningAt = "2026-01-01T00:00:03.000Z"
+  store.acceptRunnerFrame({
+    ownerId: created.ownerId,
+    runId: created.id,
+    runnerSessionId,
+    protocolVersion: 1,
+    providerCursor: "cursor-1",
+    runnerSequence: 1,
+    stream: "agent",
+    eventType: "session.started",
+    data: JSON.stringify({ sessionId: "seed-session" }),
+    createdAt: runningAt,
+    runningTransition: {
+      at: runningAt,
+      reason: "agent.session_started",
+      audit: { ...audit("run-running"), action: "agent.start" },
+      systemLog: { eventType: "run.running", data: "Agent session started" },
+    },
+  })
+  const terminal = { outcome: "succeeded", stopReason: "end_turn" } as const
+  const terminalAt = "2026-01-01T00:00:04.000Z"
+  store.acceptRunnerFrame({
+    ownerId: created.ownerId,
+    runId: created.id,
+    runnerSessionId,
+    protocolVersion: 1,
+    providerCursor: "cursor-2",
+    runnerSequence: 2,
+    stream: "agent",
+    eventType: "terminal",
+    data: JSON.stringify(terminal),
+    terminalResult: terminal,
+    createdAt: terminalAt,
+  })
+  const outcome = store.claimRunOutcome({
+    kind: "runner",
+    ownerId: created.ownerId,
+    runId: created.id,
+    status: "succeeded",
+    terminalResult: terminal,
+    at: terminalAt,
+    systemLog: { eventType: "run.succeeded", data: "Run succeeded" },
+    resultAudit: { ...audit("run-succeed"), action: "run.succeeded" },
+  })
+  if (outcome?.outcome !== "claimed") throw new Error("run outcome was not claimed")
 }
 
 function audit(requestId: string) {

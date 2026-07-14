@@ -499,6 +499,11 @@ const METRIC_DEFINITIONS = {
     unit: "1",
     description: "Runtime cleanup lifecycle events.",
   },
+  "meanwhile.runtime.provisioning_reconciliation.events": {
+    kind: "counter",
+    unit: "1",
+    description: "Interrupted runtime-provisioning reconciliation events.",
+  },
   "meanwhile.deployment.outcomes": {
     kind: "counter",
     unit: "1",
@@ -538,6 +543,11 @@ const METRIC_DEFINITIONS = {
     kind: "histogram",
     unit: "ms",
     description: "Runtime destruction attempt latency.",
+  },
+  "meanwhile.runtime.provisioning_reconciliation.duration": {
+    kind: "histogram",
+    unit: "ms",
+    description: "Interrupted runtime-provisioning reconciliation latency.",
   },
   "meanwhile.deployment.duration": {
     kind: "histogram",

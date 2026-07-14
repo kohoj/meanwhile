@@ -71,13 +71,13 @@ Set restrictive filesystem ownership for the service account. The control plane 
 The startup order is:
 
 1. validate environment configuration and initialize telemetry before application composition;
-2. create the data root, acquire its exclusive lease, open SQLite, and apply transactional migrations;
+2. create the data root, acquire its exclusive lease, open SQLite, and initialize or verify the exact current schema;
 3. bootstrap the optional local identity and validate the agent catalog;
 4. compose provider, artifact, and deployment registries and require the configured default provider to exist;
 5. start reconciliation, execution, deployment, and cleanup supervisors;
 6. bind the Bun HTTP server and expose readiness.
 
-Invalid configuration, data-root ownership, migration/schema state, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment and resumes automatically when persisted successful previews exist. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
+Invalid configuration, data-root ownership, schema identity, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment and resumes automatically when persisted successful previews exist. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
 
 Development target:
 
@@ -133,7 +133,7 @@ The existing public run status remains authoritative while reconciliation is unc
 
 `/readyz` gates admission on control-plane supervisor availability and reports telemetry health without making optional exporter health authoritative. Configuration, schema, catalog, registry, and default-provider failures prevent startup. Runner binaries, agent executables, storage writability, and provider reachability belong to the deeper `doctor` diagnostic rather than a per-request dependency probe.
 
-`doctor` validates environment configuration, data-directory/SQLite writability and migrations, the strict agent catalog, locally admitted agent executables, the standalone runner, configured provider health, default-provider registration, the local-static target, and optionally a configured control plane's readiness. It does not resolve a remote runtime's executables on the control-plane host. Cloudflare bridge health is included when that provider is configured. It is diagnostic, not a substitute for the provider image checks and live proof.
+`doctor` validates environment configuration, data-directory/SQLite writability and exact schema identity, the strict agent catalog, locally admitted agent executables, the standalone runner, configured provider health, default-provider registration, the local-static target, and optionally a configured control plane's readiness. It does not resolve a remote runtime's executables on the control-plane host. Cloudflare bridge health is included when that provider is configured. It is diagnostic, not a substitute for the provider image checks and live proof.
 
 ## Telemetry
 
@@ -153,25 +153,24 @@ Metric labels are bounded: provider, agent, operation, status, and stable error 
 
 OTLP export is optional and must remain disabled until the pinned OTel base SDK and exporter pass `test/contracts/telemetry.test.ts` under Bun. An exporter outage is visible locally and in health diagnostics but cannot block state transactions or change a run result.
 
-## Database migrations
+## Database schema
 
-Migrations are ordered, immutable after release, and applied in a transaction before readiness. A migration records its identity only after the schema change commits.
+Meanwhile owns one current schema. An empty database is initialized statement-by-statement in one transaction and receives the exact source fingerprint only after every statement succeeds. A nonempty database must already contain that exact identity or startup fails without modifying it. The initializer deliberately avoids Bun's multi-statement `Database.exec()` path because it does not reliably surface every statement-level failure.
 
 Rules:
 
-- never edit an already released migration;
+- edit the current schema directly and treat a fingerprint change as a fresh-data-root boundary;
 - make constraints and indexes explicit;
 - preserve owner scoping and append-only evidence;
-- backfill deterministically before enforcing a new constraint;
-- do not hide state transitions in migration-side application code;
-- test a fresh database and an upgrade from every supported release fixture;
-- record compatibility impact in `CHANGELOG.md`.
+- never add database upgrade, backfill, repair, or dual-read code;
+- test fresh initialization, atomic failure, fingerprint drift, and rejection of every foreign or partial database;
+- record the fresh-root requirement in `CHANGELOG.md`.
 
-A failed migration halts startup. Operators restore from backup or deploy a corrected forward migration; the service must not guess.
+A changed schema requires a new empty data root. Durable product data may move only through an explicit, separately designed export/import boundary; the service never guesses how database rows should be rewritten.
 
 ## Backup and restore
 
-A valid backup contains SQLite, every referenced workspace/artifact object, persisted local-static preview bytes, migration identities, service/Bun versions, and per-file hashes from one quiescent point.
+A valid backup contains SQLite, every referenced workspace/artifact object, exactly the local-static preview bytes referenced by successful deployment rows, the exact schema identity, service/Bun versions, and per-file hashes from one quiescent point.
 
 Stop the service, then use the maintenance boundary:
 
@@ -180,7 +179,7 @@ bun run cli -- data backup --output /backups/meanwhile-2026-07-14
 bun run cli -- data verify /backups/meanwhile-2026-07-14
 ```
 
-The adjacent data-root lease rejects the command if a control plane or another maintenance process is active. Backup also rejects queued/provisioning/running runs, operational agent sessions, or in-progress deployment/cleanup work. It serializes SQLite into a standalone non-WAL snapshot, walks the referenced immutable object graph, copies previews, hashes every file, and atomically publishes the manifest. Physical paths are canonicalized, so the output must be outside the live root even through symlink aliases.
+The adjacent data-root lease rejects the command if a control plane or another maintenance process is active. Backup also rejects queued/provisioning/running runs, operational agent sessions, or in-progress deployment/cleanup work. It serializes SQLite into a standalone non-WAL snapshot, walks the referenced immutable object graph, derives preview reachability from that snapshot, and verifies each publication against its immutable artifact before copying. Missing, extra, linked, orphan, or digest-mismatched preview files fail the operation. Physical paths are canonicalized, so the output must be outside the live root even through symlink aliases.
 
 Restore only into an absent or empty configured data root:
 
@@ -189,7 +188,7 @@ MEANWHILE_DATA_DIR=/srv/meanwhile-restored \
   bun run cli -- data restore /backups/meanwhile-2026-07-14
 ```
 
-Restore verifies before writing, stages the complete root, creates an empty disposable-runtime directory, reopens the database read-only, and publishes by rename. Then run `doctor`, start the service, confirm migrations and cleanup state, and exercise owner-scoped artifact/audit reads before admitting traffic.
+Restore verifies before writing, stages the complete root, creates an empty disposable-runtime directory, reopens the database read-only, and publishes by rename. Then run `doctor`, start the service, confirm schema identity and cleanup state, and exercise owner-scoped artifact/audit reads before admitting traffic.
 
 Ordinary copying of a live SQLite file is unsupported because it can omit WAL state and immutable bytes. Test restoration periodically; an unverified archive is not a backup strategy.
 
@@ -317,7 +316,7 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 
 ## Production readiness checklist
 
-- [ ] Exact release revision and migration level are recorded.
+- [ ] Exact release revision and schema fingerprint are recorded.
 - [ ] Full deterministic test suite passes under the supported Bun version.
 - [ ] `doctor` passes with production configuration.
 - [ ] API keys are provisioned through the persistent hashed-key lifecycle; bootstrap key is disabled.

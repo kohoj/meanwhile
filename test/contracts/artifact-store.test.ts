@@ -26,6 +26,7 @@ interface ArtifactStoreHarness {
 }
 
 const roots: string[] = []
+const TEST_SIGNAL = new AbortController().signal
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -133,12 +134,14 @@ describe("artifact collector", () => {
       ownerId: "owner-a",
       runId: "run-a",
       declaredPaths: ["dist"],
+      signal: TEST_SIGNAL,
       workspace,
     })
     const [second] = await collector.collect({
       ownerId: "owner-a",
       runId: "run-a",
       declaredPaths: ["dist"],
+      signal: TEST_SIGNAL,
       workspace,
     })
 
@@ -181,6 +184,7 @@ describe("artifact collector", () => {
         ownerId: "owner-a",
         runId: "run-a",
         declaredPaths: ["dist"],
+        signal: TEST_SIGNAL,
         workspace,
       }),
     ).rejects.toBeInstanceOf(ArtifactCollectionError)
@@ -189,6 +193,7 @@ describe("artifact collector", () => {
         ownerId: "owner-a",
         runId: "run-a",
         declaredPaths: ["dist"],
+        signal: TEST_SIGNAL,
         workspace,
       }),
     ).rejects.toMatchObject({ code: "ARTIFACT_SYMLINK_REJECTED" })
@@ -211,6 +216,7 @@ describe("artifact collector", () => {
         ownerId: "owner-a",
         runId: "run-a",
         declaredPaths: ["leak.txt"],
+        signal: TEST_SIGNAL,
         workspace,
       }),
     ).rejects.toMatchObject({
@@ -234,6 +240,7 @@ describe("artifact collector", () => {
         ownerId: "owner-a",
         runId: "run-a",
         declaredPaths: [secret],
+        signal: TEST_SIGNAL,
         workspace: memoryWorkspace([{ path: secret, type: "file", size: 1 }], { [secret]: "x" }),
       })
     } catch (error) {
@@ -256,6 +263,7 @@ describe("artifact collector", () => {
         ownerId: "owner-a",
         runId: "run-a",
         declaredPaths: ["dist"],
+        signal: TEST_SIGNAL,
         workspace: memoryWorkspace(
           [
             { path: "dist", type: "directory", size: 0 },
@@ -300,6 +308,7 @@ describe("artifact collector", () => {
         ownerId: "owner-a",
         runId: "run-a",
         declaredPaths: ["dist"],
+        signal: TEST_SIGNAL,
         workspace,
       }),
     ).rejects.toMatchObject({ code: "ARTIFACT_LIMIT_EXCEEDED" })

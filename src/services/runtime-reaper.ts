@@ -1,5 +1,12 @@
 import type { ComponentHealth, ManagedComponent } from "../control-plane"
-import type { AuditRecord, JsonObject, RuntimeInstance, StructuredError } from "../domain"
+import type {
+  AuditRecord,
+  JsonObject,
+  RuntimeInstance,
+  RuntimeProvisioningIntent,
+  StructuredError,
+} from "../domain"
+import { normalizeError } from "../errors"
 import type { Store } from "../persistence/store"
 import { observeRuntimeProvider } from "../providers/observed-provider"
 import type { RuntimeProviderRegistry } from "../providers/registry"
@@ -48,8 +55,48 @@ export type RuntimeCleanupEvent =
       readonly at: string
     }
 
+export type RuntimeProvisioningReconciliationEvent =
+  | {
+      readonly type: "runtime.provisioning.reconcile_started"
+      readonly runtimeId: string
+      readonly runId: string
+      readonly ownerId: string
+      readonly provider: string
+      readonly attempt: number
+      readonly at: string
+    }
+  | {
+      readonly type: "runtime.provisioning.reconciled"
+      readonly runtimeId: string
+      readonly runId: string
+      readonly ownerId: string
+      readonly provider: string
+      readonly attempt: number
+      readonly durationMs: number
+      readonly at: string
+    }
+  | {
+      readonly type: "runtime.provisioning.reconcile_failed"
+      readonly runtimeId: string
+      readonly runId: string
+      readonly ownerId: string
+      readonly provider: string
+      readonly attempt: number
+      readonly durationMs: number
+      readonly errorCode: string
+      readonly exhausted: boolean
+      readonly nextAttemptAt: string | null
+      readonly at: string
+    }
+
+export type RuntimeReaperEvent = RuntimeCleanupEvent | RuntimeProvisioningReconciliationEvent
+
 export interface RuntimeReaperReport {
   readonly recoveredInterrupted: number
+  readonly provisioningEligible: number
+  readonly provisioningMaterialized: number
+  readonly provisioningFailed: number
+  readonly provisioningExhausted: number
   readonly eligible: number
   readonly claimed: number
   readonly skippedClaims: number
@@ -66,12 +113,16 @@ export interface RuntimeReaperOptions {
   readonly backoffMs?: readonly number[]
   readonly clock?: () => Date
   readonly createId?: () => string
-  readonly observe?: (event: RuntimeCleanupEvent) => void
+  readonly observe?: (event: RuntimeReaperEvent) => void
   readonly telemetry?: Telemetry
 }
 
 interface MutableReport {
   recoveredInterrupted: number
+  provisioningEligible: number
+  provisioningMaterialized: number
+  provisioningFailed: number
+  provisioningExhausted: number
   eligible: number
   claimed: number
   skippedClaims: number
@@ -100,7 +151,7 @@ export class RuntimeReaper {
   readonly #backoffMs: readonly number[]
   readonly #clock: () => Date
   readonly #createId: () => string
-  readonly #observe: ((event: RuntimeCleanupEvent) => void) | undefined
+  readonly #observe: ((event: RuntimeReaperEvent) => void) | undefined
   readonly #telemetry: Telemetry | undefined
   #reconciled = false
 
@@ -126,14 +177,13 @@ export class RuntimeReaper {
   async runOnce(): Promise<RuntimeReaperReport> {
     const recoveredInterrupted = this.reconcileInterrupted()
     const eligibleAt = this.#now()
-    const candidates = this.#store.listCleanupEligible(
-      eligibleAt.toISOString(),
-      this.#batchSize,
-      this.maxAttempts,
-    )
     const report: MutableReport = {
       recoveredInterrupted,
-      eligible: candidates.length,
+      provisioningEligible: 0,
+      provisioningMaterialized: 0,
+      provisioningFailed: 0,
+      provisioningExhausted: 0,
+      eligible: 0,
       claimed: 0,
       skippedClaims: 0,
       succeeded: 0,
@@ -141,6 +191,21 @@ export class RuntimeReaper {
       exhausted: 0,
       observerFailures: 0,
     }
+
+    const provisioningIntents = this.#store.listTerminalRuntimeProvisioningIntents(
+      eligibleAt.toISOString(),
+      this.#batchSize,
+      this.maxAttempts,
+    )
+    report.provisioningEligible = provisioningIntents.length
+    await this.#reconcileProvisioning(provisioningIntents, report)
+
+    const candidates = this.#store.listCleanupEligible(
+      this.#now().toISOString(),
+      this.#batchSize,
+      this.maxAttempts,
+    )
+    report.eligible = candidates.length
 
     for (const runtime of candidates) {
       const startedAt = this.#now()
@@ -259,6 +324,173 @@ export class RuntimeReaper {
     return Object.freeze({ ...report })
   }
 
+  async #reconcileProvisioning(
+    intents: readonly RuntimeProvisioningIntent[],
+    report: MutableReport,
+  ): Promise<void> {
+    for (const intent of intents) {
+      const startedAt = this.#now()
+      const claimed = this.#store.claimRuntimeProvisioning(
+        intent.runtimeId,
+        startedAt.toISOString(),
+        "terminal",
+      )
+      if (claimed === null) continue
+
+      this.#emit(
+        {
+          type: "runtime.provisioning.reconcile_started",
+          runtimeId: claimed.runtimeId,
+          runId: claimed.runId,
+          ownerId: claimed.ownerId,
+          provider: claimed.provider,
+          attempt: claimed.attempts,
+          at: startedAt.toISOString(),
+        },
+        report,
+      )
+
+      const requestId = `provisioning-reconcile:${this.#createId()}`
+      try {
+        const created = await this.#createForReconciliation(claimed, requestId)
+        const finishedAt = this.#now()
+        const runtime: RuntimeInstance = {
+          id: claimed.runtimeId,
+          ownerId: claimed.ownerId,
+          runId: claimed.runId,
+          provider: claimed.provider,
+          handle: jsonObject(created.runtime),
+          processHandle: null,
+          cleanupStatus: "pending",
+          cleanupAttempts: 0,
+          cleanupLastError: null,
+          cleanupNextAttemptAt: finishedAt.toISOString(),
+          createdAt: finishedAt.toISOString(),
+          updatedAt: finishedAt.toISOString(),
+          destroyedAt: null,
+        }
+        this.#store.materializeRuntimeProvisioning(
+          runtime,
+          runtimeProvisioningAudit({
+            id: this.#createId(),
+            requestId,
+            traceId: created.traceId,
+            intent: claimed,
+            outcome: "materialized",
+            at: finishedAt.toISOString(),
+          }),
+        )
+        report.provisioningMaterialized += 1
+        this.#emit(
+          {
+            type: "runtime.provisioning.reconciled",
+            runtimeId: claimed.runtimeId,
+            runId: claimed.runId,
+            ownerId: claimed.ownerId,
+            provider: claimed.provider,
+            attempt: claimed.attempts,
+            durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+            at: finishedAt.toISOString(),
+          },
+          report,
+        )
+      } catch (error) {
+        const finishedAt = this.#now()
+        const normalized = normalizeError(error)
+        const nextDelayMs = this.#backoffMs[claimed.attempts - 1]
+        // A failed create response cannot prove that allocation did not occur.
+        // Exact-id retries are therefore bounded by policy even when the
+        // provider classifies the original request as non-retryable.
+        const canRetry = nextDelayMs !== undefined
+        const nextAttemptAt = canRetry
+          ? new Date(finishedAt.getTime() + nextDelayMs).toISOString()
+          : null
+        const persistedError: StructuredError = {
+          ...normalized.toStructuredError(),
+          retryable: canRetry,
+          details: {
+            ...normalized.details,
+            providerRetryable: normalized.retryable,
+          },
+        }
+        this.#store.failRuntimeProvisioning({
+          runtimeId: claimed.runtimeId,
+          error: persistedError,
+          at: finishedAt.toISOString(),
+          nextAttemptAt,
+          audit: runtimeProvisioningAudit({
+            id: this.#createId(),
+            requestId,
+            traceId: null,
+            intent: claimed,
+            outcome: "failed",
+            errorCode: persistedError.code,
+            exhausted: !canRetry,
+            nextAttemptAt,
+            at: finishedAt.toISOString(),
+          }),
+        })
+        report.provisioningFailed += 1
+        if (!canRetry) report.provisioningExhausted += 1
+        this.#emit(
+          {
+            type: "runtime.provisioning.reconcile_failed",
+            runtimeId: claimed.runtimeId,
+            runId: claimed.runId,
+            ownerId: claimed.ownerId,
+            provider: claimed.provider,
+            attempt: claimed.attempts,
+            durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+            errorCode: persistedError.code,
+            exhausted: !canRetry,
+            nextAttemptAt,
+            at: finishedAt.toISOString(),
+          },
+          report,
+        )
+      }
+    }
+  }
+
+  async #createForReconciliation(
+    intent: RuntimeProvisioningIntent,
+    requestId: string,
+  ): Promise<{ readonly runtime: RuntimeHandle; readonly traceId: string | null }> {
+    if (this.#telemetry === undefined) {
+      return {
+        runtime: await this.#providers.get(intent.provider).create({
+          runtimeId: intent.runtimeId,
+        }),
+        traceId: null,
+      }
+    }
+
+    return this.#telemetry.span(
+      "meanwhile.runtime.provisioning.reconcile",
+      {
+        "runtime.id": intent.runtimeId,
+        "run.id": intent.runId,
+        "provider.name": intent.provider,
+      },
+      async (span) => {
+        const provider = observeRuntimeProvider(
+          this.#providers.get(intent.provider),
+          span.child({
+            requestId,
+            ownerId: intent.ownerId,
+            runId: intent.runId,
+            runtimeId: intent.runtimeId,
+          }),
+          { runId: intent.runId, runtimeId: intent.runtimeId },
+          () => this.#clock().getTime(),
+        )
+        const runtime = await provider.create({ runtimeId: intent.runtimeId })
+        span.setOutcome("succeeded")
+        return { runtime, traceId: span.traceId }
+      },
+    )
+  }
+
   async #destroy(
     runtime: RuntimeInstance,
     requestId: string,
@@ -316,7 +548,10 @@ export class RuntimeReaper {
    */
   reconcileInterrupted(): number {
     if (this.#reconciled) return 0
-    const recovered = this.#store.recoverInterruptedRuntimeCleanups(this.#now().toISOString())
+    const at = this.#now().toISOString()
+    const recovered =
+      this.#store.recoverInterruptedRuntimeCleanups(at) +
+      this.#store.recoverInterruptedRuntimeProvisioning(at)
     this.#reconciled = true
     return recovered
   }
@@ -328,7 +563,7 @@ export class RuntimeReaper {
     return new Date(value.getTime())
   }
 
-  #emit(event: RuntimeCleanupEvent, report: MutableReport): void {
+  #emit(event: RuntimeReaperEvent, report: MutableReport): void {
     if (this.#observe === undefined) return
     try {
       this.#observe(event)
@@ -493,6 +728,43 @@ function cleanupAudit(input: {
     metadata,
     createdAt: input.at,
   }
+}
+
+function runtimeProvisioningAudit(input: {
+  readonly id: string
+  readonly requestId: string
+  readonly traceId: string | null
+  readonly intent: RuntimeProvisioningIntent
+  readonly outcome: "materialized" | "failed"
+  readonly at: string
+  readonly errorCode?: string
+  readonly exhausted?: boolean
+  readonly nextAttemptAt?: string | null
+}): AuditRecord {
+  return {
+    id: input.id,
+    ownerId: input.intent.ownerId,
+    actorApiKeyId: null,
+    action: "runtime.create_reconcile",
+    resourceType: "runtime",
+    resourceId: input.intent.runtimeId,
+    requestId: input.requestId,
+    traceId: input.traceId,
+    metadata: {
+      provider: input.intent.provider,
+      runId: input.intent.runId,
+      attempt: input.intent.attempts,
+      outcome: input.outcome,
+      ...(input.errorCode === undefined ? {} : { errorCode: input.errorCode }),
+      ...(input.exhausted === undefined ? {} : { exhausted: input.exhausted }),
+      ...(input.nextAttemptAt === undefined ? {} : { nextAttemptAt: input.nextAttemptAt }),
+    },
+    createdAt: input.at,
+  }
+}
+
+function jsonObject(value: object): JsonObject {
+  return JSON.parse(JSON.stringify(value)) as JsonObject
 }
 
 const stableCleanupTelemetryCode = (value: string): string =>

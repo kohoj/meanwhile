@@ -61,8 +61,8 @@ export async function issueApiKey(): Promise<IssuedApiKey> {
 
 /**
  * SHA-256 is appropriate here because API keys are uniformly random 256-bit
- * values, unlike human passwords. The versioned representation permits a
- * deliberate future migration.
+ * values, unlike human passwords. Its explicit representation keeps the
+ * persisted authentication contract unambiguous.
  */
 export async function hashApiKey(key: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))

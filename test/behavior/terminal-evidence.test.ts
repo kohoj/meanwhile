@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { RunnerFrame, RunnerTerminalPayload } from "../../runner/protocol"
-import { encodeRunnerFrame, RUNNER_PROTOCOL_VERSION } from "../../runner/protocol"
+import { RUNNER_PROTOCOL_VERSION } from "../../runner/protocol"
 import {
   type ConsumeRunnerInput,
   type RunnerConsumptionResult,
@@ -13,8 +13,13 @@ import {
 import { createRunRoutes } from "../../src/api/runs"
 import { createApiRouter } from "../../src/api/schemas"
 import { LocalArtifactStore } from "../../src/artifacts/local-artifact-store"
-import type { JsonObject, Run, RunStatus } from "../../src/domain"
-import { Store, type TransitionRunInput } from "../../src/persistence/store"
+import type { JsonObject, RequestContext, Run, RunStatus } from "../../src/domain"
+import {
+  type ClaimRunOutcomeInput,
+  type ClaimRunOutcomeResult,
+  type ClaimRunProvisioningInput,
+  Store,
+} from "../../src/persistence/store"
 import { RuntimeProviderRegistry } from "../../src/providers/registry"
 import {
   type ProcessEvent,
@@ -153,7 +158,7 @@ describe("durable runner terminal evidence", () => {
     expect(fixture.operationalLogs.join("\n")).not.toContain(secret)
   })
 
-  test("finalizes expired persisted evidence when its runtime is already missing", async () => {
+  test("fails closed on terminal evidence without its atomic reservation", async () => {
     const delegate = new MockRuntimeProvider()
     const provider = withRecovery(delegate, false)
     const fixture = await createFixture({ provider, runner: unreachableRunner() })
@@ -161,7 +166,7 @@ describe("durable runner terminal evidence", () => {
       fixture.store,
       {
         artifactPaths: ["dist"],
-        deadlineAt: "2000-01-01T00:00:00.000Z",
+        deadlineAt: future(),
         status: "running",
       },
       provider,
@@ -173,18 +178,9 @@ describe("durable runner terminal evidence", () => {
       agentExit: { exitCode: 41, signal: null },
     }
     seedTerminal(fixture.store, run, runtime, terminal)
-    fixture.store.appendRunLogNext({
-      ownerId: OWNER_ID,
-      runId: run.id,
-      stream: "system",
-      eventType: "terminal",
-      data: JSON.stringify(terminal),
-      runnerSessionId: `runner-${run.id}`,
-      runnerSequence: 2,
-      createdAt: now(),
-    })
-    // Crash window: the accepted, sanitized log committed before the session
-    // terminal update. Recovery must reconstruct the session evidence first.
+    // This split state cannot be produced by acceptRunnerFrame because its log
+    // and reservation commit in one transaction. Recovery fails closed on
+    // corrupted persistence instead of inventing state.
     fixture.store.database
       .query("UPDATE runner_sessions SET terminal_result_json = NULL WHERE run_id = ?")
       .run(run.id)
@@ -194,18 +190,14 @@ describe("durable runner terminal evidence", () => {
     await fixture.executor.start()
     const failed = await bounded(terminalReached)
 
-    expect(failed.error?.code).toBe("AGENT_EXITED")
-    expect(failed.error?.code).not.toBe("RUNTIME_LOST")
-    expect(failed.exitCode).toBe(41)
-    expect(
-      fixture.store
-        .listRunLogs(OWNER_ID, run.id, 0, 1_000)
-        .some((log) => log.eventType === "artifact.capture_unavailable"),
-    ).toBeTrue()
-    expect(delegate.operations.map((operation) => operation.operation)).toEqual(["inspect"])
+    expect(failed.error?.code).toBe("DATABASE_INTEGRITY_FAILED")
+    expect(failed.exitCode).toBeNull()
+    expect(fixture.store.getRunnerSession(run.id)?.terminalResult).toBeNull()
+    expect(fixture.store.listArtifacts(OWNER_ID, run.id)).toEqual([])
+    expect(delegate.operations).toEqual([])
   })
 
-  test("recovers session-start evidence and captures artifacts without process recovery", async () => {
+  test("recovers accepted terminal evidence and captures artifacts without process recovery", async () => {
     const delegate = new MockRuntimeProvider()
     const provider = withRecovery(delegate, false)
     const fixture = await createFixture({ provider, runner: unreachableRunner() })
@@ -213,21 +205,15 @@ describe("durable runner terminal evidence", () => {
       fixture.store,
       {
         artifactPaths: ["dist"],
-        deadlineAt: "2000-01-01T00:00:00.000Z",
-        status: "provisioning",
+        deadlineAt: future(),
+        status: "running",
       },
       provider,
     )
     const runtime = await seedRuntime(fixture.store, delegate, run, {
       files: [{ path: "dist/index.html", content: encoder.encode("<h1>recovered</h1>") }],
     })
-    seedTerminal(
-      fixture.store,
-      run,
-      runtime,
-      { outcome: "succeeded", stopReason: "end_turn" },
-      true,
-    )
+    seedTerminal(fixture.store, run, runtime, { outcome: "succeeded", stopReason: "end_turn" })
     delegate.operations.length = 0
     const terminalReached = Promise.race([
       fixture.store.observe(run.id, "succeeded"),
@@ -252,52 +238,104 @@ describe("durable runner terminal evidence", () => {
     expect(operations).not.toContain("wait")
   })
 
-  test("reconciles an accepted session start before waiting on a still-live process", async () => {
-    const provider = new MockRuntimeProvider()
-    const fixture = await createFixture({ provider })
-    const run = createRun(fixture.store, { status: "provisioning" }, provider)
-    const runtimeHandle = await provider.create({ runtimeId: `rt-${run.id}` })
-    await provider.start(runtimeHandle)
-    const process = await provider.spawn(runtimeHandle, {
-      processId: `runner-${run.id}`,
-      argv: ["meanwhile-runner"],
-      cwd: relativePath("."),
+  test("does not reactivate compute to capture artifacts after an accepted deadline", async () => {
+    const delegate = new MockRuntimeProvider()
+    const provider = withRecovery(delegate, false)
+    const fixture = await createFixture({ provider, runner: unreachableRunner() })
+    const run = createRun(
+      fixture.store,
+      {
+        artifactPaths: ["dist"],
+        deadlineAt: "2000-01-01T00:00:00.000Z",
+        status: "running",
+      },
+      provider,
+    )
+    const runtime = await seedRuntime(fixture.store, delegate, run, {
+      files: [{ path: "dist/index.html", content: encoder.encode("<h1>too late</h1>") }],
     })
-    const sessionFrame = frame(run.id, `runner-${run.id}`, 1, "session.started", {
-      sessionId: "accepted-before-crash",
-    })
-    provider.emit(process, "stdout", `${encodeRunnerFrame(sessionFrame)}\n`)
-    persistRuntime(fixture.store, run, runtimeHandle, process)
-    fixture.store.appendRunLogNext({
-      ownerId: OWNER_ID,
-      runId: run.id,
-      stream: "system",
-      eventType: "session.started",
-      data: JSON.stringify(sessionFrame.payload),
-      runnerSessionId: sessionFrame.runnerSessionId,
-      runnerSequence: sessionFrame.sequence,
-      createdAt: sessionFrame.timestamp,
-    })
-    fixture.store.upsertRunnerSession({
-      runId: run.id,
-      ownerId: OWNER_ID,
-      runnerSessionId: sessionFrame.runnerSessionId,
-      protocolVersion: RUNNER_PROTOCOL_VERSION,
-      providerCursor: "1",
-      runnerSequence: 1,
-      terminalResult: null,
-      createdAt: sessionFrame.timestamp,
-      updatedAt: sessionFrame.timestamp,
-    })
-    const runningReached = fixture.store.observe(run.id, "running")
+    seedTerminal(fixture.store, run, runtime, { outcome: "succeeded", stopReason: "end_turn" })
+    delegate.operations.length = 0
+    const succeeded = fixture.store.observe(run.id, "succeeded")
 
     await fixture.executor.start()
-    const running = await bounded(runningReached)
+    expect((await bounded(succeeded)).status).toBe("succeeded")
 
-    expect(running.status).toBe("running")
-    expect(fixture.store.listRunStatusEvents(OWNER_ID, run.id).at(-1)?.reason).toBe(
-      "agent.session_started",
+    expect(delegate.operations).toEqual([])
+    expect(fixture.store.listArtifacts(OWNER_ID, run.id)).toEqual([])
+    expect(
+      fixture.store
+        .listRunLogs(OWNER_ID, run.id, 0, 1_000)
+        .find((log) => log.eventType === "artifact.capture_failed")?.data,
+    ).toBe(JSON.stringify({ code: "ARTIFACT_CAPTURE_TIMED_OUT" }))
+  })
+
+  test("bounds artifact capture by the original run deadline after terminal reservation", async () => {
+    const delegate = new MockRuntimeProvider()
+    const blocked = withBlockedArtifactRead(delegate)
+    const fixture = await createFixture({
+      provider: blocked.provider,
+      runner: terminalRunner({ outcome: "succeeded", stopReason: "end_turn" }),
+      workspaceFiles: [{ path: "dist/index.html", content: encoder.encode("<h1>bounded</h1>") }],
+    })
+    const run = createRun(
+      fixture.store,
+      { artifactPaths: ["dist"], timeoutMs: 250 },
+      blocked.provider,
     )
+    const succeeded = fixture.store.observe(run.id, "succeeded")
+
+    await fixture.executor.start()
+    expect((await bounded(succeeded)).status).toBe("succeeded")
+
+    expect(blocked.aborted()).toBeTrue()
+    expect(fixture.store.listArtifacts(OWNER_ID, run.id)).toEqual([])
+    expect(
+      fixture.store
+        .listRunLogs(OWNER_ID, run.id, 0, 1_000)
+        .find((log) => log.eventType === "artifact.capture_failed")?.data,
+    ).toBe(JSON.stringify({ code: "ARTIFACT_CAPTURE_TIMED_OUT" }))
+  })
+
+  test("reuses the durable launch budget after a pre-handle spawn interruption", async () => {
+    const provider = new MockRuntimeProvider()
+    const timeoutBudgets: number[] = []
+    const delegate = terminalRunner({ outcome: "succeeded", stopReason: "end_turn" })
+    const runner: RunnerSessionController = {
+      async start(input) {
+        timeoutBudgets.push(input.timeoutMs)
+        return delegate.start(input)
+      },
+      consume: (input) => delegate.consume(input),
+      cancel: (provider, process) => delegate.cancel(provider, process),
+    }
+    const fixture = await createFixture({ provider, runner })
+    const run = createRun(fixture.store, { status: "provisioning" }, provider)
+    const runtime = await seedRuntime(fixture.store, provider, run, { persistProcess: false })
+    const processId = `runner-${run.id}`.slice(0, 128)
+    expect(
+      fixture.store.ensureRunProcessLaunchIntent({
+        runId: run.id,
+        ownerId: run.ownerId,
+        runtimeId: runtime.runtime.opaque,
+        processId,
+        timeoutBudgetMs: 55_000,
+        createdAt: now(),
+      })?.timeoutBudgetMs,
+    ).toBe(55_000)
+    const succeeded = fixture.store.observe(run.id, "succeeded")
+
+    await fixture.executor.start()
+    await bounded(succeeded)
+
+    expect(timeoutBudgets).toEqual([55_000])
+    expect(fixture.store.getRun(OWNER_ID, run.id)?.processId).toBe(processId)
+    expect(fixture.store.getRuntimeForRun(run.id)?.processHandle).not.toBeNull()
+    expect(
+      fixture.store
+        .listAudit(OWNER_ID, runtime.runtime.opaque)
+        .filter((record) => record.action === "runtime.process_start"),
+    ).toHaveLength(1)
   })
 
   test("normalizes a process lost between inspection and replay as RUNTIME_LOST", async () => {
@@ -306,17 +344,6 @@ describe("durable runner terminal evidence", () => {
     const fixture = await createFixture({ provider })
     const run = createRun(fixture.store, { status: "running" }, provider)
     const runtime = await seedRuntime(fixture.store, delegate, run)
-    fixture.store.upsertRunnerSession({
-      runId: run.id,
-      ownerId: OWNER_ID,
-      runnerSessionId: `runner-${run.id}`,
-      protocolVersion: RUNNER_PROTOCOL_VERSION,
-      providerCursor: null,
-      runnerSequence: 0,
-      terminalResult: null,
-      createdAt: now(),
-      updatedAt: now(),
-    })
     fixture.store.setRunRuntime({
       runId: run.id,
       runtimeId: runtime.runtime.opaque,
@@ -329,6 +356,65 @@ describe("durable runner terminal evidence", () => {
     const failed = await bounded(terminalReached)
 
     expect(failed.error).toMatchObject({ code: "RUNTIME_LOST", retryable: false })
+  })
+
+  test("lets accepted runner terminal evidence win a concurrent cancellation", async () => {
+    const provider = new MockRuntimeProvider()
+    const controlled = controlledTerminalRunner({ outcome: "succeeded", stopReason: "end_turn" })
+    const fixture = await createFixture({ provider, runner: controlled.controller })
+    const run = createRun(fixture.store, {}, provider)
+    const succeeded = fixture.store.observe(run.id, "succeeded")
+
+    try {
+      await fixture.executor.start()
+      await bounded(controlled.ready)
+      controlled.allowTerminal()
+      await bounded(controlled.terminalAccepted)
+
+      await fixture.executor.cancel({ runId: run.id, context: requestContext() })
+      expect(controlled.cancelCalls()).toBe(0)
+      controlled.allowCompletion()
+
+      expect((await bounded(succeeded)).status).toBe("succeeded")
+      expect(
+        fixture.store.listRunStatusEvents(OWNER_ID, run.id).map((event) => event.toStatus),
+      ).toEqual(["queued", "provisioning", "running", "succeeded"])
+    } finally {
+      controlled.allowTerminal()
+      controlled.allowCompletion()
+    }
+  })
+
+  test("keeps a runner terminal arriving after cancellation diagnostic-only", async () => {
+    const provider = new MockRuntimeProvider()
+    const controlled = controlledTerminalRunner({ outcome: "succeeded", stopReason: "end_turn" })
+    const fixture = await createFixture({ provider, runner: controlled.controller })
+    const run = createRun(fixture.store, {}, provider)
+    const cancelled = fixture.store.observe(run.id, "cancelled")
+
+    try {
+      await fixture.executor.start()
+      await bounded(controlled.ready)
+      await fixture.executor.cancel({ runId: run.id, context: requestContext() })
+      expect((await bounded(cancelled)).status).toBe("cancelled")
+      expect(controlled.cancelCalls()).toBe(1)
+
+      controlled.allowTerminal()
+      await bounded(controlled.terminalAccepted)
+      controlled.allowCompletion()
+      await Bun.sleep(0)
+
+      expect(fixture.store.getRunnerSession(run.id)?.terminalResult).toBeNull()
+      expect(
+        fixture.store
+          .listRunLogs(OWNER_ID, run.id, 0, 1_000)
+          .filter((log) => log.eventType === "terminal.late"),
+      ).toHaveLength(1)
+      expect(fixture.store.getRun(OWNER_ID, run.id)?.status).toBe("cancelled")
+    } finally {
+      controlled.allowTerminal()
+      controlled.allowCompletion()
+    }
   })
 })
 
@@ -351,6 +437,14 @@ async function createFixture(input: {
   const store = new ObservedStore(join(directory, "meanwhile.sqlite"))
   stores.push(store)
   store.createOwner({ id: OWNER_ID, name: "Terminal evidence owner", createdAt: now() })
+  store.createApiKey({
+    id: "terminal-evidence-api-key",
+    ownerId: OWNER_ID,
+    prefix: "mwk_cccccccccccc",
+    hash: `sha256:${"c".repeat(64)}`,
+    name: "Terminal evidence test key",
+    createdAt: now(),
+  })
   const secrets = new EnvironmentSecretResolver({
     source: { get: (name) => (name === AGENT_SECRET ? input.secret : undefined) },
     allowedSourceNames: [AGENT_SECRET],
@@ -391,6 +485,7 @@ function createRun(
     deadlineAt?: string
     secretRefs?: Readonly<Record<string, string>>
     artifactPaths?: readonly string[]
+    timeoutMs?: number
   } = {},
   provider?: RuntimeProvider,
 ): Run {
@@ -415,7 +510,7 @@ function createRun(
     secretRefs: options.secretRefs ?? {},
     provider: "mock",
     artifactPaths: options.artifactPaths ?? [],
-    timeoutMs: 60_000,
+    timeoutMs: options.timeoutMs ?? 60_000,
     createdAt,
     audit: { actorApiKeyId: null, requestId: "test", traceId: null, metadata: {} },
   }).run
@@ -431,23 +526,52 @@ function transition(
   status: Extract<RunStatus, "provisioning" | "running">,
   deadlineAt?: string,
 ): Run {
-  const transitioned = store.transitionRun({
+  const at = now()
+  const audit = {
+    actorApiKeyId: null,
+    action: `test.${status}`,
+    requestId: "test",
+    traceId: null,
+    metadata: {},
+  } as const
+  if (status === "provisioning") {
+    const transitioned = store.claimRunProvisioning({
+      runId: run.id,
+      expectedVersion: run.statusVersion,
+      at,
+      deadlineAt: deadlineAt ?? future(),
+      audit,
+      systemLog: { eventType: "run.provisioning", data: "Provisioning runtime" },
+    })
+    if (transitioned === null) throw new Error(`Could not seed ${status}`)
+    return transitioned
+  }
+  const runnerSessionId = `runner-${run.id}`
+  store.createRunnerSession({
     runId: run.id,
-    expectedStatus: run.status,
-    expectedVersion: run.statusVersion,
-    toStatus: status,
-    reason: `test.${status}`,
-    at: now(),
-    ...(deadlineAt === undefined ? {} : { deadlineAt }),
-    audit: {
-      actorApiKeyId: null,
-      action: `test.${status}`,
-      requestId: "test",
-      traceId: null,
-      metadata: {},
-    },
+    ownerId: run.ownerId,
+    runnerSessionId,
+    protocolVersion: RUNNER_PROTOCOL_VERSION,
+    createdAt: at,
   })
-  if (transitioned === null) throw new Error(`Could not seed ${status}`)
+  const transitioned = store.acceptRunnerFrame({
+    ownerId: run.ownerId,
+    runId: run.id,
+    runnerSessionId,
+    protocolVersion: RUNNER_PROTOCOL_VERSION,
+    providerCursor: "seed-running",
+    runnerSequence: 1,
+    stream: "agent",
+    eventType: "session.started",
+    data: JSON.stringify({ sessionId: "seed-session" }),
+    createdAt: at,
+    runningTransition: {
+      at,
+      reason: "agent.session_started",
+      audit,
+      systemLog: { eventType: "run.running", data: "Agent session started" },
+    },
+  }).run
   return transitioned
 }
 
@@ -457,6 +581,7 @@ async function seedRuntime(
   run: Run,
   options: {
     destroy?: boolean
+    persistProcess?: boolean
     files?: readonly { path: string; content: Uint8Array }[]
   } = {},
 ): Promise<{ runtime: RuntimeHandle; process: ProcessHandle }> {
@@ -469,7 +594,7 @@ async function seedRuntime(
     )
   }
   const process = processHandle(provider.name, `${runtime.opaque}.missing-process`)
-  persistRuntime(store, run, runtime, process)
+  persistRuntime(store, run, runtime, process, options.persistProcess ?? true)
   if (options.destroy === true) await provider.destroy(runtime)
   return { runtime, process }
 }
@@ -479,27 +604,53 @@ function persistRuntime(
   run: Run,
   runtime: RuntimeHandle,
   process: ProcessHandle,
+  persistProcess = true,
 ): void {
+  const at = now()
+  const intent = store.ensureRuntimeProvisioningIntent({
+    runId: run.id,
+    ownerId: OWNER_ID,
+    runtimeId: runtime.opaque,
+    provider: runtime.provider,
+    at,
+  })
+  if (intent === null || store.claimRuntimeProvisioning(runtime.opaque, at, "active") === null) {
+    throw new Error("test runtime provisioning could not be claimed")
+  }
+  store.materializeRuntimeProvisioning(
+    {
+      id: runtime.opaque,
+      ownerId: OWNER_ID,
+      runId: run.id,
+      provider: runtime.provider,
+      handle: jsonObject(runtime),
+      processHandle: persistProcess ? jsonObject(process) : null,
+      cleanupStatus: "pending",
+      cleanupAttempts: 0,
+      cleanupLastError: null,
+      cleanupNextAttemptAt: null,
+      createdAt: at,
+      updatedAt: at,
+      destroyedAt: null,
+    },
+    {
+      id: crypto.randomUUID(),
+      ownerId: OWNER_ID,
+      actorApiKeyId: null,
+      action: "runtime.create",
+      resourceType: "runtime",
+      resourceId: runtime.opaque,
+      requestId: "terminal-evidence-test",
+      traceId: null,
+      metadata: { runId: run.id, provider: runtime.provider },
+      createdAt: at,
+    },
+  )
   store.setRunRuntime({
     runId: run.id,
     runtimeId: runtime.opaque,
-    processId: process.opaque,
-    at: now(),
-  })
-  store.createRuntime({
-    id: runtime.opaque,
-    ownerId: OWNER_ID,
-    runId: run.id,
-    provider: runtime.provider,
-    handle: jsonObject(runtime),
-    processHandle: jsonObject(process),
-    cleanupStatus: "pending",
-    cleanupAttempts: 0,
-    cleanupLastError: null,
-    cleanupNextAttemptAt: null,
-    createdAt: now(),
-    updatedAt: now(),
-    destroyedAt: null,
+    ...(persistProcess ? { processId: process.opaque } : {}),
+    at,
   })
 }
 
@@ -508,37 +659,37 @@ function seedTerminal(
   run: Run,
   handles: { runtime: RuntimeHandle; process: ProcessHandle },
   terminal: RunnerTerminalPayload,
-  acceptedSessionStarted = false,
 ): void {
   const runnerSessionId = `runner-${run.id}`
-  if (acceptedSessionStarted) {
-    store.appendRunLogNext({
-      ownerId: OWNER_ID,
+  const at = now()
+  const session =
+    store.getRunnerSession(run.id) ??
+    store.createRunnerSession({
       runId: run.id,
-      stream: "system",
-      eventType: "session.started",
-      data: JSON.stringify({ sessionId: "persisted-session" }),
+      ownerId: OWNER_ID,
       runnerSessionId,
-      runnerSequence: 1,
-      createdAt: now(),
+      protocolVersion: RUNNER_PROTOCOL_VERSION,
+      createdAt: at,
     })
-  }
-  store.upsertRunnerSession({
-    runId: run.id,
+  const sequence = session.runnerSequence + 1
+  store.acceptRunnerFrame({
     ownerId: OWNER_ID,
+    runId: run.id,
     runnerSessionId,
     protocolVersion: RUNNER_PROTOCOL_VERSION,
-    providerCursor: "2",
-    runnerSequence: 2,
+    providerCursor: String(sequence),
+    runnerSequence: sequence,
+    stream: "agent",
+    eventType: "terminal",
+    data: JSON.stringify(terminal),
     terminalResult: jsonObject(terminal),
-    createdAt: now(),
-    updatedAt: now(),
+    createdAt: at,
   })
   store.setRunRuntime({
     runId: run.id,
     runtimeId: handles.runtime.opaque,
     processId: handles.process.opaque,
-    at: now(),
+    at,
   })
 }
 
@@ -574,6 +725,56 @@ function terminalRunner(
   }
 }
 
+function controlledTerminalRunner(terminal: RunnerTerminalPayload): {
+  readonly controller: RunnerSessionController
+  readonly ready: Promise<void>
+  readonly terminalAccepted: Promise<void>
+  readonly allowTerminal: () => void
+  readonly allowCompletion: () => void
+  readonly cancelCalls: () => number
+} {
+  const ready = deferred()
+  const terminalGate = deferred()
+  const accepted = deferred()
+  const completionGate = deferred()
+  let cancellations = 0
+  return {
+    controller: {
+      async start(input: StartRunnerInput): Promise<ProcessHandle> {
+        return processHandle(input.provider.name, `${input.runtime.opaque}.${input.processId}`)
+      },
+      async consume(input: ConsumeRunnerInput): Promise<RunnerConsumptionResult> {
+        const started = frame(input.runId, input.runnerSessionId, 1, "session.started", {
+          sessionId: "controlled-session",
+        })
+        await input.onFrame(started, "1")
+        await input.onCursor("1")
+        ready.resolve()
+        await terminalGate.promise
+        const terminalFrame = frame(input.runId, input.runnerSessionId, 2, "terminal", terminal)
+        await input.onFrame(terminalFrame, "2")
+        await input.onCursor("2")
+        accepted.resolve()
+        await completionGate.promise
+        return {
+          terminal,
+          cursor: "2",
+          lastSequence: 2,
+          exitCode: terminal.agentExit?.exitCode ?? 0,
+        }
+      },
+      async cancel(): Promise<void> {
+        cancellations += 1
+      },
+    },
+    ready: ready.promise,
+    terminalAccepted: accepted.promise,
+    allowTerminal: terminalGate.resolve,
+    allowCompletion: completionGate.resolve,
+    cancelCalls: () => cancellations,
+  }
+}
+
 function unreachableRunner(): RunnerSessionController {
   return {
     async start(): Promise<ProcessHandle> {
@@ -599,6 +800,46 @@ function withRecovery(provider: MockRuntimeProvider, enabled: boolean): RuntimeP
       return typeof value === "function" ? value.bind(target) : value
     },
   }) as RuntimeProvider
+}
+
+function withBlockedArtifactRead(provider: MockRuntimeProvider): {
+  readonly provider: RuntimeProvider
+  readonly aborted: () => boolean
+} {
+  let aborted = false
+  return {
+    provider: new Proxy(provider, {
+      get(target, property) {
+        if (property === "readFile") {
+          return async (
+            _runtime: RuntimeHandle,
+            _path: ReturnType<typeof relativePath>,
+            _options: { readonly maxBytes: number },
+            signal?: AbortSignal,
+          ): Promise<Uint8Array> => {
+            if (signal === undefined) throw new Error("Artifact read requires an abort signal")
+            if (signal.aborted) {
+              aborted = true
+              throw signal.reason
+            }
+            return new Promise<Uint8Array>((_resolve, reject) => {
+              signal.addEventListener(
+                "abort",
+                () => {
+                  aborted = true
+                  reject(signal.reason)
+                },
+                { once: true },
+              )
+            })
+          }
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === "function" ? value.bind(target) : value
+      },
+    }) as RuntimeProvider,
+    aborted: () => aborted,
+  }
 }
 
 function withEventStreamProcessLoss(provider: MockRuntimeProvider): RuntimeProvider {
@@ -687,16 +928,25 @@ class ObservedStore extends Store {
     })
   }
 
-  override transitionRun(input: TransitionRunInput): Run | null {
-    const run = super.transitionRun(input)
-    if (run === null) return null
+  override claimRunProvisioning(input: ClaimRunProvisioningInput): Run | null {
+    const run = super.claimRunProvisioning(input)
+    if (run !== null) this.#notify(run)
+    return run
+  }
+
+  override claimRunOutcome(input: ClaimRunOutcomeInput): ClaimRunOutcomeResult | null {
+    const result = super.claimRunOutcome(input)
+    if (result?.outcome === "claimed") this.#notify(result.run)
+    return result
+  }
+
+  #notify(run: Run): void {
     const key = `${run.id}:${run.status}`
     const observers = this.#observers.get(key)
     if (observers !== undefined) {
       this.#observers.delete(key)
       for (const resolve of observers) resolve(run)
     }
-    return run
   }
 }
 
@@ -710,6 +960,26 @@ function now(): string {
 
 function future(): string {
   return "2099-01-01T00:00:00.000Z"
+}
+
+function requestContext(): RequestContext {
+  return {
+    ownerId: OWNER_ID,
+    apiKeyId: "terminal-evidence-api-key",
+    requestId: crypto.randomUUID(),
+    traceId: null,
+  }
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolvePromise: (() => void) | undefined
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve: () => resolvePromise?.(),
+  }
 }
 
 async function bounded<Value>(promise: Promise<Value>): Promise<Value> {

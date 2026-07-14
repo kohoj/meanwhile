@@ -62,6 +62,7 @@ describe("repository revision boundary", () => {
         runtime: runtimeHandle(provider.name, "runtime-a"),
         timeoutMs: 10_000,
         terminationGraceMs: 1_000,
+        signal: new AbortController().signal,
         emit: async () => {},
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" })

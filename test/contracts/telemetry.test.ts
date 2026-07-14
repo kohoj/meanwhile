@@ -148,6 +148,14 @@ describe("telemetry contract", () => {
       provider: "local",
       status: "succeeded",
     })
+    telemetry.metrics.increment("meanwhile.runtime.provisioning_reconciliation.events", 1, {
+      provider: "local",
+      status: "reconciled",
+    })
+    telemetry.metrics.record("meanwhile.runtime.provisioning_reconciliation.duration", 1, {
+      provider: "local",
+      status: "reconciled",
+    })
     await telemetry.span(
       "meanwhile.provider.operation",
       { "provider.name": "local", "run.id": "run_1" },

@@ -73,6 +73,7 @@ describe("durable interactive agent sessions", () => {
       .listAudit(created.ownerId)
       .map((record) => record.action)
     expect(actions).toContain("session.create")
+    expect(actions).toContain("runtime.start")
     expect(actions).toContain("turn.create")
     expect(actions).toContain("session.interrupt")
     expect(actions).toContain("session.close")

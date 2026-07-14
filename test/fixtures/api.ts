@@ -133,7 +133,7 @@ export function apiSession(status: AgentSession["status"] = "idle"): AgentSessio
     agentType: run.agentType,
     agentSpec: run.agentSpec,
     agentCatalogDigest: run.agentCatalogDigest,
-    executionProvenance: run.executionProvenance as NonNullable<Run["executionProvenance"]>,
+    executionProvenance: run.executionProvenance,
     env: {},
     secretRefs: {},
     provider: "local",

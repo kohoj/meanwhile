@@ -37,7 +37,7 @@ export class TestRunCommands implements RunCommandSink {
   async cancel(input: { readonly runId: string; readonly context: RequestContext }): Promise<void> {
     this.cancellationRequests.push(input.runId)
     const at = this.clock.now().toISOString()
-    this.store.claimRunInterruption({
+    this.store.claimRunOutcome({
       kind: "cancel",
       ownerId: input.context.ownerId,
       runId: input.runId,

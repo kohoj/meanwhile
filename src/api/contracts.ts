@@ -201,7 +201,7 @@ export const RunSchema = z
     agentType: z.string(),
     agentSpec: AgentLaunchSnapshotSchema,
     agentCatalogDigest: z.string().regex(/^[a-f0-9]{64}$/),
-    executionProvenance: ExecutionProvenanceSchema.nullable(),
+    executionProvenance: ExecutionProvenanceSchema,
     prompt: z.string(),
     env: z.record(z.string(), z.string()),
     secretRefs: z.record(z.string(), z.string()),
@@ -313,6 +313,22 @@ export const RunEventSchema = z
             status: z.enum(["pending", "running", "succeeded", "failed"]),
             attempt: z.number().int().nonnegative(),
             error: NullableStructuredErrorSchema,
+          })
+          .strict(),
+      })
+      .strict(),
+    z
+      .object({
+        ...RunEventBaseShape,
+        type: z.literal("runtime.provisioning"),
+        source: z.literal("control-plane"),
+        payload: z
+          .object({
+            runtimeId: z.string().min(1),
+            status: z.enum(["materialized", "failed"]),
+            attempt: z.number().int().nonnegative(),
+            error: StructuredErrorSchema.optional(),
+            nextAttemptAt: timestamp.nullable().optional(),
           })
           .strict(),
       })

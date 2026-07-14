@@ -53,7 +53,7 @@ interface RuntimeProvider {
 
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>
-  inspect(runtime: RuntimeHandle): Promise<RuntimeState>
+  inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState>
   stop(runtime: RuntimeHandle): Promise<void>
   destroy(runtime: RuntimeHandle): Promise<void>
 
@@ -65,8 +65,8 @@ interface RuntimeProvider {
   wait(process: ProcessHandle): Promise<ProcessExit>
 
   writeFiles(runtime: RuntimeHandle, files: RuntimeFile[]): Promise<void>
-  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions): Promise<RuntimeFileInfo[]>
-  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions): Promise<Uint8Array>
+  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions, signal?: AbortSignal): Promise<RuntimeFileInfo[]>
+  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions, signal?: AbortSignal): Promise<Uint8Array>
 
   expose?(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint>
   health(): Promise<ProviderHealth>
@@ -74,6 +74,8 @@ interface RuntimeProvider {
 ```
 
 Do not widen this interface with provider settings that belong in adapter construction. Do not return provider SDK objects across it.
+
+Runtime inspection, file enumeration, and file reads honor the optional abort signal. The executor uses it to stop observation on control-plane shutdown and to bound artifact capture by the run's accepted absolute deadline; an adapter must not hide an unbounded observation behind this contract. Aborting an observation never mutates the runtime.
 
 ## Provenance and capabilities
 
@@ -158,10 +160,10 @@ A process specification contains:
 - normalized relative working directory;
 - non-secret and resolved secret environment for that process;
 - remaining relative timeout duration plus an explicit bounded hard-termination grace;
-- optional bounded initial stdin.
+- optional bounded initial stdin;
 - an input mode that is either closed after spawn or an explicitly declared ordered mailbox.
 
-No absolute control-plane deadline crosses this boundary. The control plane computes remaining policy time immediately before spawn; providers treat it as a duration and must not reinterpret it using sandbox wall-clock time.
+No absolute control-plane deadline crosses this boundary. The control plane computes and durably accepts remaining policy time immediately before the first spawn attempt; exact retries reuse that duration. Providers treat it as a duration and must not reinterpret it using sandbox wall-clock time.
 
 Never accept a shell string. Never interpolate a prompt into argv or a shell. The fixed runner receives one validated specification through initial stdin. A one-shot prompt then travels to the child as ACP data; a session spec contains no turn prompt.
 
@@ -169,7 +171,7 @@ The adapter must not log argv elements that may contain sensitive provider confi
 
 ### `spawn`
 
-Starts one independently identifiable process and returns a persistable handle. Runner stdout and stderr remain distinct channels. A PTY is not the protocol transport.
+Starts one independently identifiable process and returns a persistable handle. Spawn is idempotent for the same runtime, `processId`, and complete specification: an exact retry returns the same process, while conflicting reuse returns `PROCESS_CONFLICT`. This property closes the allocation-before-handle-persistence crash window. Runner stdout and stderr remain distinct channels. A PTY is not the protocol transport.
 
 ### `inspectProcess`
 

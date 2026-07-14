@@ -148,7 +148,7 @@ export interface Run {
   readonly agentType: string
   readonly agentSpec: AgentLaunchSnapshot
   readonly agentCatalogDigest: string
-  readonly executionProvenance: ExecutionProvenance | null
+  readonly executionProvenance: ExecutionProvenance
   readonly prompt: string
   readonly env: Readonly<Record<string, string>>
   readonly secretRefs: Readonly<Record<string, string>>
@@ -245,6 +245,17 @@ export type RunEvent =
         readonly status: CleanupStatus
         readonly attempt: number
         readonly error: StructuredError | null
+      }
+    })
+  | (RunEventBase & {
+      readonly type: "runtime.provisioning"
+      readonly source: "control-plane"
+      readonly payload: {
+        readonly runtimeId: string
+        readonly status: "materialized" | "failed"
+        readonly attempt: number
+        readonly error?: StructuredError
+        readonly nextAttemptAt?: Timestamp | null
       }
     })
   | (RunEventBase & {
@@ -380,6 +391,37 @@ export interface RuntimeInstance {
   readonly createdAt: Timestamp
   readonly updatedAt: Timestamp
   readonly destroyedAt: Timestamp | null
+}
+
+/**
+ * Durable outbox entry for the side effect that creates disposable compute.
+ * It closes the crash window between accepting a runtime identity and
+ * persisting the provider handle returned for that identity.
+ */
+export interface RuntimeProvisioningIntent {
+  readonly runtimeId: string
+  readonly ownerId: string
+  readonly runId: string
+  readonly provider: string
+  readonly status: "pending" | "creating" | "materialized" | "failed"
+  readonly attempts: number
+  readonly lastError: StructuredError | null
+  readonly nextAttemptAt: Timestamp | null
+  readonly createdAt: Timestamp
+  readonly updatedAt: Timestamp
+}
+
+export interface SessionRuntimeProvisioningIntent {
+  readonly runtimeId: string
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly provider: string
+  readonly status: "pending" | "creating" | "materialized" | "failed"
+  readonly attempts: number
+  readonly lastError: StructuredError | null
+  readonly nextAttemptAt: Timestamp | null
+  readonly createdAt: Timestamp
+  readonly updatedAt: Timestamp
 }
 
 export interface RunnerSession {

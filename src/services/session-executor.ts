@@ -3,6 +3,7 @@ import {
   type SessionRunnerFrame,
   type SessionRunnerSpec,
 } from "../../runner/protocol"
+import { sanitizeSessionRunnerPayload } from "../agents/runner-evidence"
 import type { SessionRunnerController } from "../agents/session-runner"
 import type { ComponentHealth, ManagedComponent } from "../control-plane"
 import type { AgentSession, JsonObject, StructuredError } from "../domain"
@@ -18,7 +19,7 @@ import {
   restoreProcessHandle,
   restoreRuntimeHandle,
 } from "../providers/runtime-provider"
-import type { EnvironmentSecretResolver } from "../secrets"
+import type { EnvironmentSecretResolver, SecretRedactor } from "../secrets"
 import type { StructuredLogger, Telemetry, TelemetryScope } from "../telemetry"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
@@ -87,11 +88,19 @@ export class SessionExecutor implements ManagedComponent {
     if (this.#running) return
     this.#running = true
     this.#observation = new AbortController()
+    const recoveryAt = this.#now()
+    this.#store.recoverInterruptedSessionRuntimeProvisioning(recoveryAt)
+    this.#store.recoverInterruptedSessionRuntimeCleanups(recoveryAt)
     for (const session of this.#store.listRecoverableAgentSessions()) this.#pending.add(session.id)
     for (const session of this.#store.listClaimableAgentSessions(this.#concurrency * 2)) {
       this.#pending.add(session.id)
     }
     for (const sessionId of this.#store.listSessionCleanupCandidates(this.#now())) {
+      this.#pending.add(sessionId)
+    }
+    for (const sessionId of this.#store.listSessionRuntimeProvisioningCleanupCandidates(
+      this.#now(),
+    )) {
       this.#pending.add(sessionId)
     }
     this.#interval = setInterval(() => this.#scan(), this.#pollMs)
@@ -143,6 +152,11 @@ export class SessionExecutor implements ManagedComponent {
       if (!this.#active.has(session.id)) this.#pending.add(session.id)
     }
     for (const sessionId of this.#store.listSessionCleanupCandidates(this.#now())) {
+      if (!this.#active.has(sessionId)) this.#pending.add(sessionId)
+    }
+    for (const sessionId of this.#store.listSessionRuntimeProvisioningCleanupCandidates(
+      this.#now(),
+    )) {
       if (!this.#active.has(sessionId)) this.#pending.add(sessionId)
     }
     this.#pump()
@@ -216,6 +230,9 @@ export class SessionExecutor implements ManagedComponent {
             ...(session.runtimeId === null ? {} : { runtimeId: session.runtimeId }),
           })
     if (TERMINAL_SESSION_STATUSES.has(session.status)) {
+      if (this.#store.getSessionRuntimeLease(session.id) === null) {
+        await this.#reconcileTerminalRuntimeProvisioning(session, provider)
+      }
       await this.#cleanup(session.id, provider)
       return
     }
@@ -242,8 +259,33 @@ export class SessionExecutor implements ManagedComponent {
     let runtime: RuntimeHandle
     if (lease === null) {
       const runtimeId = `session-${session.id}`.slice(0, 128)
-      runtime = await provider.create({ runtimeId })
-      this.#store.attachSessionRuntime({
+      const intent = this.#store.ensureSessionRuntimeProvisioningIntent({
+        sessionId: session.id,
+        ownerId: session.ownerId,
+        provider: provider.name,
+        runtimeId,
+        at: this.#now(),
+      })
+      if (intent === null) return
+      if (this.#store.claimSessionRuntimeProvisioning(session.id, this.#now(), "active") === null) {
+        const current = this.#store.getAgentSessionInternal(session.id)
+        if (current !== null && TERMINAL_SESSION_STATUSES.has(current.status)) return
+        throw new AppError({
+          code: "INTERNAL",
+          message: "Session runtime provisioning intent could not be claimed",
+        })
+      }
+      try {
+        runtime = await provider.create({ runtimeId })
+      } catch (error) {
+        this.#store.failSessionRuntimeProvisioning({
+          sessionId: session.id,
+          error: normalizeError(error).toStructuredError(),
+          at: this.#now(),
+        })
+        throw error
+      }
+      this.#store.materializeSessionRuntimeProvisioning({
         sessionId: session.id,
         ownerId: session.ownerId,
         provider: provider.name,
@@ -252,20 +294,15 @@ export class SessionExecutor implements ManagedComponent {
         at: this.#now(),
       })
       await provider.start(runtime)
-      this.#store.insertAudit({
-        id: crypto.randomUUID(),
-        ownerId: session.ownerId,
-        actorApiKeyId: null,
-        action: "runtime.start",
-        resourceType: "runtime",
-        resourceId: runtimeId,
-        requestId: `executor:${session.id}`,
-        traceId: null,
-        metadata: { sessionId: session.id, provider: provider.name },
-        createdAt: this.#now(),
-      })
+      this.#recordRuntimeStarted(session, runtimeId, provider, false)
       lease = this.#store.getSessionRuntimeLease(session.id)
     } else {
+      if (session.runtimeId === null) {
+        throw new AppError({
+          code: "DATABASE_INTEGRITY_FAILED",
+          message: "Session runtime lease is missing its durable runtime identity",
+        })
+      }
       runtime = restoreRuntimeHandle(lease.runtimeHandle)
       const runtimeState = await provider.inspect(runtime)
       if (runtimeState.status === "missing") {
@@ -273,119 +310,166 @@ export class SessionExecutor implements ManagedComponent {
         return
       }
       if (runtimeState.status !== "running") await provider.start(runtime)
+      this.#recordRuntimeStarted(
+        session,
+        session.runtimeId,
+        provider,
+        runtimeState.status === "running",
+      )
     }
 
-    if (!lease?.processHandle) {
-      session = this.#store.getAgentSessionInternal(session.id) as AgentSession
-      if (session.status === "closing") {
-        this.#store.closeAgentSession(session.id, "closed_before_agent_start", this.#now())
+    const agentSecrets = this.#secrets.resolve(session.secretRefs, {
+      ownerId: session.ownerId,
+      purpose: "agent",
+    })
+    try {
+      if (!lease?.processHandle) {
+        session = this.#store.getAgentSessionInternal(session.id) as AgentSession
+        if (session.status === "closing") {
+          this.#store.closeAgentSession(session.id, "closed_before_agent_start", this.#now())
+          await this.#cleanup(session.id, provider)
+          return
+        }
+        await this.#launchRunner(session, provider, runtime, agentSecrets.environment)
+        lease = this.#store.getSessionRuntimeLease(session.id)
+        if (!lease?.processHandle) throw new Error("Session runner process handle is missing")
+      }
+      const reconnecting = session.processId !== null
+      if (reconnecting && !provider.capabilities.processRecovery) {
+        this.#store.loseAgentSession(session.id, continuityLost("process_recovery"), this.#now())
         await this.#cleanup(session.id, provider)
         return
       }
-      await this.#launchRunner(session, provider, runtime)
-      lease = this.#store.getSessionRuntimeLease(session.id)
-      if (!lease?.processHandle) throw new Error("Session runner process handle is missing")
-    }
-    const reconnecting = session.processId !== null
-    if (reconnecting && !provider.capabilities.processRecovery) {
-      this.#store.loseAgentSession(session.id, continuityLost("process_recovery"), this.#now())
-      await this.#cleanup(session.id, provider)
-      return
-    }
-    if (
-      reconnecting &&
-      !provider.capabilities.eventReplay &&
-      (lease.providerCursor !== null || lease.runnerSequence > 0)
-    ) {
-      this.#store.loseAgentSession(session.id, continuityLost("event_replay"), this.#now())
-      await this.#cleanup(session.id, provider)
-      return
-    }
-    const process = restoreProcessHandle(lease.processHandle)
-    const processState = await provider.inspectProcess(process)
-    if (processState.status !== "running") {
-      this.#store.loseAgentSession(session.id, continuityLost("process"), this.#now())
-      await this.#cleanup(session.id, provider)
-      return
-    }
+      if (
+        reconnecting &&
+        !provider.capabilities.eventReplay &&
+        (lease.providerCursor !== null || lease.runnerSequence > 0)
+      ) {
+        this.#store.loseAgentSession(session.id, continuityLost("event_replay"), this.#now())
+        await this.#cleanup(session.id, provider)
+        return
+      }
+      const process = restoreProcessHandle(lease.processHandle)
+      const processState = await provider.inspectProcess(process)
+      if (processState.status !== "running") {
+        this.#store.loseAgentSession(session.id, continuityLost("process"), this.#now())
+        await this.#cleanup(session.id, provider)
+        return
+      }
 
-    const commandsAbort = new AbortController()
-    const observationSignal = this.#observation?.signal ?? AbortSignal.abort()
-    const dispatch = this.#dispatchCommands(session.id, provider, process, commandsAbort.signal)
-    try {
-      await this.#runner.consume({
-        provider,
-        process,
-        sessionId: session.id,
-        runnerSessionId: session.processId ?? `session-runner-${session.id}`.slice(0, 128),
-        cursor: lease.providerCursor,
-        lastSequence: lease.runnerSequence,
-        signal: observationSignal,
-        onFrame: async (frame, cursor) => {
-          this.#acceptFrame(session as AgentSession, frame, cursor)
-        },
-        onCursor: async (cursor) => {
-          this.#store.updateSessionProviderCursor(session.id, cursor, this.#now())
-        },
-      })
+      const commandsAbort = new AbortController()
+      const observationSignal = this.#observation?.signal ?? AbortSignal.abort()
+      const dispatch = this.#dispatchCommands(session.id, provider, process, commandsAbort.signal)
+      const observedSession = session as AgentSession
+      try {
+        await this.#runner.consume({
+          provider,
+          process,
+          sessionId: observedSession.id,
+          runnerSessionId:
+            observedSession.processId ?? `session-runner-${observedSession.id}`.slice(0, 128),
+          cursor: lease.providerCursor,
+          lastSequence: lease.runnerSequence,
+          signal: observationSignal,
+          onFrame: async (frame, cursor) => {
+            this.#acceptFrame(observedSession, frame, cursor, agentSecrets.redactor)
+          },
+          onCursor: async (cursor) => {
+            this.#store.updateSessionProviderCursor(observedSession.id, cursor, this.#now())
+          },
+        })
+      } finally {
+        commandsAbort.abort()
+        await dispatch
+      }
+      if (!this.#running || observationSignal.aborted) return
+
+      const current = this.#store.getAgentSessionInternal(observedSession.id)
+      if (current && !TERMINAL_SESSION_STATUSES.has(current.status)) {
+        this.#store.loseAgentSession(
+          observedSession.id,
+          continuityLost("agent_process_exit"),
+          this.#now(),
+        )
+      }
+      await this.#cleanup(observedSession.id, provider)
     } finally {
-      commandsAbort.abort()
-      await dispatch
+      agentSecrets.dispose()
     }
-    if (!this.#running || observationSignal.aborted) return
+  }
 
-    const current = this.#store.getAgentSessionInternal(session.id)
-    if (current && !TERMINAL_SESSION_STATUSES.has(current.status)) {
-      this.#store.loseAgentSession(session.id, continuityLost("agent_process_exit"), this.#now())
+  async #reconcileTerminalRuntimeProvisioning(
+    session: AgentSession,
+    provider: RuntimeProvider,
+  ): Promise<void> {
+    const intent = this.#store.getSessionRuntimeProvisioningIntent(session.id)
+    if (intent === null) return
+    assertProviderProvenance(session.executionProvenance, provider)
+    const claimed = this.#store.claimSessionRuntimeProvisioning(session.id, this.#now(), "terminal")
+    if (claimed === null) return
+    try {
+      const runtime = await provider.create({ runtimeId: claimed.runtimeId })
+      this.#store.materializeSessionRuntimeProvisioning({
+        sessionId: session.id,
+        ownerId: session.ownerId,
+        provider: provider.name,
+        runtimeId: claimed.runtimeId,
+        runtimeHandle: jsonObject(runtime),
+        at: this.#now(),
+      })
+    } catch (error) {
+      const normalized = normalizeError(error)
+      this.#lastFailure = normalized.code
+      this.#store.failSessionRuntimeProvisioning({
+        sessionId: session.id,
+        error: normalized.toStructuredError(),
+        at: this.#now(),
+      })
+      this.#logger.error(
+        "session.runtime_provisioning_reconciliation_failed",
+        "Session runtime provisioning could not be reconciled",
+        { sessionId: session.id, code: normalized.code },
+      )
     }
-    await this.#cleanup(session.id, provider)
   }
 
   async #launchRunner(
     session: AgentSession,
     provider: RuntimeProvider,
     runtime: RuntimeHandle,
+    secretEnvironment: Readonly<Record<string, string>>,
   ): Promise<void> {
     await this.#prepareWorkspace(session, provider, runtime)
     const processId = `session-runner-${session.id}`.slice(0, 128)
-    const secrets = this.#secrets.resolve(session.secretRefs, {
-      ownerId: session.ownerId,
-      purpose: "agent",
-    })
-    let process: ProcessHandle
-    try {
-      const spec: SessionRunnerSpec = {
-        protocolVersion: RUNNER_PROTOCOL_VERSION,
-        mode: "session",
-        sessionId: session.id,
-        runnerSessionId: processId,
-        agent: {
-          executable: session.agentSpec.executable,
-          args: [...session.agentSpec.args],
-          workingDirectory: session.agentSpec.workingDirectory,
-        },
-        permissionPolicy:
-          session.agentSpec.permissionPolicy.mode === "deny-all"
-            ? { mode: "deny-all" }
-            : {
-                mode: "allow-once",
-                toolKinds: [...session.agentSpec.permissionPolicy.toolKinds],
-              },
-        environment: { ...session.env },
-        secretEnvironmentNames: Object.keys(secrets.environment),
-        idleTimeoutMs: session.idleTimeoutMs,
-      }
-      process = await this.#runner.start({
-        provider,
-        runtime,
-        processId,
-        spec,
-        secretEnvironment: secrets.environment,
-      })
-    } finally {
-      secrets.dispose()
+    const spec: SessionRunnerSpec = {
+      protocolVersion: RUNNER_PROTOCOL_VERSION,
+      mode: "session",
+      sessionId: session.id,
+      runnerSessionId: processId,
+      agent: {
+        executable: session.agentSpec.executable,
+        args: [...session.agentSpec.args],
+        workingDirectory: session.agentSpec.workingDirectory,
+      },
+      permissionPolicy:
+        session.agentSpec.permissionPolicy.mode === "deny-all"
+          ? { mode: "deny-all" }
+          : {
+              mode: "allow-once",
+              toolKinds: [...session.agentSpec.permissionPolicy.toolKinds],
+            },
+      environment: { ...session.env },
+      secretEnvironmentNames: Object.keys(secretEnvironment),
+      idleTimeoutMs: session.idleTimeoutMs,
     }
-    this.#store.attachSessionProcess({
+    const process = await this.#runner.start({
+      provider,
+      runtime,
+      processId,
+      spec,
+      secretEnvironment,
+    })
+    this.#store.materializeSessionProcessLaunch({
       sessionId: session.id,
       ownerId: session.ownerId,
       processId,
@@ -418,6 +502,7 @@ export class SessionExecutor implements ManagedComponent {
         ...(repositoryCredential === undefined ? {} : { repositoryCredential }),
         timeoutMs: PROVISION_TIMEOUT_MS,
         terminationGraceMs: PROCESS_TERMINATION_GRACE_MS,
+        signal: this.#observation?.signal ?? AbortSignal.abort(),
         emit: async (event) => {
           const data = repositorySecrets?.redactor.redactString(event.data) ?? event.data
           this.#store.appendSessionDiagnostic({
@@ -460,7 +545,12 @@ export class SessionExecutor implements ManagedComponent {
     }
   }
 
-  #acceptFrame(session: AgentSession, frame: SessionRunnerFrame, cursor: string): void {
+  #acceptFrame(
+    session: AgentSession,
+    frame: SessionRunnerFrame,
+    cursor: string,
+    redactor: SecretRedactor,
+  ): void {
     const turnId =
       "turnId" in frame.payload && typeof frame.payload.turnId === "string"
         ? frame.payload.turnId
@@ -476,7 +566,7 @@ export class SessionExecutor implements ManagedComponent {
       providerCursor: cursor,
       type: frame.type,
       turnId,
-      payload: jsonObject(frame.payload),
+      payload: sanitizeSessionRunnerPayload(frame, redactor),
       createdAt: this.#now(),
     })
     if (
@@ -502,6 +592,26 @@ export class SessionExecutor implements ManagedComponent {
       error = normalizeError(cause).toStructuredError()
     }
     this.#store.finishSessionRuntimeCleanup(sessionId, error, this.#now())
+  }
+
+  #recordRuntimeStarted(
+    session: AgentSession,
+    runtimeId: string,
+    provider: RuntimeProvider,
+    reconciled: boolean,
+  ): void {
+    this.#store.ensureRuntimeStartedAudit({
+      id: crypto.randomUUID(),
+      ownerId: session.ownerId,
+      actorApiKeyId: null,
+      action: "runtime.start",
+      resourceType: "runtime",
+      resourceId: runtimeId,
+      requestId: `executor:${session.id}`,
+      traceId: null,
+      metadata: { sessionId: session.id, provider: provider.name, reconciled },
+      createdAt: this.#now(),
+    })
   }
 
   async #handleFailure(sessionId: string, error: unknown): Promise<void> {

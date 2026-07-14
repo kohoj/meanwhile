@@ -213,29 +213,47 @@ export const createApplication = async (
     const reaper = new RuntimeReaper(store, providerRegistry, {
       telemetry: instrumentation.telemetry,
       observe: (event) => {
+        const provisioning = event.type.startsWith("runtime.provisioning.")
+        const status = event.type.split(".").at(-1) ?? "unknown"
         instrumentation.telemetry.logger
           .child({
             ownerId: event.ownerId,
             runId: event.runId,
             runtimeId: event.runtimeId,
           })
-          .info(event.type, "Runtime cleanup state changed", {
+          .info(
+            event.type,
+            provisioning
+              ? "Runtime provisioning reconciliation changed"
+              : "Runtime cleanup state changed",
+            {
+              provider: event.provider,
+              attempt: event.attempt,
+              status,
+              ...(event.type === "runtime.cleanup.failed" ||
+              event.type === "runtime.provisioning.reconcile_failed"
+                ? { errorCode: event.errorCode, exhausted: event.exhausted }
+                : {}),
+            },
+          )
+        instrumentation.telemetry.metrics.increment(
+          provisioning
+            ? "meanwhile.runtime.provisioning_reconciliation.events"
+            : "meanwhile.cleanup.events",
+          1,
+          {
             provider: event.provider,
-            attempt: event.attempt,
-            status: event.type.split(".").at(-1) ?? "unknown",
-            ...(event.type === "runtime.cleanup.failed"
-              ? { errorCode: event.errorCode, exhausted: event.exhausted }
-              : {}),
-          })
-        instrumentation.telemetry.metrics.increment("meanwhile.cleanup.events", 1, {
-          provider: event.provider,
-          status: event.type.split(".").at(-1) ?? "unknown",
-        })
+            status,
+          },
+        )
         if ("durationMs" in event) {
-          instrumentation.telemetry.metrics.record("meanwhile.cleanup.duration", event.durationMs, {
-            provider: event.provider,
-            status: event.type.split(".").at(-1) ?? "unknown",
-          })
+          instrumentation.telemetry.metrics.record(
+            provisioning
+              ? "meanwhile.runtime.provisioning_reconciliation.duration"
+              : "meanwhile.cleanup.duration",
+            event.durationMs,
+            { provider: event.provider, status },
+          )
         }
       },
     })
@@ -377,7 +395,7 @@ export const createApplication = async (
       store,
       preview,
       async start() {
-        const resumePreview = store.listLocalDeploymentIds().length > 0
+        const resumePreview = store.listLocalDeploymentRoots().length > 0
         if (resumePreview) preview.start()
         try {
           await controlPlane.start()

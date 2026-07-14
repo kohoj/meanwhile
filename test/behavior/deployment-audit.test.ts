@@ -315,6 +315,69 @@ describe("deployment records and audit evidence", () => {
     expect(calls).toBe(1)
   })
 
+  test("keeps a successful target recoverable when its success transaction is interrupted", async () => {
+    let calls = 0
+    const adapter: DeployAdapter = {
+      name: "test-target",
+      secretEnvNames: ["DEPLOY_TOKEN"],
+      validate: (config) => config,
+      async deploy() {
+        calls += 1
+        return { url: "https://preview.example/reconciled", metadata: {} }
+      },
+    }
+    const harness = createHarness(adapter)
+    const created = await harness.executor.create(createInput())
+    harness.repository.failNextSuccessTransition = true
+
+    await expect(
+      harness.executor.execute(created.id, { requestId: "execute-before-crash" }),
+    ).rejects.toMatchObject({ code: "DEPLOYMENT_RECONCILIATION_REQUIRED" })
+    expect(harness.repository.records.get(created.id)?.status).toBe("running")
+    expect(harness.repository.audits.map(({ action }) => action)).toEqual([
+      "deployment.create",
+      "deployment.start",
+    ])
+
+    const reconciled = await harness.executor.reconcile(created.id, {
+      requestId: "execute-after-restart",
+    })
+    expect(reconciled.status).toBe("succeeded")
+    expect(calls).toBe(2)
+  })
+
+  test("does not claim target failure when durable adapter logging is interrupted", async () => {
+    let calls = 0
+    const adapter: DeployAdapter = {
+      name: "test-target",
+      secretEnvNames: ["DEPLOY_TOKEN"],
+      validate: (config) => config,
+      async deploy(_input, context) {
+        calls += 1
+        await context.emit({
+          level: "info",
+          event: "deployment.test.target_changed",
+          message: "Target side effect may already exist.",
+        })
+        return { url: "https://preview.example/reconciled-log", metadata: {} }
+      },
+    }
+    const harness = createHarness(adapter)
+    const created = await harness.executor.create(createInput())
+    harness.repository.failNextLogAppend = true
+
+    await expect(
+      harness.executor.execute(created.id, { requestId: "execute-before-log-crash" }),
+    ).rejects.toMatchObject({ code: "DEPLOYMENT_RECONCILIATION_REQUIRED" })
+    expect(harness.repository.records.get(created.id)?.status).toBe("running")
+
+    const reconciled = await harness.executor.reconcile(created.id, {
+      requestId: "execute-after-log-restart",
+    })
+    expect(reconciled.status).toBe("succeeded")
+    expect(calls).toBe(2)
+  })
+
   test("graceful shutdown aborts work but leaves running status recoverable", async () => {
     let entered: (() => void) | undefined
     const started = new Promise<void>((resolve) => {
@@ -556,6 +619,8 @@ class MemoryDeploymentRepository implements DeploymentRepository {
   readonly audits: DeploymentAuditRecord[] = []
   readonly logs: DeploymentLogRecord[] = []
   accessesAfterShutdown = 0
+  failNextSuccessTransition = false
+  failNextLogAppend = false
   #acceptingAccess = true
 
   rejectFurtherAccess(): void {
@@ -614,6 +679,10 @@ class MemoryDeploymentRepository implements DeploymentRepository {
     audit: DeploymentAuditRecord
   }) {
     this.#assertAccessible()
+    if (input.toStatus === "succeeded" && this.failNextSuccessTransition) {
+      this.failNextSuccessTransition = false
+      throw new Error("simulated success transaction interruption")
+    }
     const current = this.records.get(input.deploymentId)
     if (current === undefined || current.status !== input.fromStatus) return null
     const terminal = input.toStatus === "succeeded" || input.toStatus === "failed"
@@ -633,6 +702,10 @@ class MemoryDeploymentRepository implements DeploymentRepository {
 
   async appendLog(input: Omit<DeploymentLogRecord, "sequence">) {
     this.#assertAccessible()
+    if (this.failNextLogAppend) {
+      this.failNextLogAppend = false
+      throw new Error("simulated durable log interruption")
+    }
     const log = { ...input, sequence: this.logs.length + 1 }
     this.logs.push(log)
     return log

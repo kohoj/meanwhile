@@ -1,21 +1,31 @@
-export interface Migration {
-  readonly version: number
+import { Database } from "bun:sqlite"
+import { AppError } from "../errors"
+
+export interface SchemaIdentity {
   readonly name: string
-  readonly sql: string
+  readonly fingerprint: string
 }
 
-export const migrations: readonly Migration[] = [
-  {
-    version: 1,
-    name: "initial_control_plane",
-    sql: `
-      CREATE TABLE owners (
+export const SCHEMA_NAME = "meanwhile-control-plane"
+
+export const SCHEMA_SQL = `
+CREATE TABLE schema_identity (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        name TEXT NOT NULL,
+        fingerprint TEXT NOT NULL CHECK(
+          length(fingerprint) = 64
+          AND fingerprint NOT GLOB '*[^0-9a-f]*'
+        ),
+        created_at TEXT NOT NULL
+      ) STRICT;
+
+CREATE TABLE owners (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         created_at TEXT NOT NULL
       ) STRICT;
 
-      CREATE TABLE api_keys (
+CREATE TABLE api_keys (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
         prefix TEXT NOT NULL CHECK(
@@ -32,24 +42,27 @@ export const migrations: readonly Migration[] = [
         revoked_at TEXT,
         UNIQUE(owner_id, id)
       ) STRICT;
-      CREATE INDEX api_keys_owner_idx ON api_keys(owner_id, created_at);
-      CREATE INDEX api_keys_prefix_idx ON api_keys(prefix, revoked_at);
 
-      CREATE TABLE runs (
+CREATE INDEX api_keys_owner_idx ON api_keys(owner_id, created_at);
+
+CREATE INDEX api_keys_prefix_idx ON api_keys(prefix, revoked_at);
+
+CREATE TABLE runs (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES owners(id),
-        workspace_json TEXT NOT NULL,
+        workspace_json TEXT NOT NULL CHECK(json_valid(workspace_json)),
         agent_type TEXT NOT NULL,
-        agent_spec_json TEXT NOT NULL,
+        agent_spec_json TEXT NOT NULL CHECK(json_valid(agent_spec_json)),
         agent_catalog_digest TEXT NOT NULL CHECK(
           length(agent_catalog_digest) = 64
           AND agent_catalog_digest NOT GLOB '*[^0-9a-f]*'
         ),
+        execution_provenance_json TEXT NOT NULL CHECK(json_valid(execution_provenance_json)),
         prompt TEXT NOT NULL,
-        env_json TEXT NOT NULL,
-        secret_refs_json TEXT NOT NULL,
+        env_json TEXT NOT NULL CHECK(json_valid(env_json)),
+        secret_refs_json TEXT NOT NULL CHECK(json_valid(secret_refs_json)),
         provider TEXT NOT NULL,
-        artifact_paths_json TEXT NOT NULL,
+        artifact_paths_json TEXT NOT NULL CHECK(json_valid(artifact_paths_json)),
         timeout_ms INTEGER NOT NULL CHECK(timeout_ms > 0),
         deadline_at TEXT,
         status TEXT NOT NULL CHECK(status IN ('queued','provisioning','running','succeeded','failed','cancelled','timed_out')),
@@ -57,20 +70,22 @@ export const migrations: readonly Migration[] = [
         runtime_id TEXT,
         process_id TEXT,
         resolved_revision TEXT,
-        cancellation_requested_at TEXT,
         created_at TEXT NOT NULL,
         started_at TEXT,
         finished_at TEXT,
         updated_at TEXT NOT NULL,
-        error_json TEXT,
+        error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json)),
         exit_code INTEGER,
         UNIQUE(owner_id, id)
       ) STRICT;
-      CREATE INDEX runs_owner_created_idx ON runs(owner_id, created_at DESC, id);
-      CREATE INDEX runs_owner_status_idx ON runs(owner_id, status, created_at);
-      CREATE INDEX runs_status_claim_idx ON runs(status, created_at);
 
-      CREATE TABLE run_status_events (
+CREATE INDEX runs_owner_created_idx ON runs(owner_id, created_at DESC, id);
+
+CREATE INDEX runs_owner_status_idx ON runs(owner_id, status, created_at);
+
+CREATE INDEX runs_status_claim_idx ON runs(status, created_at);
+
+CREATE TABLE run_status_events (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
@@ -82,9 +97,10 @@ export const migrations: readonly Migration[] = [
         UNIQUE(run_id, status_version),
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE
       ) STRICT;
-      CREATE INDEX run_status_events_owner_run_idx ON run_status_events(owner_id, run_id, status_version);
 
-      CREATE TABLE idempotency_keys (
+CREATE INDEX run_status_events_owner_run_idx ON run_status_events(owner_id, run_id, status_version);
+
+CREATE TABLE idempotency_keys (
         owner_id TEXT NOT NULL,
         key TEXT NOT NULL,
         request_hash TEXT NOT NULL,
@@ -94,16 +110,18 @@ export const migrations: readonly Migration[] = [
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id)
       ) WITHOUT ROWID, STRICT;
 
-      CREATE TABLE runtime_instances (
+CREATE TABLE runtime_instances (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         provider TEXT NOT NULL,
-        handle_json TEXT NOT NULL,
-        process_handle_json TEXT,
+        handle_json TEXT NOT NULL CHECK(json_valid(handle_json)),
+        process_handle_json TEXT CHECK(process_handle_json IS NULL OR json_valid(process_handle_json)),
         cleanup_status TEXT NOT NULL CHECK(cleanup_status IN ('pending','running','succeeded','failed')),
         cleanup_attempts INTEGER NOT NULL DEFAULT 0,
-        cleanup_last_error_json TEXT,
+        cleanup_last_error_json TEXT CHECK(
+          cleanup_last_error_json IS NULL OR json_valid(cleanup_last_error_json)
+        ),
         cleanup_next_attempt_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -112,24 +130,29 @@ export const migrations: readonly Migration[] = [
         UNIQUE(owner_id, run_id),
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id)
       ) STRICT;
-      CREATE INDEX runtime_instances_owner_run_idx ON runtime_instances(owner_id, run_id);
-      CREATE INDEX runtime_instances_cleanup_idx ON runtime_instances(cleanup_status, cleanup_next_attempt_at, updated_at);
 
-      CREATE TABLE runner_sessions (
+CREATE INDEX runtime_instances_owner_run_idx ON runtime_instances(owner_id, run_id);
+
+CREATE INDEX runtime_instances_cleanup_idx ON runtime_instances(cleanup_status, cleanup_next_attempt_at, updated_at);
+
+CREATE TABLE runner_sessions (
         run_id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
         runner_session_id TEXT NOT NULL,
         protocol_version INTEGER NOT NULL,
         provider_cursor TEXT,
         runner_sequence INTEGER NOT NULL DEFAULT 0,
-        terminal_result_json TEXT,
+        terminal_result_json TEXT CHECK(
+          terminal_result_json IS NULL OR json_valid(terminal_result_json)
+        ),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX runner_sessions_owner_run_idx ON runner_sessions(owner_id, run_id);
 
-      CREATE TABLE run_logs (
+CREATE INDEX runner_sessions_owner_run_idx ON runner_sessions(owner_id, run_id);
+
+CREATE TABLE run_logs (
         owner_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         sequence INTEGER NOT NULL CHECK(sequence > 0),
@@ -144,9 +167,10 @@ export const migrations: readonly Migration[] = [
         UNIQUE(run_id, runner_session_id, runner_sequence),
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX run_logs_owner_run_idx ON run_logs(owner_id, run_id, sequence);
 
-      CREATE TABLE workspace_bundles (
+CREATE INDEX run_logs_owner_run_idx ON run_logs(owner_id, run_id, sequence);
+
+CREATE TABLE workspace_bundles (
         owner_id TEXT NOT NULL REFERENCES owners(id),
         id TEXT NOT NULL,
         digest TEXT NOT NULL,
@@ -155,9 +179,10 @@ export const migrations: readonly Migration[] = [
         created_at TEXT NOT NULL,
         PRIMARY KEY(owner_id, id)
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX workspace_bundles_owner_created_idx ON workspace_bundles(owner_id, created_at, id);
 
-      CREATE TABLE artifacts (
+CREATE INDEX workspace_bundles_owner_created_idx ON workspace_bundles(owner_id, created_at, id);
+
+CREATE TABLE artifacts (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
@@ -173,19 +198,20 @@ export const migrations: readonly Migration[] = [
         UNIQUE(owner_id, run_id, logical_path, digest),
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id)
       ) STRICT;
-      CREATE INDEX artifacts_owner_run_idx ON artifacts(owner_id, run_id, created_at, id);
 
-      CREATE TABLE deployments (
+CREATE INDEX artifacts_owner_run_idx ON artifacts(owner_id, run_id, created_at, id);
+
+CREATE TABLE deployments (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         artifact_id TEXT NOT NULL,
         target TEXT NOT NULL,
-        target_config_json TEXT NOT NULL,
-        secret_refs_json TEXT NOT NULL,
+        target_config_json TEXT NOT NULL CHECK(json_valid(target_config_json)),
+        secret_refs_json TEXT NOT NULL CHECK(json_valid(secret_refs_json)),
         status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed')),
         url TEXT,
-        error_json TEXT,
+        error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json)),
         created_at TEXT NOT NULL,
         started_at TEXT,
         finished_at TEXT,
@@ -194,10 +220,12 @@ export const migrations: readonly Migration[] = [
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id),
         FOREIGN KEY(owner_id, run_id, artifact_id) REFERENCES artifacts(owner_id, run_id, id)
       ) STRICT;
-      CREATE INDEX deployments_owner_created_idx ON deployments(owner_id, created_at DESC, id);
-      CREATE INDEX deployments_status_idx ON deployments(status, created_at);
 
-      CREATE TABLE deployment_logs (
+CREATE INDEX deployments_owner_created_idx ON deployments(owner_id, created_at DESC, id);
+
+CREATE INDEX deployments_status_idx ON deployments(status, created_at);
+
+CREATE TABLE deployment_logs (
         owner_id TEXT NOT NULL,
         deployment_id TEXT NOT NULL,
         sequence INTEGER NOT NULL CHECK(sequence > 0),
@@ -207,9 +235,10 @@ export const migrations: readonly Migration[] = [
         PRIMARY KEY(deployment_id, sequence),
         FOREIGN KEY(owner_id, deployment_id) REFERENCES deployments(owner_id, id) ON DELETE CASCADE
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX deployment_logs_owner_deployment_idx ON deployment_logs(owner_id, deployment_id, sequence);
 
-      CREATE TABLE audit_records (
+CREATE INDEX deployment_logs_owner_deployment_idx ON deployment_logs(owner_id, deployment_id, sequence);
+
+CREATE TABLE audit_records (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES owners(id),
         actor_api_key_id TEXT,
@@ -218,27 +247,16 @@ export const migrations: readonly Migration[] = [
         resource_id TEXT NOT NULL,
         request_id TEXT NOT NULL,
         trace_id TEXT,
-        metadata_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)),
         created_at TEXT NOT NULL,
         FOREIGN KEY(owner_id, actor_api_key_id) REFERENCES api_keys(owner_id, id)
       ) STRICT;
-      CREATE INDEX audit_records_owner_created_idx ON audit_records(owner_id, created_at DESC, id);
-      CREATE INDEX audit_records_owner_resource_idx ON audit_records(owner_id, resource_type, resource_id, created_at);
-    `,
-  },
-  {
-    version: 2,
-    name: "execution_provenance",
-    sql: `
-      ALTER TABLE runs ADD COLUMN execution_provenance_json TEXT
-        CHECK(execution_provenance_json IS NULL OR json_valid(execution_provenance_json));
-    `,
-  },
-  {
-    version: 3,
-    name: "durable_run_events",
-    sql: `
-      CREATE TABLE run_events (
+
+CREATE INDEX audit_records_owner_created_idx ON audit_records(owner_id, created_at DESC, id);
+
+CREATE INDEX audit_records_owner_resource_idx ON audit_records(owner_id, resource_type, resource_id, created_at);
+
+CREATE TABLE run_events (
         owner_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         sequence INTEGER NOT NULL CHECK(sequence > 0),
@@ -250,95 +268,10 @@ export const migrations: readonly Migration[] = [
         PRIMARY KEY(run_id, sequence),
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX run_events_owner_run_idx ON run_events(owner_id, run_id, sequence);
 
-      INSERT INTO run_events(
-        owner_id, run_id, sequence, version, type, source, payload_json, created_at
-      )
-      SELECT owner_id, run_id,
-        ROW_NUMBER() OVER (
-          PARTITION BY run_id ORDER BY created_at, evidence_order, evidence_sequence
-        ),
-        1, type, source, payload_json, created_at
-      FROM (
-        SELECT owner_id, run_id, created_at, 0 AS evidence_order,
-          status_version AS evidence_sequence,
-          'run.status' AS type,
-          'control-plane' AS source,
-          json_object(
-            'fromStatus', from_status,
-            'toStatus', to_status,
-            'statusVersion', status_version,
-            'reason', reason
-          ) AS payload_json
-        FROM run_status_events
+CREATE INDEX run_events_owner_run_idx ON run_events(owner_id, run_id, sequence);
 
-        UNION ALL
-
-        SELECT owner_id, run_id, created_at, 1 AS evidence_order,
-          sequence AS evidence_sequence,
-          CASE event_type
-            WHEN 'runner.started' THEN 'runner.started'
-            WHEN 'agent.initialized' THEN 'agent.initialized'
-            WHEN 'session.started' THEN 'agent.session_started'
-            WHEN 'session.update' THEN 'agent.update'
-            WHEN 'permission.resolved' THEN 'agent.permission'
-            WHEN 'runner.diagnostic' THEN 'agent.diagnostic'
-            WHEN 'agent.stderr' THEN 'agent.stderr'
-            WHEN 'terminal' THEN 'agent.terminal'
-            ELSE 'run.log'
-          END AS type,
-          CASE WHEN runner_session_id IS NULL THEN 'control-plane' ELSE 'runner' END AS source,
-          CASE
-            WHEN event_type IN (
-              'runner.started','agent.initialized','session.started','session.update',
-              'permission.resolved','runner.diagnostic','agent.stderr','terminal'
-            ) AND json_valid(data)
-              THEN data
-            ELSE json_object('stream', stream, 'eventType', event_type, 'data', data)
-          END AS payload_json
-        FROM run_logs
-
-        UNION ALL
-
-        SELECT owner_id, run_id, created_at, 2 AS evidence_order,
-          ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at, id) AS evidence_sequence,
-          'artifact.captured' AS type,
-          'control-plane' AS source,
-          json_object(
-            'artifactId', id,
-            'logicalPath', logical_path,
-            'kind', kind,
-            'digest', digest,
-            'byteSize', byte_size
-          ) AS payload_json
-        FROM artifacts
-
-        UNION ALL
-
-        SELECT owner_id, run_id, updated_at AS created_at, 3 AS evidence_order,
-          1 AS evidence_sequence,
-          'runtime.cleanup' AS type,
-          'control-plane' AS source,
-          json_object(
-            'runtimeId', id,
-            'status', cleanup_status,
-            'attempt', cleanup_attempts,
-            'error', CASE
-              WHEN cleanup_last_error_json IS NULL THEN NULL
-              ELSE json(cleanup_last_error_json)
-            END
-          ) AS payload_json
-        FROM runtime_instances
-        WHERE cleanup_attempts > 0 OR cleanup_status = 'succeeded'
-      );
-    `,
-  },
-  {
-    version: 4,
-    name: "durable_agent_sessions",
-    sql: `
-      CREATE TABLE agent_sessions (
+CREATE TABLE agent_sessions (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES owners(id),
         workspace_json TEXT NOT NULL CHECK(json_valid(workspace_json)),
@@ -366,13 +299,16 @@ export const migrations: readonly Migration[] = [
         error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json)),
         UNIQUE(owner_id, id)
       ) STRICT;
-      CREATE INDEX agent_sessions_owner_created_idx
+
+CREATE INDEX agent_sessions_owner_created_idx
         ON agent_sessions(owner_id, created_at DESC, id DESC);
-      CREATE INDEX agent_sessions_status_idx ON agent_sessions(status, updated_at);
-      CREATE INDEX agent_sessions_status_created_idx
+
+CREATE INDEX agent_sessions_status_idx ON agent_sessions(status, updated_at);
+
+CREATE INDEX agent_sessions_status_created_idx
         ON agent_sessions(status, created_at, id);
 
-      CREATE TABLE session_idempotency_keys (
+CREATE TABLE session_idempotency_keys (
         owner_id TEXT NOT NULL,
         key TEXT NOT NULL,
         request_hash TEXT NOT NULL,
@@ -382,7 +318,7 @@ export const migrations: readonly Migration[] = [
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id)
       ) WITHOUT ROWID, STRICT;
 
-      CREATE TABLE session_turns (
+CREATE TABLE session_turns (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -403,10 +339,12 @@ export const migrations: readonly Migration[] = [
         UNIQUE(session_id, sequence),
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE
       ) STRICT;
-      CREATE INDEX session_turns_owner_session_idx ON session_turns(owner_id, session_id, sequence);
-      CREATE INDEX session_turns_status_idx ON session_turns(status, created_at);
 
-      CREATE TABLE turn_idempotency_keys (
+CREATE INDEX session_turns_owner_session_idx ON session_turns(owner_id, session_id, sequence);
+
+CREATE INDEX session_turns_status_idx ON session_turns(status, created_at);
+
+CREATE TABLE turn_idempotency_keys (
         owner_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
         key TEXT NOT NULL,
@@ -418,7 +356,7 @@ export const migrations: readonly Migration[] = [
           REFERENCES session_turns(owner_id, session_id, id)
       ) WITHOUT ROWID, STRICT;
 
-      CREATE TABLE session_runtime_leases (
+CREATE TABLE session_runtime_leases (
         session_id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
         provider TEXT NOT NULL,
@@ -438,10 +376,11 @@ export const migrations: readonly Migration[] = [
         destroyed_at TEXT,
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id)
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX session_runtime_leases_cleanup_idx
+
+CREATE INDEX session_runtime_leases_cleanup_idx
         ON session_runtime_leases(cleanup_status, cleanup_next_attempt_at, updated_at);
 
-      CREATE TABLE session_commands (
+CREATE TABLE session_commands (
         owner_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
         sequence INTEGER NOT NULL CHECK(sequence > 0),
@@ -456,9 +395,10 @@ export const migrations: readonly Migration[] = [
         UNIQUE(session_id, id),
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX session_commands_pending_idx ON session_commands(state, created_at);
 
-      CREATE TABLE session_events (
+CREATE INDEX session_commands_pending_idx ON session_commands(state, created_at);
+
+CREATE TABLE session_events (
         owner_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
         sequence INTEGER NOT NULL CHECK(sequence > 0),
@@ -474,10 +414,179 @@ export const migrations: readonly Migration[] = [
         UNIQUE(session_id, runner_sequence),
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE
       ) WITHOUT ROWID, STRICT;
-      CREATE INDEX session_events_owner_session_idx ON session_events(owner_id, session_id, sequence);
-    `,
-  },
-]
 
-export const migrationSha256 = (migration: Migration): string =>
-  new Bun.CryptoHasher("sha256").update(migration.sql).digest("hex")
+CREATE INDEX session_events_owner_session_idx ON session_events(owner_id, session_id, sequence);
+
+CREATE TABLE runtime_provisioning_intents (
+        runtime_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','creating','materialized','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+        last_error_json TEXT CHECK(last_error_json IS NULL OR json_valid(last_error_json)),
+        next_attempt_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(owner_id, runtime_id),
+        UNIQUE(owner_id, run_id),
+        FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE
+      ) STRICT;
+
+CREATE INDEX runtime_provisioning_intents_reconcile_idx
+        ON runtime_provisioning_intents(status, next_attempt_at, updated_at);
+
+CREATE TABLE session_runtime_provisioning_intents (
+        runtime_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','creating','materialized','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+        last_error_json TEXT CHECK(last_error_json IS NULL OR json_valid(last_error_json)),
+        next_attempt_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(owner_id, runtime_id),
+        UNIQUE(owner_id, session_id),
+        FOREIGN KEY(owner_id, session_id)
+          REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE
+      ) STRICT;
+
+CREATE INDEX session_runtime_provisioning_intents_reconcile_idx
+        ON session_runtime_provisioning_intents(status, next_attempt_at, updated_at);
+
+CREATE TABLE run_process_launch_intents (
+        run_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        runtime_id TEXT NOT NULL UNIQUE,
+        process_id TEXT NOT NULL,
+        timeout_budget_ms INTEGER NOT NULL CHECK(timeout_budget_ms > 0),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, runtime_id)
+          REFERENCES runtime_instances(owner_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID, STRICT;
+`
+
+export const SCHEMA_FINGERPRINT = buildSchemaFingerprint()
+
+export const CURRENT_SCHEMA: SchemaIdentity = Object.freeze({
+  name: SCHEMA_NAME,
+  fingerprint: SCHEMA_FINGERPRINT,
+})
+
+export function databaseSchemaFingerprint(database: Database): string {
+  const objects = database
+    .query<{ type: string; name: string; table_name: string; sql: string }, []>(`
+      SELECT type, name, tbl_name AS table_name, sql
+      FROM sqlite_master
+      WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+      ORDER BY type, name
+    `)
+    .all()
+  return new Bun.CryptoHasher("sha256").update(JSON.stringify(objects)).digest("hex")
+}
+
+function buildSchemaFingerprint(): string {
+  const database = new Database(":memory:", { strict: true })
+  try {
+    for (const statement of splitSchemaSql(SCHEMA_SQL)) database.query(statement).run()
+    return databaseSchemaFingerprint(database)
+  } finally {
+    database.close()
+  }
+}
+
+export function splitSchemaSql(sql: string): readonly string[] {
+  const statements: string[] = []
+  let start = 0
+  let quote: "'" | '"' | "`" | "]" | null = null
+  let lineComment = false
+  let blockComment = false
+  let hasSql = false
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const character = sql[index]
+    const next = sql[index + 1]
+    if (lineComment) {
+      if (character === "\n") lineComment = false
+      continue
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false
+        index += 1
+      }
+      continue
+    }
+    if (quote !== null) {
+      const closing = quote === "]" ? "]" : quote
+      if (character === closing) {
+        if (quote !== "]" && next === closing) index += 1
+        else quote = null
+      }
+      continue
+    }
+    if (character === "-" && next === "-") {
+      lineComment = true
+      index += 1
+      continue
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true
+      index += 1
+      continue
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character
+      hasSql = true
+      continue
+    }
+    if (character === "[") {
+      quote = "]"
+      hasSql = true
+      continue
+    }
+    if (character === ";") {
+      if (hasSql) statements.push(sql.slice(start, index).trim())
+      start = index + 1
+      hasSql = false
+      continue
+    }
+    if (!/\s/.test(character ?? "")) hasSql = true
+  }
+
+  if (quote !== null || blockComment) {
+    throw new AppError({
+      code: "SCHEMA_DEFINITION_INVALID",
+      message: "Schema SQL contains an unterminated token",
+    })
+  }
+  if (hasSql) statements.push(sql.slice(start).trim())
+  if (statements.length === 0) {
+    throw new AppError({ code: "SCHEMA_DEFINITION_INVALID", message: "Schema SQL is empty" })
+  }
+  for (const statement of statements) {
+    if (/^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b/i.test(withoutLeadingComments(statement))) {
+      throw new AppError({
+        code: "SCHEMA_DEFINITION_INVALID",
+        message: "Schema triggers are not supported by the statement executor",
+      })
+    }
+  }
+  return statements
+}
+
+function withoutLeadingComments(statement: string): string {
+  const remaining = statement.trimStart()
+  if (remaining.startsWith("--")) {
+    const end = remaining.indexOf("\n")
+    return end === -1 ? "" : withoutLeadingComments(remaining.slice(end + 1))
+  }
+  if (remaining.startsWith("/*")) {
+    const end = remaining.indexOf("*/", 2)
+    return end === -1 ? remaining : withoutLeadingComments(remaining.slice(end + 2))
+  }
+  return remaining
+}

@@ -52,6 +52,15 @@ describe("CloudflareRuntimeProvider", () => {
         String(path),
       ),
     ).toEqual(["src/main.ts"])
+    const abortReason = new DOMException("Stop observing files", "AbortError")
+    const aborted = AbortSignal.abort(abortReason)
+    await expect(provider.inspect(runtime, aborted)).rejects.toBe(abortReason)
+    await expect(
+      provider.listFiles(runtime, relativePath("src"), { maxEntries: 10 }, aborted),
+    ).rejects.toBe(abortReason)
+    await expect(
+      provider.readFile(runtime, relativePath("src/main.ts"), { maxBytes: 1_024 }, aborted),
+    ).rejects.toBe(abortReason)
 
     const process = await provider.spawn(runtime, {
       processId: "runner-session-1",

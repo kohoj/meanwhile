@@ -24,8 +24,8 @@ import {
   type RuntimeState,
 } from "../../src/providers/runtime-provider"
 import {
-  type RuntimeCleanupEvent,
   RuntimeReaper,
+  type RuntimeReaperEvent,
   RuntimeReaperLoop,
 } from "../../src/services/runtime-reaper"
 import {
@@ -54,6 +54,7 @@ class DestroyProvider implements RuntimeProvider {
     portExposure: false,
     processSignals: ["SIGINT", "SIGTERM", "SIGKILL"] as const,
   } as const
+  readonly created: CreateRuntimeInput[] = []
   readonly destroyed: RuntimeHandle[] = []
 
   constructor(
@@ -73,8 +74,14 @@ class DestroyProvider implements RuntimeProvider {
     if (this.destroyed.length <= this.failCount) throw this.failure()
   }
 
-  async create(_input: CreateRuntimeInput): Promise<RuntimeHandle> {
-    throw new Error("not used")
+  async create(input: CreateRuntimeInput): Promise<RuntimeHandle> {
+    this.created.push(input)
+    return {
+      kind: "runtime",
+      version: 1,
+      provider: this.name,
+      opaque: input.runtimeId,
+    }
   }
 
   async start(_runtime: RuntimeHandle): Promise<void> {
@@ -139,6 +146,19 @@ class DestroyProvider implements RuntimeProvider {
   }
 }
 
+class FailingCreateProvider extends DestroyProvider {
+  override async create(input: CreateRuntimeInput): Promise<RuntimeHandle> {
+    this.created.push(input)
+    throw new RuntimeProviderError({
+      provider: this.name,
+      operation: "create",
+      code: "ALLOCATION_RESPONSE_INVALID",
+      message: "raw provider details must not persist",
+      retryable: false,
+    })
+  }
+}
+
 describe("runtime cleanup", () => {
   test("never destroys compute for a running run", async () => {
     const store = createStore()
@@ -151,6 +171,10 @@ describe("runtime cleanup", () => {
 
       expect(await reaper.runOnce()).toEqual({
         recoveredInterrupted: 0,
+        provisioningEligible: 0,
+        provisioningMaterialized: 0,
+        provisioningFailed: 0,
+        provisioningExhausted: 0,
         eligible: 0,
         claimed: 0,
         skippedClaims: 0,
@@ -171,7 +195,7 @@ describe("runtime cleanup", () => {
     try {
       const runtime = createRunWithRuntime(store, "run-done", "succeeded")
       const provider = new DestroyProvider()
-      const events: RuntimeCleanupEvent[] = []
+      const events: RuntimeReaperEvent[] = []
       const reaper = new RuntimeReaper(store, new RuntimeProviderRegistry([provider]), {
         clock: () => new Date(START),
         createId: deterministicIds(),
@@ -315,6 +339,114 @@ describe("runtime cleanup", () => {
     }
   })
 
+  test("reacquires and destroys a runtime created before its handle was durably materialized", async () => {
+    const store = createStore()
+    try {
+      const seeded = createRunWithRuntime(store, "run-provisioning-orphan", "running")
+      store.database.query("DELETE FROM runtime_instances WHERE id = ?").run(seeded.id)
+      store.database
+        .query(`
+          UPDATE runtime_provisioning_intents
+          SET status = 'creating', attempts = 1, next_attempt_at = NULL
+          WHERE runtime_id = ?
+        `)
+        .run(seeded.id)
+      const provider = new DestroyProvider()
+
+      // This is the crash boundary: provider allocation succeeded, but the
+      // returned handle never reached runtime_instances.
+      await provider.create({ runtimeId: seeded.id })
+      transition(store, seeded.runId, "running", "failed")
+
+      const reaper = new RuntimeReaper(store, new RuntimeProviderRegistry([provider]), {
+        clock: () => new Date(START),
+        createId: deterministicIds(),
+      })
+      const result = await reaper.runOnce()
+
+      expect(result).toMatchObject({
+        recoveredInterrupted: 1,
+        provisioningEligible: 1,
+        provisioningMaterialized: 1,
+        provisioningFailed: 0,
+        eligible: 1,
+        succeeded: 1,
+      })
+      expect(provider.created).toEqual([{ runtimeId: seeded.id }, { runtimeId: seeded.id }])
+      expect(provider.destroyed).toHaveLength(1)
+      expect(store.getRuntimeProvisioningIntentForRun(seeded.runId)?.status).toBe("materialized")
+      expect(store.getRuntimeForRun(seeded.runId)).toMatchObject({
+        cleanupStatus: "succeeded",
+        destroyedAt: START,
+      })
+      expect(
+        store
+          .listAudit(OWNER_ID, seeded.id)
+          .map((record) => record.action)
+          .filter((action) => action === "runtime.create_reconcile"),
+      ).toHaveLength(1)
+    } finally {
+      store.close()
+    }
+  })
+
+  test("bounds uncertain provisioning retries even when the provider marks the response non-retryable", async () => {
+    const store = createStore()
+    try {
+      const seeded = createRunWithRuntime(store, "run-provisioning-uncertain", "running")
+      store.database.query("DELETE FROM runtime_instances WHERE id = ?").run(seeded.id)
+      store.database
+        .query(`
+          UPDATE runtime_provisioning_intents
+          SET status = 'creating', attempts = 1, next_attempt_at = NULL
+          WHERE runtime_id = ?
+        `)
+        .run(seeded.id)
+      transition(store, seeded.runId, "running", "failed")
+
+      let current = new Date(START)
+      const provider = new FailingCreateProvider()
+      const reaper = new RuntimeReaper(store, new RuntimeProviderRegistry([provider]), {
+        clock: () => current,
+        backoffMs: [100, 200],
+        createId: deterministicIds(),
+      })
+      expect(await reaper.runOnce()).toMatchObject({
+        recoveredInterrupted: 1,
+        provisioningFailed: 1,
+        provisioningExhausted: 0,
+      })
+      expect(store.getRuntimeProvisioningIntentForRun(seeded.runId)).toMatchObject({
+        status: "failed",
+        attempts: 2,
+        nextAttemptAt: "2026-01-01T00:00:00.200Z",
+        lastError: {
+          code: "PROVIDER_UNAVAILABLE",
+          retryable: true,
+          details: { providerRetryable: false },
+        },
+      })
+
+      current = new Date("2026-01-01T00:00:00.200Z")
+      expect(await reaper.runOnce()).toMatchObject({
+        provisioningFailed: 1,
+        provisioningExhausted: 1,
+      })
+      expect(store.getRuntimeProvisioningIntentForRun(seeded.runId)).toMatchObject({
+        status: "failed",
+        attempts: 3,
+        nextAttemptAt: null,
+        lastError: { code: "PROVIDER_UNAVAILABLE", retryable: false },
+      })
+      expect(store.countOperationalState().cleanupBacklog).toBe(1)
+      expect(() => store.assertQuiescent()).toThrow(
+        expect.objectContaining({ code: "DATA_ROOT_BUSY" }),
+      )
+    } finally {
+      store.close()
+    }
+  })
+
   test("isolates observer failures and reports them without changing cleanup correctness", async () => {
     const store = createStore()
     try {
@@ -382,6 +514,10 @@ describe("runtime cleanup loop", () => {
 function emptyReaperReport() {
   return {
     recoveredInterrupted: 0,
+    provisioningEligible: 0,
+    provisioningMaterialized: 0,
+    provisioningFailed: 0,
+    provisioningExhausted: 0,
     eligible: 0,
     claimed: 0,
     skippedClaims: 0,
@@ -422,7 +558,6 @@ function createRunWithRuntime(
   })
   transition(store, runId, "queued", "provisioning")
   transition(store, runId, "provisioning", "running")
-  if (status !== "running") transition(store, runId, "running", status)
 
   const runtime: RuntimeInstance = {
     id: `runtime-${runId}`,
@@ -434,28 +569,121 @@ function createRunWithRuntime(
     cleanupStatus: "pending",
     cleanupAttempts: 0,
     cleanupLastError: null,
-    cleanupNextAttemptAt: START,
+    cleanupNextAttemptAt: null,
     createdAt: START,
     updatedAt: START,
     destroyedAt: null,
   }
-  store.createRuntime(runtime)
+  const intent = store.ensureRuntimeProvisioningIntent({
+    runId,
+    ownerId: OWNER_ID,
+    runtimeId: runtime.id,
+    provider: runtime.provider,
+    at: START,
+  })
+  if (intent === null || store.claimRuntimeProvisioning(runtime.id, START, "active") === null) {
+    throw new Error("test runtime provisioning could not be claimed")
+  }
+  store.materializeRuntimeProvisioning(runtime, runtimeAudit(runtime))
+  if (status !== "running") transition(store, runId, "running", status)
   return runtime
 }
 
 function transition(store: Store, runId: string, fromStatus: RunStatus, toStatus: RunStatus): void {
   const current = store.getRunInternal(runId)
   if (current === null) throw new Error("test run is missing")
-  const transitioned = store.transitionRun({
+  if (current.status !== fromStatus) {
+    throw new Error(`expected ${fromStatus}, received ${current.status}`)
+  }
+  if (toStatus === "provisioning") {
+    const claimed = store.claimRunProvisioning({
+      runId,
+      expectedVersion: current.statusVersion,
+      at: START,
+      deadlineAt: "2000-01-01T00:00:00.000Z",
+      audit: { ...auditInput(), action: "run.provision" },
+      systemLog: { eventType: "run.provisioning", data: "Provisioning runtime" },
+    })
+    if (claimed === null) throw new Error("test provisioning claim failed")
+    return
+  }
+  if (toStatus === "running") {
+    store.createRunnerSession({
+      runId,
+      ownerId: current.ownerId,
+      runnerSessionId: `runner-${runId}`,
+      protocolVersion: 1,
+      createdAt: START,
+    })
+    store.acceptRunnerFrame({
+      ownerId: current.ownerId,
+      runId,
+      runnerSessionId: `runner-${runId}`,
+      protocolVersion: 1,
+      providerCursor: "cursor-1",
+      runnerSequence: 1,
+      stream: "agent",
+      eventType: "session.started",
+      data: JSON.stringify({ sessionId: "seed-session" }),
+      createdAt: START,
+      runningTransition: {
+        at: START,
+        reason: "agent.session_started",
+        audit: { ...auditInput(), action: "agent.start" },
+        systemLog: { eventType: "run.running", data: "Agent session started" },
+      },
+    })
+    return
+  }
+  const common = {
+    ownerId: current.ownerId,
     runId,
-    expectedStatus: fromStatus,
-    expectedVersion: current.statusVersion,
-    toStatus,
-    reason: `test.${toStatus}`,
     at: START,
-    audit: { ...auditInput(), action: `run.${toStatus}` },
-  })
-  if (transitioned === null) throw new Error(`test transition to ${toStatus} was not claimed`)
+    resultAudit: { ...auditInput(), action: `run.${toStatus}` },
+    systemLog: { eventType: `run.${toStatus}`, data: `Run ${toStatus}` },
+  } as const
+  const claimed =
+    toStatus === "succeeded"
+      ? (() => {
+          const terminal = { outcome: "succeeded", stopReason: "end_turn" } as const
+          store.acceptRunnerFrame({
+            ownerId: current.ownerId,
+            runId,
+            runnerSessionId: `runner-${runId}`,
+            protocolVersion: 1,
+            providerCursor: "cursor-2",
+            runnerSequence: 2,
+            stream: "agent",
+            eventType: "terminal",
+            data: JSON.stringify(terminal),
+            terminalResult: terminal,
+            createdAt: START,
+          })
+          return store.claimRunOutcome({
+            ...common,
+            kind: "runner",
+            status: "succeeded",
+            terminalResult: terminal,
+          })
+        })()
+      : toStatus === "failed"
+        ? store.claimRunOutcome({
+            ...common,
+            kind: "control_plane_failure",
+            status: "failed",
+            error: { code: "INTERNAL", message: "Test failure", retryable: false },
+          })
+        : toStatus === "cancelled"
+          ? store.claimRunOutcome({
+              ...common,
+              kind: "cancel",
+              requestAudit: { ...auditInput(), action: "run.cancel_request" },
+            })
+          : toStatus === "timed_out"
+            ? store.claimRunOutcome({ ...common, kind: "timeout" })
+            : null
+  if (claimed === null) throw new Error(`unsupported test outcome ${toStatus}`)
+  if (claimed?.outcome !== "claimed") throw new Error("test failure outcome was not claimed")
 }
 
 function auditInput() {
@@ -465,6 +693,21 @@ function auditInput() {
     traceId: null,
     metadata: {},
   } as const
+}
+
+function runtimeAudit(runtime: RuntimeInstance) {
+  return {
+    id: crypto.randomUUID(),
+    ownerId: runtime.ownerId,
+    actorApiKeyId: null,
+    action: "runtime.create",
+    resourceType: "runtime" as const,
+    resourceId: runtime.id,
+    requestId: "request-cleanup-test",
+    traceId: null,
+    metadata: { runId: runtime.runId, provider: runtime.provider },
+    createdAt: START,
+  }
 }
 
 function deterministicIds(): () => string {

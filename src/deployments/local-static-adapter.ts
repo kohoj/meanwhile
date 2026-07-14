@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, rename, rm } from "node:fs/promises"
+import { lstat, mkdir, rename, rm } from "node:fs/promises"
 import { dirname, resolve, sep } from "node:path"
 import { sha256 } from "../artifacts/artifact-store"
 import { normalizeArtifactPath } from "../services/artifact-collector"
@@ -10,19 +10,12 @@ import {
   type DeploymentSourceEntry,
   type DeployResult,
 } from "./deploy-adapter"
+import {
+  type LocalStaticPublicationManifest,
+  localStaticPublicationManifest,
+  verifyLocalStaticPublication,
+} from "./local-static-publication"
 import { isPreviewDeploymentId, type LocalStaticServer } from "./local-static-server"
-
-interface PublishedManifest {
-  version: 1
-  artifactId: string
-  manifestDigest: string
-  files: readonly {
-    path: string
-    digest: string
-    size: number
-    mediaType: string
-  }[]
-}
 
 /** Atomically materializes immutable artifacts for the separate preview origin. */
 export class LocalStaticAdapter implements DeployAdapter {
@@ -65,8 +58,7 @@ export class LocalStaticAdapter implements DeployAdapter {
     }
 
     const entries = validateEntries(input.source.entries)
-    const manifest: PublishedManifest = {
-      version: 1,
+    const manifest = localStaticPublicationManifest({
       artifactId: input.source.artifactId,
       manifestDigest: input.source.manifestDigest,
       files: entries.map((entry) => ({
@@ -75,7 +67,7 @@ export class LocalStaticAdapter implements DeployAdapter {
         size: entry.blob.size,
         mediaType: entry.mediaType,
       })),
-    }
+    })
     const root = this.#server.root
     const destination = resolve(root, input.deploymentId)
     const temporary = resolve(root, `.${input.deploymentId}.${crypto.randomUUID()}.tmp`)
@@ -83,27 +75,24 @@ export class LocalStaticAdapter implements DeployAdapter {
     assertContained(root, temporary)
 
     this.#server.start()
-    const destinationExists = await pathExistsAsDirectory(destination)
-    const existing = await readPublishedManifest(destination)
-    if (existing !== null) {
-      if (samePublication(existing, manifest)) {
+    if (await pathExists(destination)) {
+      try {
+        await verifyLocalStaticPublication(destination, manifest)
         await context.emit({
           level: "info",
           event: "deployment.local_static.reused",
           message: "Immutable local preview already exists.",
         })
         return this.#result(input.deploymentId, manifest)
+      } catch (error) {
+        throw new DeployAdapterError(
+          "DEPLOYMENT_TARGET_FAILED",
+          "Deployment identity is bound to an invalid local publication.",
+          false,
+          {},
+          { cause: error },
+        )
       }
-      throw new DeployAdapterError(
-        "DEPLOYMENT_TARGET_FAILED",
-        "Deployment identity is already bound to different immutable content.",
-      )
-    }
-    if (destinationExists) {
-      throw new DeployAdapterError(
-        "DEPLOYMENT_TARGET_FAILED",
-        "Deployment identity is bound to an invalid local publication.",
-      )
     }
 
     assertNotAborted(context.signal)
@@ -141,9 +130,11 @@ export class LocalStaticAdapter implements DeployAdapter {
       if (error instanceof DeployAdapterError) throw error
 
       // Another execution may have atomically published the same deployment.
-      const raced = await readPublishedManifest(destination)
-      if (raced !== null && samePublication(raced, manifest)) {
+      try {
+        await verifyLocalStaticPublication(destination, manifest)
         return this.#result(input.deploymentId, manifest)
+      } catch {
+        // Preserve the original operation as the safe failure cause below.
       }
 
       throw new DeployAdapterError(
@@ -164,7 +155,7 @@ export class LocalStaticAdapter implements DeployAdapter {
     return this.#result(input.deploymentId, manifest)
   }
 
-  #result(deploymentId: string, manifest: PublishedManifest): DeployResult {
+  #result(deploymentId: string, manifest: LocalStaticPublicationManifest): DeployResult {
     const url = this.#server.deploymentUrl(deploymentId)
     return {
       url,
@@ -242,57 +233,15 @@ function validateEntries(
   return ordered
 }
 
-async function readPublishedManifest(destination: string): Promise<PublishedManifest | null> {
+async function pathExists(path: string): Promise<boolean> {
   try {
-    const manifestPath = resolve(destination, "manifest.json")
-    const info = await lstat(manifestPath)
-    if (!info.isFile() || info.isSymbolicLink()) return null
-    const raw = await readFile(manifestPath, "utf8")
-    const value: unknown = JSON.parse(raw)
-    if (!isPublishedManifest(value)) return null
-    return value
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-      return null
-    }
-    return null
-  }
-}
-
-async function pathExistsAsDirectory(path: string): Promise<boolean> {
-  try {
-    const info = await lstat(path)
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      throw new DeployAdapterError(
-        "DEPLOYMENT_TARGET_FAILED",
-        "Deployment identity is bound to an invalid local publication.",
-      )
-    }
+    await lstat(path)
     return true
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
       return false
     throw error
   }
-}
-
-function isPublishedManifest(value: unknown): value is PublishedManifest {
-  if (typeof value !== "object" || value === null) return false
-  const record = value as Partial<PublishedManifest>
-  return (
-    record.version === 1 &&
-    typeof record.artifactId === "string" &&
-    typeof record.manifestDigest === "string" &&
-    Array.isArray(record.files)
-  )
-}
-
-function samePublication(left: PublishedManifest, right: PublishedManifest): boolean {
-  return (
-    left.artifactId === right.artifactId &&
-    left.manifestDigest === right.manifestDigest &&
-    JSON.stringify(left.files) === JSON.stringify(right.files)
-  )
 }
 
 function assertNotAborted(signal: AbortSignal): void {

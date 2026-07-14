@@ -71,15 +71,9 @@ export async function sha256File(path: string): Promise<string> {
 }
 
 export function assertProviderProvenance(
-  snapshot: ExecutionProvenance | null,
+  snapshot: ExecutionProvenance,
   provider: RuntimeProvider,
 ): void {
-  if (snapshot === null) {
-    throw new AppError({
-      code: "EXECUTION_PROVENANCE_UNAVAILABLE",
-      message: "Run execution provenance is unavailable",
-    })
-  }
   const current = {
     name: provider.name,
     adapterVersion: provider.provenance.adapterVersion,

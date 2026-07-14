@@ -115,7 +115,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
   readonly provenance: RuntimeProvider["provenance"]
   readonly capabilities = Object.freeze({
     isolation: "none" as const,
-    processRecovery: globalThis.process.platform !== "win32",
+    processRecovery: true,
     eventReplay: true,
     processInput: true,
     portExposure: true,
@@ -131,6 +131,9 @@ export class LocalRuntimeProvider implements RuntimeProvider {
   readonly #liveProcesses = new Map<string, LiveProcess>()
 
   constructor(options: LocalRuntimeProviderOptions) {
+    if (globalThis.process.platform === "win32") {
+      throw new TypeError("The local runtime provider requires POSIX process groups")
+    }
     if (options.rootDirectory.length === 0) {
       throw new TypeError("rootDirectory is required")
     }
@@ -211,9 +214,11 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     await this.#writeRuntimeStatus(metadata, "running", "start")
   }
 
-  async inspect(runtime: RuntimeHandle): Promise<RuntimeState> {
+  async inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState> {
+    throwIfAborted(signal)
     const runtimeId = this.#runtimeId(runtime, "inspect")
     const metadata = await this.#readRuntimeMetadata(runtimeId, "inspect", true)
+    throwIfAborted(signal)
     return {
       status: metadata?.status ?? "missing",
       observedAt: new Date().toISOString(),
@@ -335,7 +340,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         stdin: spec.initialStdin === undefined ? "ignore" : "pipe",
         stdout: stdoutDescriptor,
         stderr: stderrDescriptor,
-        detached: globalThis.process.platform !== "win32",
+        detached: true,
       })
       closeSync(stdoutDescriptor)
       closeSync(stderrDescriptor)
@@ -355,7 +360,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
       try {
         await writeJsonAtomic(this.#processMetadataPath(identity), processMetadata)
       } catch (cause) {
-        killProcessGroup(child.pid, "SIGKILL", () => child.kill("SIGKILL"))
+        killProcessGroup(child.pid, "SIGKILL")
         await child.exited
         throw this.#error(
           "spawn",
@@ -369,7 +374,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         pid: child.pid,
         exited: child.exited,
         killLeader: (signal) => child.kill(signal),
-        killGroup: (signal) => killProcessGroup(child.pid, signal, () => child.kill(signal)),
+        killGroup: (signal) => killProcessGroup(child.pid, signal),
         unref: () => child.unref(),
         getSignalCode: () => normalizeSignal(child.signalCode),
         completion: Promise.resolve({
@@ -537,7 +542,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
       }
       if (!sameProcess(metadata)) return
       if (signal === "SIGKILL") {
-        killProcessGroup(metadata.pid, signal, () => globalThis.process.kill(metadata.pid, signal))
+        killProcessGroup(metadata.pid, signal)
       } else {
         globalThis.process.kill(metadata.pid, signal)
       }
@@ -651,7 +656,9 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ListRuntimeFilesOptions,
+    signal?: AbortSignal,
   ): Promise<RuntimeFileInfo[]> {
+    throwIfAborted(signal)
     const runtimeId = this.#runtimeId(runtime, "listFiles")
     await this.#requireRuntime(runtimeId, "listFiles")
     const maxEntries = nonNegativeInteger(options.maxEntries, "maxEntries")
@@ -665,6 +672,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     const entries: Dirent[] = []
     const handle = await opendir(directory)
     for await (const entry of handle) {
+      throwIfAborted(signal)
       if (entries.length >= maxEntries) {
         throw this.#error(
           "listFiles",
@@ -676,6 +684,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     }
     const result: RuntimeFileInfo[] = []
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      throwIfAborted(signal)
       let childPath: RelativePath
       try {
         childPath = relativePath(logicalPath === "." ? entry.name : `${logicalPath}/${entry.name}`)
@@ -701,6 +710,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         modifiedAt: childState.mtime.toISOString(),
       })
     }
+    throwIfAborted(signal)
     return result
   }
 
@@ -708,7 +718,9 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ReadRuntimeFileOptions,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
+    throwIfAborted(signal)
     const runtimeId = this.#runtimeId(runtime, "readFile")
     await this.#requireRuntime(runtimeId, "readFile")
     const requestedMaxBytes = nonNegativeInteger(options.maxBytes, "maxBytes")
@@ -743,6 +755,7 @@ export class LocalRuntimeProvider implements RuntimeProvider {
         )
       }
       const bytes = new Uint8Array(await handle.readFile())
+      throwIfAborted(signal)
       if (bytes.byteLength > maxBytes || bytes.byteLength !== fileState.size) {
         throw this.#error(
           "readFile",
@@ -1299,24 +1312,11 @@ function normalizeProcessSignal(value: string | null): ProcessSignal | null {
   return value === "SIGINT" || value === "SIGTERM" || value === "SIGKILL" ? value : null
 }
 
-function killProcessGroup(leaderPid: number, signal: ProcessSignal, fallback?: () => void): void {
+function killProcessGroup(leaderPid: number, signal: ProcessSignal): void {
   try {
-    if (globalThis.process.platform !== "win32") {
-      globalThis.process.kill(-leaderPid, signal)
-      return
-    }
-    fallback?.()
+    globalThis.process.kill(-leaderPid, signal)
   } catch (cause) {
     if (isErrno(cause, "ESRCH")) return
-    if (fallback !== undefined) {
-      try {
-        fallback()
-        return
-      } catch (fallbackCause) {
-        if (isErrno(fallbackCause, "ESRCH")) return
-        throw fallbackCause
-      }
-    }
     throw cause
   }
 }

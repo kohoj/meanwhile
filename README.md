@@ -10,7 +10,7 @@
 
 Meanwhile gives agent work a portable identity. A `Run` carries one task to immutable output. An `AgentSession` keeps one ACP context alive across ordered `Turn`s. Both compose an [ACP](https://agentclientprotocol.com/) agent, a runtime, and policy; both survive control-plane restarts without exposing provider machinery.
 
-Use a run for a fix, migration, evaluation, or release. Use a session when a person or upstream agent needs to inspect, redirect, interrupt, and continue the same agent context. Promote only immutable run output.
+Use a run for a fix, repository change, evaluation, or release. Use a session when a person or upstream agent needs to inspect, redirect, interrupt, and continue the same agent context. Promote only immutable run output.
 
 ```text
                                   immutable Artifact ──► Deployment
@@ -59,7 +59,7 @@ Interactive work adds four concepts without weakening those boundaries:
 
 ## Run it locally
 
-Requires [Bun 1.3.13+](https://bun.sh/) and Git. Every Meanwhile application, CLI, demo, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The local provider needs no cloud account, but it is **not a security sandbox**.
+Requires macOS or Linux, [Bun 1.3.13+](https://bun.sh/), and Git. Every Meanwhile application, CLI, demo, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The local provider needs no cloud account, but it is **not a security sandbox**.
 
 ```console
 bun install
@@ -70,7 +70,7 @@ bun run doctor
 bun run dev
 ```
 
-The API starts at `http://127.0.0.1:7331`; local previews use the separate origin `http://127.0.0.1:7332`. Startup applies transactional SQLite migrations before readiness. OpenAPI is available at `/openapi.json`.
+The API starts at `http://127.0.0.1:7331`; local previews use the separate origin `http://127.0.0.1:7332`. Startup initializes the exact current SQLite schema on an empty database and rejects every non-matching database before readiness. OpenAPI is available at `/openapi.json`.
 
 To exercise the complete no-account path in one command:
 
@@ -318,7 +318,7 @@ The stable contract is intentionally deeper than `runCommand(string)`:
 interface RuntimeProvider {
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>
-  inspect(runtime: RuntimeHandle): Promise<RuntimeState>
+  inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState>
   stop(runtime: RuntimeHandle): Promise<void>
   destroy(runtime: RuntimeHandle): Promise<void>
 
@@ -330,8 +330,8 @@ interface RuntimeProvider {
   wait(process: ProcessHandle): Promise<ProcessExit>
 
   writeFiles(runtime: RuntimeHandle, files: readonly RuntimeFile[]): Promise<void>
-  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions): Promise<RuntimeFileInfo[]>
-  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions): Promise<Uint8Array>
+  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions, signal?: AbortSignal): Promise<RuntimeFileInfo[]>
+  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions, signal?: AbortSignal): Promise<Uint8Array>
   expose?(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint>
   health(): Promise<ProviderHealth>
 }
@@ -385,7 +385,7 @@ curl --fail-with-body \
   }'
 ```
 
-The response is a durable deployment record. The executor stores ordered logs, structured failures, audit evidence, and the validated preview or deployment URL. `local-static` completes the entire flow without a cloud account and serves untrusted output on an origin separate from the authenticated API.
+The response is a durable deployment record. The executor stores ordered logs, structured failures, audit evidence, and the validated preview or deployment URL. If target success becomes possible before its durable evidence commits, the record remains `running` for exact-id reconciliation instead of claiming false failure. `local-static` completes the entire flow without a cloud account, verifies its exact immutable publication on reuse, and serves untrusted output on an origin separate from the authenticated API.
 
 New targets implement `DeployAdapter` over an immutable source; they do not receive a Store, RuntimeProvider, or owner identity.
 
@@ -396,9 +396,9 @@ SQLite in WAL mode is the source of truth for one active control-plane writer. I
 ```text
 Owner ── API keys
   ├── Run ── status/events/logs ── immutable artifacts ── deployments
-  │    └── runtime instance ── runner cursor ── cleanup state
+  │    └── runtime create intent ── runtime instance ── process launch intent ── runner cursor ── cleanup state
   └── AgentSession ── Turns ── session events
-       └── runtime lease ── process/command cursors ── cleanup state
+       └── runtime create intent ── runtime lease ── process/command cursors ── cleanup state
 Shared immutable input bundle references feed either execution shape.
 All mutations ── append-only audit records
 ```
@@ -421,10 +421,10 @@ queued → provisioning → running → succeeded
 | Tenant isolation | Bearer keys derive identity; all public reads and mutations include `ownerId`; cross-owner access returns `NOT_FOUND` |
 | Secrets | Public input stores references only; values resolve immediately before use, are redacted before output consumption, and never enter SQLite or artifacts |
 | Idempotency | `(ownerId, Idempotency-Key)` and a canonical request hash commit with the run; conflicting reuse returns `409` |
-| Timeout | Provisioning starts a persisted absolute deadline; the runner receives only a remaining monotonic duration |
-| Cancellation | Intent commits before signalling; one compare-and-swap transition claims `cancelled`; cleanup follows separately |
-| Restart recovery | Persisted runtime/process handles and cursors reconnect and deduplicate replay where provider capabilities permit |
-| Cleanup | Terminal runtimes enter durable bounded-retry destruction; a runtime for a running run is never eligible |
+| Timeout | Provisioning starts a persisted absolute deadline; the runner receives only a remaining monotonic duration, and post-terminal artifact reads remain bounded by the same deadline |
+| Cancellation | One atomic outcome claim commits request audit, immutable `cancelled`, terminal evidence, and cleanup eligibility before signalling |
+| Restart recovery | Durable create intents reacquire the same provider runtime by id; persisted handles/cursors then reconnect and deduplicate replay where capabilities permit |
+| Cleanup | Terminal runtimes and uncertain create side effects enter durable bounded-retry reconciliation/destruction; active work is never eligible |
 | Admission | One-shot runs and new session leases have independent configurable concurrency; already-live sessions are always reattached after restart, and cleanup has its own bounded lane |
 | Timezones | Durable timestamps are UTC instants accepted by the control plane; agent processes receive `TZ=UTC`; local rendering belongs to clients |
 
@@ -453,7 +453,9 @@ bun run cli -- data gc --dry-run
 bun run cli -- data gc --apply
 ```
 
-Backup includes a normalized SQLite snapshot, all referenced workspace/artifact objects, persisted previews, migration identities, and a hash for every file. Restore accepts only an absent or empty destination; garbage collection is explicit dry-run/apply mark-and-sweep.
+Backup includes a normalized SQLite snapshot, all referenced workspace/artifact objects, and only previews referenced by successful local deployment rows. Preview verification proves the canonical manifest, exact file set, and every size/digest; orphan or tampered publication bytes make backup/verification fail rather than entering the archive. Restore accepts only an absent or empty destination; garbage collection is explicit dry-run/apply mark-and-sweep.
+
+Meanwhile has one current database schema and no upgrade path. A new empty database is initialized atomically and records the exact schema fingerprint; any nonempty database with a missing or different identity is rejected without modification. Schema changes require a fresh data root and deliberate export/import at the product boundary, never SQL backfill or dual-read code.
 
 ## Observability
 
@@ -487,7 +489,7 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 ## Production status
 
-Meanwhile `v0.1.1` is the current public compatibility baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox Codex, Claude Code, and Pi paths are implemented and release-proven through durable multi-turn continuity, immutable artifact download, and deployment. A compatibility baseline is not a blanket production-support promise.
+Meanwhile `v0.1.1` is the current public release baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox Codex, Claude Code, and Pi paths are implemented and release-proven through durable multi-turn continuity, immutable artifact download, and deployment. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
 Durable sessions on this branch are proven end to end through both runtime adapters, including one ACP identity across turns, interrupt, timeout, event replay, cleanup, and control-plane restart. Cloudflare evidence is bound to bridge protocol v4, an exact runner digest, and the deployed image reference/digest; these are operator/platform provenance assertions rather than remote attestation.
 

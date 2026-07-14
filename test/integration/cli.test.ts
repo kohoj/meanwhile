@@ -420,16 +420,10 @@ describe("Meanwhile CLI", () => {
     })
   })
 
-  test("doctor distinguishes migration incompatibility from filesystem writability", async () => {
+  test("doctor distinguishes schema mismatch from filesystem writability", async () => {
     const dataDirectory = await temporaryDirectory()
     const database = new Database(join(dataDirectory, "meanwhile.sqlite"), { create: true })
-    database.exec(`
-      CREATE TABLE schema_migrations (
-        version INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        applied_at TEXT NOT NULL
-      ) STRICT;
-    `)
+    database.exec("CREATE TABLE foreign_state(value TEXT NOT NULL) STRICT")
     database.close()
 
     const invocation = capture()
@@ -450,8 +444,8 @@ describe("Meanwhile CLI", () => {
     expect(output.checks).toContainEqual({
       name: "persistence",
       status: "unavailable",
-      message: "Database migration history is missing or invalid",
-      details: { code: "MIGRATION_HISTORY_INVALID" },
+      message: "Database does not match the current Meanwhile schema",
+      details: { code: "DATABASE_SCHEMA_MISMATCH" },
     })
   })
 

@@ -83,7 +83,7 @@ test("bearer identity enforces tenant isolation at every run-derived HTTP bounda
     const ownerBList = await asOwnerB("/runs")
     expect(ownerBList.status).toBe(200)
     expect(await ownerBList.json()).toMatchObject({ items: [] })
-    expect(harness.application.store.isCancellationRequested(run.id)).toBe(false)
+    expect(harness.application.store.getRunInternal(run.id)?.status).not.toBe("cancelled")
     expect(harness.application.store.listAudit(ownerB, run.id)).toEqual([])
 
     expect((await harness.request(`/runs/${run.id}`)).status).toBe(200)

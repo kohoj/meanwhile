@@ -47,7 +47,11 @@ export interface ProcessHandle {
 }
 
 export interface CreateRuntimeInput {
-  /** A stable, control-plane-generated identifier. It contains no owner data. */
+  /**
+   * A stable, control-plane-generated identifier. It contains no owner data.
+   * `create` is idempotent for this identity: an exact retry returns the same
+   * logical runtime rather than allocating another one.
+   */
   readonly runtimeId: string
 }
 
@@ -223,9 +227,11 @@ export interface RuntimeProvider {
   readonly capabilities: RuntimeCapabilities
   readonly provenance: RuntimeProviderProvenance
 
+  /** Idempotent for an exact `runtimeId`; conflicting reuse must fail closed. */
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>
-  inspect(runtime: RuntimeHandle): Promise<RuntimeState>
+  /** Aborts only this observation; it must not mutate the runtime. */
+  inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState>
   stop(runtime: RuntimeHandle): Promise<void>
   destroy(runtime: RuntimeHandle): Promise<void>
 
@@ -246,15 +252,19 @@ export interface RuntimeProvider {
   send?(process: ProcessHandle, input: ProcessInput): Promise<void>
 
   writeFiles(runtime: RuntimeHandle, files: readonly RuntimeFile[]): Promise<void>
+  /** Aborts only this file observation; it must not mutate the runtime. */
   listFiles(
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ListRuntimeFilesOptions,
+    signal?: AbortSignal,
   ): Promise<RuntimeFileInfo[]>
+  /** Aborts only this file observation; it must not mutate the runtime. */
   readFile(
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ReadRuntimeFileOptions,
+    signal?: AbortSignal,
   ): Promise<Uint8Array>
 
   expose?(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint>

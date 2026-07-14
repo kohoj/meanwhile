@@ -13,8 +13,13 @@ import {
   decodeWorkspaceBundleManifest,
   WORKSPACE_BUNDLE_LIMITS,
 } from "./artifacts/workspace-bundle"
+import {
+  localStaticPublicationManifest,
+  verifyLocalStaticPublication,
+} from "./deployments/local-static-publication"
+import { isPreviewDeploymentId } from "./deployments/local-static-server"
 import { AppError } from "./errors"
-import { type DurableBlobRoot, Store } from "./persistence/store"
+import { type DurableBlobRoot, type DurableLocalDeploymentRoot, Store } from "./persistence/store"
 import { SERVICE_VERSION } from "./version"
 
 const BACKUP_VERSION = 1 as const
@@ -37,13 +42,12 @@ const backupManifestSchema = z
     bunVersion: z.string(),
     createdAt: z.iso.datetime({ offset: true }),
     database: backupEntrySchema,
-    migrations: z.array(
-      z.object({
-        version: z.number().int().positive(),
-        name: z.string(),
-        sha256: z.string().regex(/^[a-f0-9]{64}$/),
-      }),
-    ),
+    schema: z
+      .object({
+        name: z.string().min(1),
+        fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict(),
     artifacts: z.array(backupEntrySchema),
     deployments: z.array(backupEntrySchema),
   })
@@ -159,18 +163,18 @@ export async function backupDataRoot(
     store = new Store(paths.databasePath)
     store.assertQuiescent()
     const databaseBytes = store.serialize()
-    const migrations = store.migrationHistory()
+    const schema = store.schemaIdentity()
     await mkdir(temporary, { recursive: true, mode: 0o700 })
     const databasePath = join(temporary, "meanwhile.sqlite")
     await writeFile(databasePath, databaseBytes, { mode: 0o600 })
 
     const snapshot = new Store(databasePath, { readonly: true })
     let artifacts: readonly BackupBlob[]
-    let deploymentIds: readonly string[]
+    let deployments: readonly DurableLocalDeploymentRoot[]
     try {
       snapshot.assertQuiescent()
       artifacts = await reachableBlobs(snapshot, new LocalArtifactStore(paths.artifactDir))
-      deploymentIds = snapshot.listLocalDeploymentIds()
+      deployments = snapshot.listLocalDeploymentRoots()
     } finally {
       snapshot.close()
     }
@@ -181,15 +185,19 @@ export async function backupDataRoot(
       await writeBackupFile(temporary, path, artifact.bytes)
       artifactEntries.push(entry(path, artifact.bytes))
     }
-    const deploymentEntries = await copyVerifiedTree(paths.deploymentDir, temporary, "deployments")
-    assertDeploymentBackupGraph(deploymentIds, deploymentEntries)
+    const deploymentEntries = await copyVerifiedDeployments(
+      paths.deploymentDir,
+      temporary,
+      deployments,
+      new LocalArtifactStore(paths.artifactDir),
+    )
     const manifest: DataBackupManifest = {
       version: BACKUP_VERSION,
       serviceVersion: SERVICE_VERSION,
       bunVersion: Bun.version,
       createdAt: new Date().toISOString(),
       database: entry("meanwhile.sqlite", databaseBytes),
-      migrations: [...migrations],
+      schema,
       artifacts: artifactEntries.sort(compareEntry),
       deployments: deploymentEntries.sort(compareEntry),
     }
@@ -220,8 +228,8 @@ export async function verifyDataBackup(path: string): Promise<DataBackupManifest
     const store = new Store(join(root, manifest.database.path), { readonly: true })
     try {
       store.assertQuiescent()
-      if (JSON.stringify(store.migrationHistory()) !== JSON.stringify(manifest.migrations)) {
-        throw invalidBackup("Backup migration history does not match its database")
+      if (JSON.stringify(store.schemaIdentity()) !== JSON.stringify(manifest.schema)) {
+        throw invalidBackup("Backup schema identity does not match its database")
       }
       const reachable = await reachableBlobs(store, new LocalArtifactStore(join(root, "artifacts")))
       const expected = reachable
@@ -230,7 +238,17 @@ export async function verifyDataBackup(path: string): Promise<DataBackupManifest
       if (JSON.stringify(expected) !== JSON.stringify([...manifest.artifacts].sort(compareEntry))) {
         throw invalidBackup("Backup artifact graph is incomplete or contains extra objects")
       }
-      assertDeploymentBackupGraph(store.listLocalDeploymentIds(), manifest.deployments)
+      const expectedDeployments = await inspectVerifiedDeployments(
+        join(root, "deployments"),
+        store.listLocalDeploymentRoots(),
+        new LocalArtifactStore(join(root, "artifacts")),
+      )
+      if (
+        JSON.stringify(expectedDeployments) !==
+        JSON.stringify([...manifest.deployments].sort(compareEntry))
+      ) {
+        throw invalidBackup("Backup deployment graph is incomplete or contains extra files")
+      }
     } finally {
       store.close()
     }
@@ -331,7 +349,7 @@ export async function garbageCollectDataRoot(
       if (!dryRun) await rm(absolute, { force: true })
     }
 
-    const retainedDeployments = new Set(store.listLocalDeploymentIds())
+    const retainedDeployments = new Set(store.listLocalDeploymentRoots().map(({ id }) => id))
     const deploymentPaths: string[] = []
     if (await pathExists(paths.deploymentDir)) {
       for (const name of await readdir(paths.deploymentDir)) {
@@ -409,20 +427,63 @@ function childReferences(
   return decodeWorkspaceBundleManifest(bytes, WORKSPACE_BUNDLE_LIMITS).files
 }
 
-async function copyVerifiedTree(
+async function copyVerifiedDeployments(
   sourceRoot: string,
   backupRoot: string,
-  prefix: string,
+  deployments: readonly DurableLocalDeploymentRoot[],
+  artifacts: LocalArtifactStore,
 ): Promise<DataBackupManifest["deployments"]> {
-  if (!(await pathExists(sourceRoot))) return []
-  const entries: DataBackupManifest["deployments"] = []
-  for (const relativePath of await listTreeFiles(sourceRoot)) {
-    const bytes = await readFile(contained(sourceRoot, relativePath))
-    const path = `${prefix}/${relativePath}`
-    await writeBackupFile(backupRoot, path, bytes)
-    entries.push(entry(path, bytes))
+  const entries = await inspectVerifiedDeployments(sourceRoot, deployments, artifacts)
+  for (const item of entries) {
+    const sourcePath = item.path.slice("deployments/".length)
+    const bytes = await readFile(contained(sourceRoot, sourcePath))
+    if (bytes.byteLength !== item.byteSize || sha256(bytes) !== item.digest) {
+      throw invalidBackup("A local deployment changed during backup")
+    }
+    await writeBackupFile(backupRoot, item.path, bytes)
   }
   return entries
+}
+
+async function inspectVerifiedDeployments(
+  sourceRoot: string,
+  deployments: readonly DurableLocalDeploymentRoot[],
+  artifacts: LocalArtifactStore,
+): Promise<DataBackupManifest["deployments"]> {
+  const entries: DataBackupManifest["deployments"] = []
+  try {
+    for (const deployment of deployments) {
+      if (!isPreviewDeploymentId(deployment.id)) {
+        throw invalidBackup("A local deployment identity is invalid")
+      }
+      const artifactBytes = await artifacts.read(deployment.ownerId, {
+        storageKey: deployment.manifestStorageKey,
+        digest: asSha256Digest(deployment.manifestDigest),
+        size: deployment.manifestByteSize,
+      })
+      const artifactManifest = decodeArtifactManifest(artifactBytes)
+      const expectedManifest = localStaticPublicationManifest({
+        artifactId: deployment.artifactId,
+        manifestDigest: deployment.manifestDigest,
+        files: artifactManifest.entries.map((file) => ({
+          path: file.path,
+          digest: file.digest,
+          size: file.size,
+          mediaType: file.mediaType,
+        })),
+      })
+
+      const deploymentRoot = contained(sourceRoot, deployment.id)
+      const verified = await verifyLocalStaticPublication(deploymentRoot, expectedManifest)
+      for (const file of verified) {
+        entries.push(entry(`deployments/${deployment.id}/${file.path}`, file.bytes))
+      }
+    }
+  } catch (cause) {
+    if (cause instanceof AppError && cause.code === "DATA_BACKUP_INVALID") throw cause
+    throw invalidBackup("Local deployment publication is invalid", cause)
+  }
+  return entries.sort(compareEntry)
 }
 
 async function listTreeFiles(root: string): Promise<string[]> {
@@ -486,18 +547,6 @@ function assertUniqueEntries(entries: readonly DataBackupManifest["database"][])
     bytes += item.byteSize
     if (paths.size > MAX_BACKUP_FILES || bytes > MAX_BACKUP_BYTES) {
       throw invalidBackup("Backup exceeds maintenance limits")
-    }
-  }
-}
-
-function assertDeploymentBackupGraph(
-  deploymentIds: readonly string[],
-  entries: Readonly<DataBackupManifest["deployments"]>,
-): void {
-  const paths = new Set(entries.map(({ path }) => path))
-  for (const id of deploymentIds) {
-    if (!paths.has(`deployments/${id}/manifest.json`)) {
-      throw invalidBackup("A successful local deployment is missing its published manifest")
     }
   }
 }

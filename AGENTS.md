@@ -159,7 +159,7 @@ interface RuntimeProvider {
 
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>
-  inspect(runtime: RuntimeHandle): Promise<RuntimeState>
+  inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState>
   stop(runtime: RuntimeHandle): Promise<void>
   destroy(runtime: RuntimeHandle): Promise<void>
 
@@ -171,8 +171,8 @@ interface RuntimeProvider {
   wait(process: ProcessHandle): Promise<ProcessExit>
 
   writeFiles(runtime: RuntimeHandle, files: RuntimeFile[]): Promise<void>
-  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions): Promise<RuntimeFileInfo[]>
-  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions): Promise<Uint8Array>
+  listFiles(runtime: RuntimeHandle, path: RelativePath, options: ListRuntimeFilesOptions, signal?: AbortSignal): Promise<RuntimeFileInfo[]>
+  readFile(runtime: RuntimeHandle, path: RelativePath, options: ReadRuntimeFileOptions, signal?: AbortSignal): Promise<Uint8Array>
 
   expose?(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint>
   health(): Promise<ProviderHealth>
@@ -187,8 +187,10 @@ Rules:
 - capabilities describe provider-neutral facts such as process recovery, event replay, process input, and port exposure; policy may branch on capabilities, never provider names;
 - arguments are arrays; paths are normalized relative paths;
 - providers preserve the declared portable file mode; executable intent is immutable workspace input, not adapter-specific metadata that core may discard;
+- process spawn is idempotent for `(runtime, processId, complete ProcessSpec)`; exact retries return the same process and conflicting reuse fails closed;
 - process events have a monotonic provider cursor for reconnect without duplication;
 - process input binds each positive sequence to one command identity; exact retries are idempotent and conflicting reuse fails closed;
+- runtime creation is idempotent for the exact control-plane runtime identity; a conflicting reuse fails closed rather than allocating different compute;
 - `expose` publishes an already-ready service; workload readiness is explicit evidence from the process, never inferred from provider process creation;
 - `stop` and `destroy` are idempotent; missing during cleanup means already absent;
 - errors preserve provider, operation, safe provider code, and retryability before normalization;
@@ -202,7 +204,11 @@ Rules:
 
 The control plane remains the owner of persisted absolute deadlines; immediately before spawn or turn dispatch it converts remaining policy time into a bounded duration. The runner enforces that duration with `performance.now()`, so sandbox clock skew cannot extend or prematurely terminate work. The provider sets the physical workspace as process cwd; no provider-private absolute path crosses the protocol. Resolved secret values travel only in the process environment, never in either serialized spec or command.
 
+Before one-shot spawn, the control plane persists a run-process launch intent containing only runtime/process identity and the accepted relative timeout budget. This freezes the otherwise time-varying process spec across the spawn-before-handle-persistence crash window without persisting secret values. Exact provider spawn retry then reacquires the same process; handle, public process identity, and audit materialize atomically.
+
 Runner stdout is NDJSON protocol only. Every frame includes protocol version, run or session identity, monotonic runner sequence, timestamp, type, and a bounded validated payload. Session turn frames also carry turn identity. Runner diagnostics use stderr. The control plane validates and deduplicates by runner sequence, verifies exact replays, then durably stores accepted evidence.
+
+Runner-side redaction is defense in depth, not a trust boundary. The control plane resolves the operation's known secret values before spawn or reconnect, retains its own redactor for the entire output-observation lifetime, and redacts agent-controlled fields again before SQLite accepts a frame. Protocol identities, terminal outcomes, and other control fields are never rewritten by a coincidental secret-value match.
 
 The provider event stream is the live path and provider-owned replay buffer. The database is the durable authority. Do not invent a “protected runner journal” inside the same sandbox: sandbox processes share a security context, so it is not a trustworthy boundary. A provider may spool output outside agent-writable storage, but correctness cannot depend on pretending the agent cannot observe or tamper with same-sandbox resources.
 
@@ -220,7 +226,7 @@ Executables are bare portable PATH names, never control-plane host paths. At run
 
 Run acceptance snapshots one self-verifying `ExecutionProvenance`: agent definition and catalog digests, runner digest when known, provider adapter version, capability digest, pinned runtime image reference/digest when known, and bridge protocol version. This snapshot participates in idempotency and persists with the run.
 
-Execution and recovery fail closed before compute if the configured adapter, capabilities, runner, image assertion, or bridge protocol no longer matches the accepted snapshot. Legacy rows without provenance remain readable but are not executable. Provenance is evidence of the configured execution identity; an unavailable platform image digest stays `null` rather than being fabricated.
+Execution and recovery fail closed before compute if the configured adapter, capabilities, runner, image assertion, or bridge protocol no longer matches the accepted snapshot. A run without valid provenance violates the persisted contract and is rejected; there is no alternate execution or read path. Provenance is evidence of the configured execution identity; an unavailable platform image digest stays `null` rather than being fabricated.
 
 ### 5.5 Store
 
@@ -253,6 +259,10 @@ Terminal statuses are immutable. Runtime cleanup is a separate lifecycle and nev
 2. an append-only status event;
 3. the required audit record.
 
+Outcome arbitration has two explicit store transactions because runner completion may precede artifact capture. Atomic acceptance of a validated runner terminal frame reserves that exact result together with its immutable log and prevents a later cancellation, timeout, or control-plane failure from replacing it. If another terminal outcome commits first, the runner frame is retained as `terminal.late` and reserves nothing. Artifact capture remains bounded by the run's original absolute deadline; expiry records a structured capture failure but cannot replace the reserved runner result. After that bounded attempt, `claimRunOutcome` commits the public terminal status, status event, audit, terminal system log, and cleanup eligibility together. Restart recovery reads only the reservation; it never reconstructs one from logs.
+
+The state machine still has exactly three status-mutation entrances: `claimRunProvisioning` owns `queued → provisioning`; acceptance of the validated `session.started` runner frame owns `provisioning → running`; `claimRunOutcome` owns every public terminal transition. Terminal-frame reservation is durable evidence arbitration, not a fourth status transition. No generic transition method or replay repair path exists.
+
 `running` means ACP initialization and session creation succeeded, not merely that a process exists. Logs never determine status. A late exit never overwrites an already claimed terminal result.
 
 `succeeded` means the ACP agent returned the protocol's successful terminal outcome; it does not certify that the user's task acceptance criteria were met. Higher-level proofs validate declared artifacts, tests, or deployments separately. Never scrape agent prose or adapter-specific metadata to reinterpret the protocol result.
@@ -276,7 +286,7 @@ Timeout starts when provisioning is claimed, so provider startup is bounded. Per
 Cancellation is a command to the executor:
 
 - queued: claim `cancelled` without creating compute;
-- provisioning/running: persist cancellation intent, signal the runner process group, claim `cancelled` exactly once, schedule cleanup;
+- provisioning/running without a reserved runner result: atomically claim `cancelled` with request/result audit and cleanup eligibility, then signal the runner process group and stop compute;
 - repeated cancellation is idempotent;
 - cleanup failure is visible but never rewrites the cancelled result.
 
@@ -290,18 +300,19 @@ An API restart is not itself an agent failure:
 - a still-active process continues;
 - an exited process finalizes from replayed terminal frames and process exit facts;
 - a missing or unrecoverable runtime becomes structured `RUNTIME_LOST` after bounded reconciliation;
-- orphaned runtimes enter durable cleanup;
-- all already persisted history remains readable.
+- runtime creation is preceded by a durable provisioning intent; if allocation succeeded before handle persistence, exact-id create reconciliation materializes and cleans up the same logical runtime;
+- orphaned or uncertain runtimes enter durable cleanup;
+- all durably accepted history remains readable.
 
 Recovery strength is an explicit `RuntimeCapabilities` value, not a fabricated universal guarantee.
 
 ### 6.5 Cleanup
 
-Runtime instances carry durable cleanup state: pending/running/succeeded/failed, attempts, last safe error, and next eligible attempt. The reaper destroys only terminal or abandoned runtimes, never a runtime for a running run. Destruction is idempotent, audited, observable, and retried only through explicit bounded backoff. Cleanup never deletes run history, logs, artifacts, deployments, or audit records.
+Runtime provisioning intents durably cover the create side effect before a provider call. Runtime instances then carry cleanup state: pending/running/succeeded/failed, attempts, last safe error, and next eligible attempt. The reaper reacquires exact runtime identities for interrupted create claims and destroys only terminal or abandoned runtimes, never a runtime for a running run. Reconciliation and destruction are idempotent, audited, observable, and retried only through explicit bounded backoff. A terminal runtime without a cleanup schedule is an invariant violation, not state to auto-repair. Cleanup never deletes run history, logs, artifacts, deployments, or audit records.
 
 ### 6.6 Durable run events
 
-Every accepted run transition, validated runner event, run log, captured artifact, and cleanup result also enters one owner-scoped `RunEvent` journal with a contiguous public sequence. `GET /runs/:id/events` exposes cursor pagination and resumable SSE over that sequence. Raw logs remain available as a compatibility/resource view; the event journal is the canonical material for agent-facing timelines. `src/timeline.ts` is a pure reducer, not stored derived state or a UI contract.
+Every accepted run transition, validated runner event, run log, captured artifact, and cleanup result also enters one owner-scoped `RunEvent` journal with a contiguous public sequence. `GET /runs/:id/events` exposes cursor pagination and resumable SSE over that sequence. Raw logs remain available as a focused resource view; the event journal is the canonical material for agent-facing timelines. `src/timeline.ts` is a pure reducer, not stored derived state or a UI contract.
 
 ### 6.7 Durable interactive sessions
 
@@ -325,7 +336,7 @@ Concurrent input is explicit policy:
 - `interrupt_and_send` atomically queues an interrupt before the replacement turn;
 - each session and each turn has its own owner-scoped idempotency key and canonical request hash.
 
-The runtime lease persists opaque runtime/process handles, provider and runner cursors, command sequence, cleanup state, attempts, safe error, and retry schedule. Operational sessions are never cleanup-eligible. Closing is idempotent, terminalizes unfinished turns, and schedules durable bounded-retry destruction. A service restart reconnects the same process, replays and exactly deduplicates runner evidence, resumes undispatched commands, and preserves the same ACP agent-session identity when provider capabilities permit.
+A durable session-runtime provisioning intent precedes lease creation. The runtime lease persists opaque runtime/process handles, provider and runner cursors, command sequence, cleanup state, attempts, safe error, and retry schedule. Provider acknowledgement or a recovered `running` observation records the first `runtime.start` audit idempotently, closing the remote-start-before-audit crash window. Session process-handle materialization commits the lease handle, public process identity, and `agent.start` audit atomically; an exact retry is idempotent and any split identity fails closed. Operational sessions are never cleanup-eligible. Closing is idempotent, terminalizes unfinished turns, and schedules durable bounded-retry destruction. A service restart recovers interrupted create/cleanup claims, reconnects the same process, replays and exactly deduplicates runner evidence, resumes undispatched commands, and preserves the same ACP agent-session identity when provider capabilities permit.
 
 New run and session admission are independently bounded. Recoverable sessions are always reattached even when their count exceeds new-session admission capacity; abandoning supervision to satisfy a concurrency number is not a valid optimization. Session cleanup uses a separate bounded lane so long-lived sessions cannot starve runtime destruction. Public history uses keyset/cursor pagination, and one turn is directly addressable without scanning prior turns.
 
@@ -341,13 +352,15 @@ Inline upload preparation snapshots and validates all files and computes the can
 
 Every workspace path crossing a boundary is relative, normalized, size-limited, and checked against traversal and symlink escape. Core code never relies on a provider's absolute path.
 
-Artifact collection is declared, not an unrestricted filesystem dump. Enforce file count, per-file and total byte limits, path and symlink safety, deterministic manifests and hashes, and secret scanning before persistence. Failed runs may still produce artifacts. Collection failure is separate evidence and does not rewrite the agent result unless an explicit policy says so.
+Artifact collection is declared, not an unrestricted filesystem dump. Enforce file count, per-file and total byte limits, path and symlink safety, deterministic manifests and hashes, secret scanning before persistence, and abortable provider reads bounded by the original run deadline. Failed runs may still produce artifacts. Collection failure is separate evidence and does not rewrite the agent result unless an explicit policy says so.
 
 `POST /deployments` accepts `runId`, exactly one of `artifactPath` or logical `workspacePath`, a `deployTarget`, non-secret configuration, and secret references. The service resolves the source to immutable stored bytes before invoking the adapter. If the source was not captured before runtime cleanup, return `DEPLOYMENT_SOURCE_UNAVAILABLE`.
 
 Deployment statuses are `queued`, `running`, `succeeded`, and `failed`. Store sequenced deployment logs, structured terminal errors, audit evidence, and preview/deployment URLs.
 
-`local-static` completes this flow without a cloud account. It serves untrusted output on a separate origin/port with defensive headers and an unguessable deployment identity; it never shares the authenticated API origin.
+`running` is the durable reconciliation state around an external deployment side effect. Once target success is possible, a deployment-log or success-transaction write failure must leave the record `running`; an exact adapter retry for the stable deployment identity recovers it. Never convert ambiguous external success into a terminal `failed` record.
+
+`local-static` completes this flow without a cloud account. It serves untrusted output on a separate origin/port with defensive headers and an unguessable deployment identity; it never shares the authenticated API origin. Publication, restart reuse, backup, and restore share one canonical manifest and verify the exact file graph plus every size and digest; a matching manifest alone never proves immutable bytes.
 
 ## 8. API, identity, and errors
 
@@ -417,15 +430,17 @@ Never return provider bodies, stack traces, SQL text, tokens, secret values, pro
 
 ## 9. Persistence
 
-SQLite is the source of truth for a single-active-control-plane topology. Enable foreign keys, WAL, busy timeout, and explicit transactional migrations; use no ORM.
+SQLite is the source of truth for a single-active-control-plane topology. Enable foreign keys, WAL, busy timeout, and transactional current-schema initialization; use no ORM.
 
-The schema includes owners and hashed API keys, runs and durable run events, agent sessions, turns, session commands and events, immutable run-input references, runtime instances and session runtime leases with cleanup state, runner/provider cursors, independently scoped idempotency keys, sequenced run logs, artifact metadata, deployments and logs, append-only audit records, and migrations.
+The store initializes one exact schema only when the database is empty, records its source fingerprint atomically, and rejects every nonempty database whose identity differs. It never upgrades, backfills, repairs, or dual-reads database state. Schema SQL executes statement-by-statement because Bun does not reliably surface every statement-level failure through multi-statement `Database.exec()`.
+
+The schema includes its exact identity, owners and hashed API keys, runs and durable run events, agent sessions, turns, session commands and events, immutable run-input references, durable runtime-provisioning and run-process-launch intents, runtime instances and session runtime leases with cleanup state, runner/provider cursors, independently scoped idempotency keys, sequenced run logs, artifact metadata, deployments and logs, and append-only audit records.
 
 Do not store artifact bodies or resolved secrets in SQLite. Use relational constraints for ownership, ordering, state, and uniqueness rather than hiding invariants in JSON. Owner-scoped indexes start with `owner_id`. State claims use compare-and-swap predicates or status versions.
 
 SQLite deliberately means one active writer. An adjacent lease keyed by the data root's physical filesystem identity excludes a second control plane and all maintenance commands, including access through a symlink alias. Horizontal control-plane scale is a trigger for a lease-capable shared database, not a reason to add distributed machinery now.
 
-`MEANWHILE_DATA_DIR` is one ownership and recovery unit. `meanwhile data backup` requires quiescent durable work, takes a normalized SQLite snapshot, walks every referenced workspace/artifact blob, includes persisted preview bytes, and writes a hashed manifest atomically outside the live root. `data verify` checks every byte plus schema and object-graph consistency; `data restore` accepts only an absent or empty destination; `data gc` is explicit dry-run/apply mark-and-sweep and never removes referenced history. Ordinary copying of a live SQLite file is not a backup path.
+`MEANWHILE_DATA_DIR` is one ownership and recovery unit. `meanwhile data backup` requires quiescent durable work, takes a normalized SQLite snapshot, walks every referenced workspace/artifact blob, includes only preview bytes referenced by successful local deployments, and writes a hashed manifest atomically outside the live root. `data verify` rejects missing, extra, linked, or digest-mismatched preview/object bytes and checks schema plus object-graph consistency; `data restore` accepts only an absent or empty destination; `data gc` is explicit dry-run/apply mark-and-sweep and never removes referenced history. Ordinary copying of a live SQLite file is not a backup path.
 
 ## 10. Tenant and secret boundary
 
@@ -477,7 +492,7 @@ Structured logs use stable event names and fields; prose belongs in `message`. T
 
 ### 12.1 Local
 
-The local provider is a full adapter for development, deterministic tests, and the no-account demo. It uses the same runner and contract: lifecycle, persistable process identity, replay, ordered/idempotent process input, cancellation, files, artifacts, and exposure where applicable.
+The local provider is a POSIX-only full adapter for development, deterministic tests, and the no-account demo. It uses one process-group implementation and the same runner and contract: lifecycle, persistable process identity, replay, ordered/idempotent process input, cancellation, files, artifacts, and exposure where applicable.
 
 It is not a security sandbox. README and provider diagnostics must say so. Never run untrusted code locally while claiming isolation.
 
@@ -551,6 +566,7 @@ src/services/deployment-executor.ts
 src/services/runtime-reaper.ts
 
 src/agents/catalog.ts             validated catalog resolution
+src/agents/runner-evidence.ts     control-plane runner redaction boundary
 src/agents/runner-session.ts      launch/reconnect/event ingestion
 src/agents/session-runner.ts      session launch/command/event ingestion
 runner/protocol.ts                run/session spec, command, and frame schemas
@@ -567,8 +583,9 @@ providers/cloudflare-sandbox/     isolated Cloudflare package
 src/artifacts/                    immutable storage contract + local store
 src/artifacts/workspace-bundle.ts uploaded immutable workspace input
 src/deployments/                  deploy contract, registry, local-static
+src/deployments/local-static-publication.ts canonical publication verification
 src/deployments/local-static-server.ts separate-origin preview serving
-src/persistence/                  migrations and the only SQL layer
+src/persistence/                  current schema and the only SQL layer
 
 test/behavior/                    original product invariants
 test/contracts/                   replaceability and protocol contracts
@@ -603,8 +620,10 @@ Tests must prove:
 - identical idempotent requests create one run and conflicting reuse returns 409;
 - accepted execution provenance persists, participates in idempotency, and rejects adapter/capability drift before compute;
 - deployment writes record, ordered logs, immutable-source reference, and audit evidence;
+- an ambiguous deployment success remains `running` and converges through exact-id reconciliation instead of becoming falsely failed;
 - exact secrets never persist in any log plane, audit metadata, or artifact;
 - cleanup never destroys a running runtime, is idempotent, and survives restart;
+- provider allocation followed by a crash before handle persistence reacquires the same runtime identity and enters cleanup for terminal run/session work;
 - history survives reopening SQLite;
 - one data-root lease excludes concurrent writers; backup, verify, restore, and dry-run/apply garbage collection preserve the complete referenced graph;
 - replay cannot duplicate logs or transitions;
@@ -612,6 +631,7 @@ Tests must prove:
 - one durable ACP session preserves its agent-session identity across multiple turns and a control-plane restart;
 - session and turn idempotency are independent, conflict policy is explicit, and interrupt/timeout ends one turn without destroying continuity;
 - session event replay is exact and contiguous, owner isolation covers every session surface, and session secrets never enter durable evidence;
+- runner-side redaction can be bypassed in a contract test without bypassing the control-plane redaction boundary;
 - an operational session runtime lease is never cleanup-eligible; close schedules idempotent bounded-retry destruction;
 - public and provider failures always use the structured safe error contract;
 - workspace traversal, symlink escape, and undeclared artifact capture are rejected;
@@ -673,13 +693,13 @@ bun run cloudflare:deploy
 docker compose up --build
 ```
 
-`meanwhile doctor` validates environment configuration, database writability/migrations, registered providers and deploy targets, runner and agent executables, agent catalog, and Cloudflare bridge health when configured, without revealing credentials.
+`meanwhile doctor` validates environment configuration, database writability and exact schema identity, registered providers and deploy targets, runner and agent executables, agent catalog, and Cloudflare bridge health when configured, without revealing credentials.
 
 `bun.lock` is generated by the first real install; never hand-create an empty lockfile. The runner builds as a standalone Bun executable and is copied outside provider workspaces.
 
 README must let a new user complete the full local flow without reading source. It documents startup, schema initialization, tests, API/SDK/CLI examples, provider configuration, Cloudflare proof, run/log/cancel/artifact/deploy usage, session/turn/event/interrupt/close usage, data model, adapter and ACP boundaries, tenant and secret guarantees, timeout/idempotency/reconciliation/cleanup, local-provider non-isolation, production gaps, and an honest split between AI-assisted implementation and human design judgments.
 
-`CHANGELOG.md` records user-visible behavior, API and protocol compatibility, migrations, and security-relevant changes. `SECURITY.md` defines disclosure and supported release policy; `CONTRIBUTING.md` defines the quality gate; `CODE_OF_CONDUCT.md` defines community participation. Keep them short and real rather than copying badges or ceremony the project does not yet support.
+`CHANGELOG.md` records user-visible behavior, API and protocol compatibility, schema replacement, and security-relevant changes. `SECURITY.md` defines disclosure and supported release policy; `CONTRIBUTING.md` defines the quality gate; `CODE_OF_CONDUCT.md` defines community participation. Keep them short and real rather than copying badges or ceremony the project does not yet support.
 
 ## 16. Implementation discipline
 
@@ -687,7 +707,7 @@ There is one architecture, not a disposable first version and a later “real”
 
 Build in dependency order:
 
-1. Bun/TypeScript/Biome, domain, errors, config, telemetry contract, migrations, store, control-plane lifecycle.
+1. Bun/TypeScript/Biome, domain, errors, config, telemetry contract, current schema, store, control-plane lifecycle.
 2. Runner protocol, ACP session, deterministic ACP fixture, standalone runner.
 3. Provider/artifact/deploy contracts, fakes, registries, local implementations.
 4. One-shot run service/executor, timeout, cancellation, reconciliation, cleanup, API.
@@ -733,12 +753,12 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 
 ## 18. Current status
 
-- The Bun control plane, SQLite store/migrations and data-root lifecycle, one-shot and multi-turn ACP runner, durable run/session event journals, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, complete owner-facing API/SDK/CLI resources, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
+- The Bun control plane, exact SQLite schema/store and data-root lifecycle, one-shot and multi-turn ACP runner, durable run/session event journals, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, complete owner-facing API/SDK/CLI resources, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
 - Durable sessions keep one ACP identity across ordered turns, explicit conflict policies, interrupt and per-turn timeout, process replay, control-plane restart, exact evidence deduplication, and independent runtime-lease cleanup. Local and Cloudflare paths are proven against the same public SDK and runner contracts.
 - The no-account demo proves create → ACP run → durable logs/status → SDK artifact download → SDK deployment → isolated preview. The release proof binds exact agent output to the revision, verifies the immutable downloaded bytes and deployed URL, validates telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
 - Authenticated local compatibility proofs run Codex, Claude Code, and Pi through pinned ACP adapters, require agent-written output, and complete artifact promotion plus preview verification without persisting local credentials.
 - The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. Each credential-gated acceptance proof requires real remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup.
-- Version `0.1.1` is the current tagged compatibility baseline, not a blanket production-support promise. Current evolution limits are recorded in Section 17 and README.
+- Version `0.1.1` is the current tagged release baseline, not a blanket production-support promise. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

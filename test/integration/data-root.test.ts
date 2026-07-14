@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { encodeArtifactManifest } from "../../src/artifacts/artifact-store"
 import { LocalArtifactStore } from "../../src/artifacts/local-artifact-store"
 import { WORKSPACE_BUNDLE_LIMITS, WorkspaceBundleStore } from "../../src/artifacts/workspace-bundle"
 import {
@@ -12,6 +13,11 @@ import {
   verifyDataBackup,
 } from "../../src/data-root"
 import { Store } from "../../src/persistence/store"
+import {
+  TEST_AGENT_CATALOG_DIGEST,
+  testAgentSpec,
+  testExecutionProvenanceFor,
+} from "../fixtures/agent-intent"
 
 const roots: string[] = []
 
@@ -30,21 +36,145 @@ describe("data-root lifecycle", () => {
 
     const store = new Store(source.databasePath)
     store.createOwner({ id: "owner-a", name: "Owner A", createdAt: "2026-07-13T00:00:00.000Z" })
-    const bundles = new WorkspaceBundleStore(
-      store,
-      new LocalArtifactStore(source.artifactDir),
-      WORKSPACE_BUNDLE_LIMITS,
-    )
+    const artifactStore = new LocalArtifactStore(source.artifactDir)
+    const bundles = new WorkspaceBundleStore(store, artifactStore, WORKSPACE_BUNDLE_LIMITS)
     const bundle = await bundles.capture("owner-a", [
       { path: "README.md", content: new TextEncoder().encode("durable bytes") },
     ])
+    const agentSpec = testAgentSpec()
+    store.createRun({
+      id: "run-a",
+      ownerId: "owner-a",
+      workspace: { type: "repository", url: "https://example.test/repo.git" },
+      agentType: "demo",
+      agentSpec,
+      agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+      executionProvenance: testExecutionProvenanceFor("local", agentSpec),
+      prompt: "publish",
+      env: {},
+      secretRefs: {},
+      provider: "local",
+      artifactPaths: ["site"],
+      timeoutMs: 60_000,
+      createdAt: "2026-07-13T00:00:00.000Z",
+      audit: { actorApiKeyId: null, requestId: "run:create", traceId: null, metadata: {} },
+    })
+    const previewBytes = new TextEncoder().encode("hello")
+    const previewBlob = await artifactStore.put({ ownerId: "owner-a", bytes: previewBytes })
+    const manifestBlob = await artifactStore.put({
+      ownerId: "owner-a",
+      bytes: encodeArtifactManifest({
+        version: 1,
+        runId: "run-a",
+        logicalPath: "site",
+        kind: "directory",
+        payloadSize: previewBytes.byteLength,
+        entries: [
+          {
+            path: "index.html",
+            logicalPath: "site/index.html",
+            mediaType: "text/html; charset=utf-8",
+            digest: previewBlob.digest,
+            size: previewBlob.size,
+          },
+        ],
+      }),
+    })
+    store.insertArtifact({
+      id: manifestBlob.digest,
+      ownerId: "owner-a",
+      runId: "run-a",
+      logicalPath: "site",
+      kind: "directory",
+      digest: manifestBlob.digest,
+      mediaType: "application/vnd.meanwhile.artifact-manifest+json; version=1",
+      byteSize: manifestBlob.size,
+      storageKey: manifestBlob.storageKey,
+      createdAt: "2026-07-13T00:00:01.000Z",
+    })
+    store.claimRunOutcome({
+      kind: "cancel",
+      ownerId: "owner-a",
+      runId: "run-a",
+      at: "2026-07-13T00:00:01.500Z",
+      systemLog: { eventType: "run.cancelled", data: "Run cancelled" },
+      requestAudit: {
+        actorApiKeyId: null,
+        action: "run.cancel_requested",
+        requestId: "run:cancel",
+        traceId: null,
+        metadata: {},
+      },
+      resultAudit: {
+        actorApiKeyId: null,
+        action: "run.cancelled",
+        requestId: "run:cancel",
+        traceId: null,
+        metadata: {},
+      },
+    })
+    const deploymentId = "deployment-aaaaaaaa"
+    store.createDeployment(
+      {
+        id: deploymentId,
+        ownerId: "owner-a",
+        runId: "run-a",
+        artifactId: manifestBlob.digest,
+        target: "local-static",
+        targetConfig: {},
+        secretRefs: {},
+        status: "succeeded",
+        url: `http://127.0.0.1:3000/d/${deploymentId}/`,
+        error: null,
+        createdAt: "2026-07-13T00:00:02.000Z",
+        startedAt: "2026-07-13T00:00:02.000Z",
+        finishedAt: "2026-07-13T00:00:03.000Z",
+        updatedAt: "2026-07-13T00:00:03.000Z",
+      },
+      {
+        id: crypto.randomUUID(),
+        ownerId: "owner-a",
+        actorApiKeyId: null,
+        action: "deployment.create",
+        resourceType: "deployment",
+        resourceId: deploymentId,
+        requestId: "deployment:create",
+        traceId: null,
+        metadata: {},
+        createdAt: "2026-07-13T00:00:02.000Z",
+      },
+    )
     store.close()
-    await mkdir(join(source.deploymentDir, "deployment-a", "public"), { recursive: true })
-    await writeFile(join(source.deploymentDir, "deployment-a", "public", "index.html"), "hello")
+    await mkdir(join(source.deploymentDir, deploymentId, "public"), { recursive: true })
+    await writeFile(join(source.deploymentDir, deploymentId, "public", "index.html"), previewBytes)
+    await writeFile(
+      join(source.deploymentDir, deploymentId, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        artifactId: manifestBlob.digest,
+        manifestDigest: manifestBlob.digest,
+        files: [
+          {
+            path: "index.html",
+            digest: previewBlob.digest,
+            size: previewBlob.size,
+            mediaType: "text/html; charset=utf-8",
+          },
+        ],
+      }),
+    )
+    await mkdir(join(source.deploymentDir, "orphan-preview", "public"), { recursive: true })
+    await writeFile(
+      join(source.deploymentDir, "orphan-preview", "public/index.html"),
+      "unreferenced",
+    )
 
     const created = await backupDataRoot(source, backupRoot)
-    expect(created.artifacts.length).toBe(2)
-    expect(created.deployments).toHaveLength(1)
+    expect(created.artifacts.length).toBe(4)
+    expect(created.deployments).toHaveLength(2)
+    expect(
+      await Bun.file(join(backupRoot, "deployments/orphan-preview/public/index.html")).exists(),
+    ).toBeFalse()
     expect((await verifyDataBackup(backupRoot)).database.digest).toBe(created.database.digest)
 
     await restoreDataRoot(backupRoot, restored)
@@ -61,8 +191,17 @@ describe("data-root lifecycle", () => {
       restoredStore.close()
     }
     expect(
-      await Bun.file(join(restored.deploymentDir, "deployment-a/public/index.html")).text(),
+      await Bun.file(join(restored.deploymentDir, deploymentId, "public/index.html")).text(),
     ).toBe("hello")
+    expect(
+      await Bun.file(join(restored.deploymentDir, "orphan-preview/public/index.html")).exists(),
+    ).toBeFalse()
+
+    await writeFile(join(source.deploymentDir, deploymentId, "public/index.html"), "tampered")
+    const rejectedBackup = join(await temporary("meanwhile-data-rejected-backup-"), "backup")
+    await expect(backupDataRoot(source, rejectedBackup)).rejects.toMatchObject({
+      code: "DATA_BACKUP_INVALID",
+    })
   })
 
   test("garbage collection is explicit, dry-run-first, and keeps referenced bytes", async () => {

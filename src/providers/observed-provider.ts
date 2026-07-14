@@ -107,8 +107,8 @@ export function observeRuntimeProvider(
       observe("create", () => provider.create(input)),
     start: (runtime: RuntimeHandle): Promise<void> =>
       observe("start", () => provider.start(runtime)),
-    inspect: (runtime: RuntimeHandle): Promise<RuntimeState> =>
-      observe("inspect", () => provider.inspect(runtime)),
+    inspect: (runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState> =>
+      observe("inspect", () => provider.inspect(runtime, signal)),
     stop: (runtime: RuntimeHandle): Promise<void> => observe("stop", () => provider.stop(runtime)),
     destroy: (runtime: RuntimeHandle): Promise<void> =>
       observe("destroy", () => provider.destroy(runtime)),
@@ -133,13 +133,16 @@ export function observeRuntimeProvider(
       runtime: RuntimeHandle,
       path: RelativePath,
       options: ListRuntimeFilesOptions,
+      signal?: AbortSignal,
     ): Promise<RuntimeFileInfo[]> =>
-      observe("listFiles", () => provider.listFiles(runtime, path, options)),
+      observe("listFiles", () => provider.listFiles(runtime, path, options, signal)),
     readFile: (
       runtime: RuntimeHandle,
       path: RelativePath,
       options: ReadRuntimeFileOptions,
-    ): Promise<Uint8Array> => observe("readFile", () => provider.readFile(runtime, path, options)),
+      signal?: AbortSignal,
+    ): Promise<Uint8Array> =>
+      observe("readFile", () => provider.readFile(runtime, path, options, signal)),
     ...(provider.expose === undefined
       ? {}
       : {

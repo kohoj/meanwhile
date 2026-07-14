@@ -108,15 +108,17 @@ Equal key and hash returns the same run. Equal key with different input is a con
 
 ### 2. Claim and provision
 
-One executor claims the run with a compare-and-swap state/version predicate. The persisted absolute deadline starts at this claim, so provider provisioning is inside the timeout budget.
+One executor calls the store's dedicated `claimRunProvisioning` compare-and-swap. The transaction commits `queued → provisioning`, the absolute deadline, status evidence, audit, and system log together, so provider provisioning is inside the timeout budget.
 
-Before compute, the executor verifies that current provider/runner provenance still matches the accepted snapshot. A mismatch fails closed without a provider operation. The selected provider then creates and starts compute, receives safe workspace input, and spawns the fixed runner. Opaque runtime and process handles are persisted without inspecting provider-private fields.
+Before compute, the executor verifies that current provider/runner provenance still matches the accepted snapshot. A mismatch fails closed without a provider operation. It then atomically records a stable runtime identity in a durable provisioning intent before calling the provider. `RuntimeProvider.create` is idempotent for that identity: if allocation succeeds but the process dies before the returned handle is persisted, restart reconciliation reacquires the same logical runtime, materializes its opaque handle, and either resumes active work or destroys it for terminal work. The provider then starts compute and receives safe workspace input. Core code never inspects provider-private handle fields.
+
+Immediately before one-shot runner spawn, the executor persists a run-process launch intent containing stable runtime/process identities and the accepted remaining timeout budget, but no secret values. This freezes the full process specification across a control-plane crash: an exact `spawn` retry reacquires the same provider process instead of recomputing a different relative timeout and conflicting with it. Process handle, public run process identity, and start audit then materialize in one transaction.
 
 ### 3. Establish ACP
 
 The control plane sends one validated `RunnerSpec` to the runner through initial stdin. It converts the remaining persisted deadline into a relative timeout budget immediately before spawn; no control-plane or sandbox wall-clock instant crosses the runner protocol. Resolved secret values are process environment only and are absent from the serialized specification.
 
-The runner launches the snapshotted bare PATH executable and argv directly with `TZ=UTC`, initializes ACP, negotiates capabilities, creates a session, and begins the prompt turn. It enforces the relative budget with a monotonic clock. The provider runtime or image, not the control-plane host, owns executable availability. Only a successful ACP initialization and session creation permits the executor to transition the run to `running`.
+The runner launches the snapshotted bare PATH executable and argv directly with `TZ=UTC`, initializes ACP, negotiates capabilities, creates a session, and begins the prompt turn. It enforces the relative budget with a monotonic clock. The provider runtime or image, not the control-plane host, owns executable availability. Only atomic acceptance of the validated `session.started` frame transitions the run to `running`; no restart-time log scan can synthesize that transition.
 
 Agent-specific parsing never enters this path. A non-ACP tool needs a separate ACP adapter executable.
 
@@ -136,17 +138,19 @@ These cursors solve different problems and must not be conflated.
 
 The store also appends one contiguous `RunEvent` journal across status changes, validated runner frames, logs, artifact capture, and cleanup. That journal is the canonical material for a product timeline; the run-log table remains a focused resource view rather than the only observable truth.
 
-### 5. Finalize and capture
+### 5. Reserve, capture, and finalize
 
-The executor interprets validated terminal evidence and process exit facts, then atomically claims one terminal state. A terminal run never transitions again.
+Atomic acceptance of a validated runner terminal frame first reserves that exact runner result together with its immutable log. This is the runner side of outcome arbitration: once reserved, cancellation, timeout, and control-plane failure cannot replace it. If another terminal status already committed, the frame is stored as `terminal.late` and reserves nothing. No recovery path derives a reservation from log text.
 
-Artifact capture is a separate operation. It collects only declared paths through the provider file contract, enforces bounds and path safety, scans for known secret values, hashes deterministic bytes, and stores them atomically. A failed agent can still produce useful artifacts. Capture failure is separate evidence unless an explicit product policy says otherwise.
+The executor then captures declared artifacts while the disposable runtime is still available. Capture uses abortable provider observations, remains bounded by the run's original absolute deadline, enforces bounds and path safety, scans for known secret values, hashes deterministic bytes, and stores them atomically. Recovery never restarts a non-running runtime solely to capture output. Deadline expiry records `ARTIFACT_CAPTURE_TIMED_OUT` and finalizes the reserved runner result without artifacts. A failed agent can still produce useful artifacts. Capture failure is separate evidence unless an explicit product policy says otherwise.
+
+After the capture attempt, `claimRunOutcome` is the single public terminal-status commit. Its transaction verifies the exact reservation and commits status/version, status event, audit, terminal system log, and runtime cleanup eligibility together. Restart recovery resumes this finalization from the reservation. A terminal run never transitions again.
 
 ### 6. Clean up
 
-Terminalization makes the associated runtime eligible for durable cleanup. The reaper claims cleanup work, calls idempotent `destroy`, records safe failure evidence and bounded backoff when necessary, and audits the destruction attempt.
+Terminalization makes the associated runtime eligible for durable cleanup in the same transaction. The reaper first reconciles interrupted provisioning intents, including the crash window where remote allocation succeeded before handle persistence, then claims cleanup work, calls idempotent `destroy`, records safe failure evidence and bounded backoff when necessary, and audits each attempt.
 
-Cleanup never deletes the run, logs, status events, artifacts, deployments, or audit records. A runtime for a `running` run is never eligible.
+Cleanup never deletes the run, logs, status events, artifacts, deployments, or audit records. A runtime for a `running` run is never eligible. A terminal runtime lacking its cleanup schedule is rejected as corrupt state rather than silently repaired.
 
 ## Run state machine
 
@@ -184,13 +188,15 @@ ACP never crosses the provider boundary. An exact command retry is harmless; reu
 
 Each turn owns an absolute control-plane deadline and receives only the remaining duration. `reject`, `enqueue`, and `interrupt_and_send` are explicit durable conflict policies. Interrupt and timeout terminalize one turn while preserving the ACP session. Closing is idempotent, terminalizes unfinished turns, and schedules runtime-lease cleanup independently from session history.
 
+The session runtime lease is also the durable process-launch boundary. Materializing a spawned session runner commits its opaque process handle, the session's public process identity, and the `agent.start` audit in one transaction. Exact retry is idempotent; a partial or conflicting identity is a persisted-integrity failure, never a state to repair heuristically.
+
 On restart, a capable provider reconnects the same process, replays after the persisted cursor, and resumes undispatched commands. A missing or unrecoverable process becomes `continuity_lost`; Meanwhile never substitutes a fresh ACP context while claiming continuity.
 
 ## Races have explicit winners
 
 ### Cancellation versus exit
 
-Cancellation persists intent before signalling. The executor uses a compare-and-swap terminal claim. Whichever valid terminal transition commits first is authoritative; later signals or exits become evidence and cleanup input, not a second outcome. Repeated cancellation is idempotent.
+Cancellation, timeout, and control-plane failure compete with the runner's atomic terminal-frame reservation. A successful cancellation transaction commits public status, request/result audit, and cleanup eligibility before any signal is sent. A runner reservation that commits first must later finalize that exact result; a runner frame that arrives after another public terminal commit is diagnostic-only. Repeated cancellation is idempotent.
 
 ### Timeout versus success
 
@@ -202,7 +208,7 @@ Cleanup eligibility is checked against authoritative run state in the claim tran
 
 ### Duplicate execution
 
-State versioning and compare-and-swap claims prevent two executors from owning the same transition. Idempotent provider stop/destroy operations make recovery safe when an operation committed remotely but its local acknowledgement was lost.
+State versioning and compare-and-swap claims prevent two executors from owning the same transition. Idempotent provider create/stop/destroy operations make recovery safe when an operation committed remotely but its local acknowledgement was lost.
 
 ## Restart reconciliation
 
@@ -210,14 +216,15 @@ SQLite is the durable authority; the API process is replaceable.
 
 On startup the control plane:
 
-1. applies migrations before readiness;
+1. initializes an empty database or verifies the exact current schema before readiness;
 2. resumes eligible queued work;
-3. inspects non-terminal runtime/process handles;
-4. replays provider events after persisted cursors;
-5. deduplicates runner sequences;
-6. reconnects one-shot runner sessions and durable agent sessions or finalizes exited ones;
-7. marks irrecoverable missing compute as `RUNTIME_LOST` after bounded reconciliation;
-8. resumes pending cleanup and deployment work.
+3. recovers interrupted runtime-create and cleanup claims, reacquiring exact runtime identities when a handle was not durably materialized;
+4. inspects non-terminal runtime/process handles;
+5. replays provider events after persisted cursors;
+6. deduplicates runner sequences;
+7. reconnects one-shot runner sessions and durable agent sessions or finalizes exited ones;
+8. marks irrecoverable missing compute as `RUNTIME_LOST` after bounded reconciliation;
+9. resumes pending cleanup and deployment work.
 
 Recovery strength is a declared provider capability. Meanwhile does not fabricate recovery for a provider that cannot persist process identity or replay events.
 
@@ -236,7 +243,9 @@ DeployAdapter.publish(immutable bytes, validated target config + declared secret
 validated canonical HTTP(S) URL or safe structured error
 ```
 
-The adapter cannot read a live runtime, public owner identity, or database handle. This keeps deployment replayable after runtime destruction and makes promotion auditable.
+The adapter cannot read a live runtime, public owner identity, or database handle. This keeps deployment replayable after runtime destruction and makes promotion auditable. The durable `running` state surrounds the external side effect: after target success becomes possible, a deployment-log or success-transaction write failure leaves the record recoverable rather than claiming false failure. Restart replays the idempotent adapter with the stable deployment ID and immutable source.
+
+`local-static` uses one canonical publication manifest across adapter execution, restart reconciliation, backup, and restore. Reuse requires an exact graph match with no links, missing files, or extras and rehashes every published byte; matching manifest text without matching content is rejected.
 
 ## Persistence boundaries
 
@@ -246,7 +255,7 @@ Artifact bytes are owner-scoped and content-addressed. Atomic writes publish onl
 
 One active control-plane writer is an explicit topology constraint. An adjacent data-root lease excludes a second service process and maintenance commands. Horizontal writers require a shared lease-capable database and are an evolution trigger, not a hidden promise.
 
-The data root is one recovery unit. Backup requires quiescent durable work, serializes a standalone SQLite snapshot, walks the complete referenced workspace/artifact graph, includes persisted preview bytes, and hashes every file into an atomic manifest outside the live root. Verification reopens the database read-only and checks migrations, graph completeness, paths, sizes, and digests. Restore accepts only an absent or empty root. Garbage collection derives reachability from SQLite and is explicit dry-run/apply work.
+The data root is one recovery unit. Backup requires quiescent durable work, serializes a standalone SQLite snapshot, walks the complete referenced workspace/artifact graph, and derives the exact persisted-preview set from successful local deployment rows. It rejects orphan, extra, linked, missing, or content-mismatched publication files rather than legitimizing them in a backup. Verification reopens the database read-only and checks the exact schema identity, graph completeness, paths, sizes, and digests. Restore accepts only an absent or empty root. Garbage collection derives reachability from SQLite and is explicit dry-run/apply work.
 
 ## Complete public resource boundary
 

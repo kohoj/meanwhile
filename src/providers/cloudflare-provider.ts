@@ -179,7 +179,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     )
   }
 
-  async inspect(runtime: RuntimeHandle): Promise<RuntimeState> {
+  async inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState> {
     const runtimeId = this.#runtimeId(runtime, "inspect")
     const snapshot = await this.#snapshotRequest(
       "inspect",
@@ -189,6 +189,8 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       "runtime",
       runtimeSnapshotSchema,
       true,
+      undefined,
+      signal,
     )
     const observedAt = new Date().toISOString()
     if (snapshot === null || snapshot.state === "destroyed")
@@ -449,6 +451,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ListRuntimeFilesOptions,
+    signal?: AbortSignal,
   ): Promise<RuntimeFileInfo[]> {
     const runtimeId = this.#runtimeId(runtime, "listFiles")
     if (!Number.isSafeInteger(options.maxEntries) || options.maxEntries < 0) {
@@ -469,6 +472,9 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       "listFiles",
       "GET",
       `v1/runtimes/${runtimeId}/files?${query}`,
+      undefined,
+      undefined,
+      signal,
     )
     const files = selectAndParse(payload, "files", runtimeFileInfoSchema.array(), (cause) =>
       this.#error(
@@ -497,6 +503,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ReadRuntimeFileOptions,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const runtimeId = this.#runtimeId(runtime, "readFile")
     if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0) {
@@ -519,6 +526,8 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       `v1/runtimes/${runtimeId}/file?${query}`,
       undefined,
       true,
+      undefined,
+      signal,
     )
     if (response === null) {
       throw this.#error("readFile", "FILE_NOT_FOUND", "Workspace file does not exist")

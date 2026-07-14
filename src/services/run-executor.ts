@@ -1,6 +1,7 @@
 import { posix } from "node:path"
 import type { RunnerFrame, RunnerSpec, RunnerTerminalPayload } from "../../runner/protocol"
 import { RUNNER_PROTOCOL_VERSION, runnerTerminalPayloadSchema } from "../../runner/protocol"
+import { sanitizeRunnerTerminal } from "../agents/runner-evidence"
 import type { RunnerSessionController } from "../agents/runner-session"
 import type { ArtifactStore } from "../artifacts/artifact-store"
 import type { ComponentHealth, ManagedComponent } from "../control-plane"
@@ -199,47 +200,42 @@ export class RunExecutor implements ManagedComponent {
     input: { readonly run: Run; readonly context: RequestContext },
     scope?: TelemetryScope,
   ): Promise<void> {
-    const at = this.#now()
-    const requestAudit = this.#audit({
-      ownerId: input.run.ownerId,
-      actorApiKeyId: input.context.apiKeyId,
-      action: "run.cancel_request",
-      resourceType: "run",
-      resourceId: input.run.id,
-      requestId: input.context.requestId,
-      traceId: input.context.traceId,
-      metadata: { status: input.run.status },
-      at,
-    })
-    const current = this.#store.requestCancellation(
-      input.run.ownerId,
-      input.run.id,
-      at,
-      requestAudit,
-    )
-    if (current === null || isTerminalRunStatus(current.status)) return
-    if ((this.#store.getRunnerSession(current.id)?.terminalResult ?? null) !== null) return
+    await this.#claimCancellation(input.run, input.context, scope)
+  }
 
-    const runtime = this.#store.getRuntimeForRun(current.id)
-    if (runtime?.processHandle !== null && runtime?.processHandle !== undefined) {
-      try {
-        const baseProvider = this.#providers.get(runtime.provider)
-        const provider =
-          scope === undefined
-            ? baseProvider
-            : observeRuntimeProvider(baseProvider, scope, { runId: current.id }, () =>
-                this.#clock().getTime(),
-              )
-        await this.#runner.cancel(provider, restoreProcessHandle(runtime.processHandle))
-      } catch (error) {
-        this.#logger.warn("run.cancel_signal_failed", "Runner cancellation signal failed", {
-          runId: current.id,
-          error: normalizeError(error).code,
-        })
-      }
-    }
-    await this.#claimTerminal(current.id, "cancelled", "run.cancelled", null, input.context)
-    await this.#stopRuntime(current.id, input.context, scope)
+  async #claimCancellation(
+    run: Run,
+    context?: RequestContext,
+    scope?: TelemetryScope,
+  ): Promise<void> {
+    const at = this.#now()
+    const requestId = context?.requestId ?? `system:${this.#id()}`
+    const claim = this.#store.claimRunOutcome({
+      kind: "cancel",
+      ownerId: run.ownerId,
+      runId: run.id,
+      at,
+      requestAudit: {
+        actorApiKeyId: context?.apiKeyId ?? null,
+        action: "run.cancel_request",
+        requestId,
+        traceId: context?.traceId ?? null,
+        metadata: { status: run.status },
+      },
+      resultAudit: {
+        actorApiKeyId: context?.apiKeyId ?? null,
+        action: "run.cancelled",
+        requestId,
+        traceId: context?.traceId ?? null,
+        metadata: { from: run.status, to: "cancelled" },
+      },
+      systemLog: { eventType: "run.cancelled", data: "Run cancelled" },
+    })
+    if (claim?.outcome !== "claimed") return
+    this.#recordOutcomeMetrics(run, claim.run)
+    this.#clearDeadline(run.id)
+    await this.#signalRunner(run.id, scope, "run.cancel_signal_failed")
+    await this.#stopRuntime(run.id, context, scope)
   }
 
   #scan(): void {
@@ -291,26 +287,16 @@ export class RunExecutor implements ManagedComponent {
   async #executeInternal(runId: string, scope?: TelemetryScope): Promise<void> {
     let run = this.#store.getRunInternal(runId)
     if (run === null || isTerminalRunStatus(run.status)) return
-    if (
-      this.#store.isCancellationRequested(run.id) &&
-      (this.#store.getRunnerSession(run.id)?.terminalResult ?? null) === null
-    ) {
-      await this.#claimTerminal(run.id, "cancelled", "run.cancelled", null)
-      await this.#stopRuntime(run.id, undefined, scope)
-      return
-    }
     if (run.status === "queued") {
       const at = this.#now()
       const deadlineAt = new Date(this.#clock().getTime() + run.timeoutMs).toISOString()
-      const claimed = this.#store.transitionRun({
+      const claimed = this.#store.claimRunProvisioning({
         runId,
-        expectedStatus: "queued",
         expectedVersion: run.statusVersion,
-        toStatus: "provisioning",
-        reason: "run.claimed",
         at,
         deadlineAt,
         audit: this.#transitionAudit(run, "run.provision"),
+        systemLog: { eventType: "run.provisioning", data: "Provisioning runtime" },
       })
       if (claimed === null) return
       run = claimed
@@ -319,7 +305,6 @@ export class RunExecutor implements ManagedComponent {
         Math.max(0, this.#clock().getTime() - Date.parse(run.createdAt)),
         { agent: run.agentType, provider: run.provider },
       )
-      this.#appendSystem(run, "run.provisioning", "Provisioning runtime", at)
     }
     if (run.deadlineAt === null) {
       await this.#fail(
@@ -330,7 +315,7 @@ export class RunExecutor implements ManagedComponent {
     }
     let persistedTerminal: RunnerTerminalPayload | null
     try {
-      persistedTerminal = this.#restoreAcceptedTerminal(run)
+      persistedTerminal = this.#readTerminalReservation(run)
     } catch (error) {
       await this.#fail(run.id, error)
       return
@@ -363,16 +348,12 @@ export class RunExecutor implements ManagedComponent {
     const reconnecting = runtimeRecord !== null
     let session = this.#store.getRunnerSession(run.id)
 
-    if (session !== null) {
-      await this.#reconcileAcceptedSessionStarted(run, session.runnerSessionId)
-    }
-
-    // A validated terminal frame is durable agent evidence. Disposable compute
-    // is useful only for best-effort artifact capture after this point; losing
-    // it must not replace the already accepted result with RUNTIME_LOST.
+    // A validated terminal frame durably reserves the runner outcome before
+    // artifact capture. Disposable compute is useful only for that capture;
+    // losing it must not replace the reserved result with RUNTIME_LOST.
     if (session?.terminalResult !== null && session?.terminalResult !== undefined) {
       const terminal = parsePersistedRunnerTerminal(session.terminalResult)
-      await this.#finalizePersistedTerminal(run, provider, runtimeRecord, session, terminal, scope)
+      await this.#finalizePersistedTerminal(run, provider, runtimeRecord, terminal, scope)
       return
     }
 
@@ -380,26 +361,64 @@ export class RunExecutor implements ManagedComponent {
 
     if (runtimeRecord === null) {
       const runtimeId = run.runtimeId ?? `rt-${run.id}`.slice(0, 128)
-      this.#store.setRunRuntime({ runId: run.id, runtimeId, at: this.#now() })
-      runtime = await provider.create({ runtimeId })
-      const at = this.#now()
-      runtimeRecord = {
-        id: runtimeId,
-        ownerId: run.ownerId,
+      const intent = this.#store.ensureRuntimeProvisioningIntent({
         runId: run.id,
+        ownerId: run.ownerId,
+        runtimeId,
         provider: provider.name,
-        handle: jsonObject(runtime),
-        processHandle: null,
-        cleanupStatus: "pending",
-        cleanupAttempts: 0,
-        cleanupLastError: null,
-        cleanupNextAttemptAt: null,
-        createdAt: at,
-        updatedAt: at,
-        destroyedAt: null,
+        at: this.#now(),
+      })
+      if (intent === null) return
+      const provisioning = this.#store.claimRuntimeProvisioning(runtimeId, this.#now(), "active")
+      if (provisioning === null) {
+        const current = this.#store.getRunInternal(run.id)
+        if (current !== null && isTerminalRunStatus(current.status)) return
+        throw new AppError({
+          code: "INTERNAL",
+          message: "Runtime provisioning intent could not be claimed",
+        })
       }
-      this.#store.createRuntime(
-        runtimeRecord,
+      try {
+        runtime = await provider.create({ runtimeId })
+      } catch (error) {
+        const at = this.#now()
+        const normalized = normalizeError(error)
+        this.#store.failRuntimeProvisioning({
+          runtimeId,
+          error: normalized.toStructuredError(),
+          at,
+          nextAttemptAt: at,
+          audit: this.#audit({
+            ownerId: run.ownerId,
+            actorApiKeyId: null,
+            action: "runtime.create_failed",
+            resourceType: "runtime",
+            resourceId: runtimeId,
+            requestId: `system:${this.#id()}`,
+            traceId: null,
+            metadata: { runId: run.id, provider: provider.name, code: normalized.code },
+            at,
+          }),
+        })
+        throw error
+      }
+      const at = this.#now()
+      runtimeRecord = this.#store.materializeRuntimeProvisioning(
+        {
+          id: runtimeId,
+          ownerId: run.ownerId,
+          runId: run.id,
+          provider: provider.name,
+          handle: jsonObject(runtime),
+          processHandle: null,
+          cleanupStatus: "pending",
+          cleanupAttempts: 0,
+          cleanupLastError: null,
+          cleanupNextAttemptAt: null,
+          createdAt: at,
+          updatedAt: at,
+          destroyedAt: null,
+        },
         this.#audit({
           ownerId: run.ownerId,
           actorApiKeyId: null,
@@ -454,12 +473,21 @@ export class RunExecutor implements ManagedComponent {
       const current = this.#store.getRunInternal(run.id)
       if (current === null || isTerminalRunStatus(current.status)) return
       const processId = `runner-${run.id}`.slice(0, 128)
-      const secrets = this.#secrets.resolve(run.secretRefs, secretScope(run.ownerId, "agent"))
-      try {
-        const timeoutBudgetMs = Math.max(
+      const launch = this.#store.ensureRunProcessLaunchIntent({
+        runId: run.id,
+        ownerId: run.ownerId,
+        runtimeId: runtimeRecord.id,
+        processId,
+        timeoutBudgetMs: Math.max(
           1,
           Date.parse(run.deadlineAt as string) - this.#clock().getTime(),
-        )
+        ),
+        createdAt: this.#now(),
+      })
+      if (launch === null) return
+      const secrets = this.#secrets.resolve(run.secretRefs, secretScope(run.ownerId, "agent"))
+      try {
+        const timeoutBudgetMs = launch.timeoutBudgetMs
         const spec: RunnerSpec = {
           protocolVersion: RUNNER_PROTOCOL_VERSION,
           runId: run.id,
@@ -498,11 +526,14 @@ export class RunExecutor implements ManagedComponent {
             }),
         )
         const at = this.#now()
-        this.#store.setRuntimeProcess(
-          runtimeRecord.id,
-          jsonObject(process),
+        this.#store.materializeRunProcessLaunch({
+          runId: run.id,
+          ownerId: run.ownerId,
+          runtimeId: runtimeRecord.id,
+          processId,
+          processHandle: jsonObject(process),
           at,
-          this.#audit({
+          audit: this.#audit({
             ownerId: run.ownerId,
             actorApiKeyId: null,
             action: "runtime.process_start",
@@ -513,25 +544,14 @@ export class RunExecutor implements ManagedComponent {
             metadata: { runId: run.id, processId },
             at,
           }),
-        )
-        this.#store.setRunRuntime({
-          runId: run.id,
-          runtimeId: runtimeRecord.id,
-          processId,
-          at,
         })
-        session = {
+        session = this.#store.createRunnerSession({
           runId: run.id,
           ownerId: run.ownerId,
           runnerSessionId: processId,
           protocolVersion: RUNNER_PROTOCOL_VERSION,
-          providerCursor: null,
-          runnerSequence: 0,
-          terminalResult: null,
           createdAt: at,
-          updatedAt: at,
-        }
-        this.#store.upsertRunnerSession(session)
+        })
         this.#assertRunning()
         await this.#consume(run, provider, runtime, process, session, secrets.redactor, scope)
       } finally {
@@ -563,46 +583,19 @@ export class RunExecutor implements ManagedComponent {
     }
   }
 
-  #restoreAcceptedTerminal(run: Run): RunnerTerminalPayload | null {
+  #readTerminalReservation(run: Run): RunnerTerminalPayload | null {
     const session = this.#store.getRunnerSession(run.id)
     if (session === null) return null
     if (session.terminalResult !== null) {
       return parsePersistedRunnerTerminal(session.terminalResult)
     }
-
-    let after = 0
-    for (;;) {
-      const logs = this.#store.listRunLogs(run.ownerId, run.id, after, 1_000)
-      const accepted = logs.find(
-        (log) =>
-          log.eventType === "terminal" &&
-          log.runnerSessionId === session.runnerSessionId &&
-          log.runnerSequence !== undefined,
-      )
-      if (accepted !== undefined) {
-        let payload: unknown
-        try {
-          payload = JSON.parse(accepted.data)
-        } catch (cause) {
-          throw new AppError({
-            code: "RUNNER_PROTOCOL_ERROR",
-            message: "Persisted runner terminal log is invalid",
-            cause,
-          })
-        }
-        const terminal = parsePersistedRunnerTerminal(payload)
-        this.#store.upsertRunnerSession({
-          ...session,
-          runnerSequence: Math.max(session.runnerSequence, accepted.runnerSequence ?? 0),
-          terminalResult: jsonObject(terminal),
-          updatedAt: this.#now(),
-        })
-        return terminal
-      }
-      const last = logs.at(-1)
-      if (logs.length < 1_000 || last === undefined) return null
-      after = last.sequence
+    if (this.#store.hasUnreservedRunnerTerminalEvidence(run.id, session.runnerSessionId)) {
+      throw new AppError({
+        code: "DATABASE_INTEGRITY_FAILED",
+        message: "Runner terminal evidence is missing its atomic reservation",
+      })
     }
+    return null
   }
 
   async #startRuntime(
@@ -612,7 +605,7 @@ export class RunExecutor implements ManagedComponent {
     runtime: RuntimeHandle,
   ): Promise<void> {
     await provider.start(runtime)
-    this.#store.insertAudit(
+    this.#store.ensureRuntimeStartedAudit(
       this.#audit({
         ownerId: run.ownerId,
         actorApiKeyId: null,
@@ -632,58 +625,66 @@ export class RunExecutor implements ManagedComponent {
     initialRun: Run,
     provider: RuntimeProvider,
     runtimeRecord: ReturnType<Store["getRuntimeForRun"]>,
-    session: NonNullable<ReturnType<Store["getRunnerSession"]>>,
     terminal: RunnerTerminalPayload,
     scope?: TelemetryScope,
   ): Promise<void> {
-    let current = await this.#reconcileSessionStarted(initialRun, session.runnerSessionId, terminal)
+    let current = this.#store.getRunInternal(initialRun.id)
+    this.#assertTerminalCanFinalize(current, terminal)
     if (current === null || isTerminalRunStatus(current.status)) return
 
     if (current.artifactPaths.length > 0) {
+      const captureSignal = this.#artifactCaptureSignal(current)
       let runtime: RuntimeHandle | null = null
       let unavailableReason = "RUNTIME_MISSING"
+      let captureFailure: string | null = null
       if (runtimeRecord !== null) {
         try {
+          captureSignal.throwIfAborted()
           const candidate = restoreRuntimeHandle(runtimeRecord.handle)
-          const state = await provider.inspect(candidate)
-          if (state.status !== "missing") {
-            if (state.status !== "running") {
-              await this.#startRuntime(current, provider, runtimeRecord.id, candidate)
-            }
+          const state = await provider.inspect(candidate, captureSignal)
+          captureSignal.throwIfAborted()
+          if (state.status === "running") {
             runtime = candidate
+          } else if (state.status === "missing") {
+            unavailableReason = "RUNTIME_MISSING"
+          } else {
+            unavailableReason = "RUNTIME_NOT_RUNNING"
           }
         } catch (error) {
-          unavailableReason = isMissingRuntime(error) ? "RUNTIME_MISSING" : "RUNTIME_UNAVAILABLE"
-          this.#logger.warn(
-            "artifact.capture_unavailable",
-            "Persisted runner result could not access its disposable runtime",
-            {
-              runId: current.id,
-              provider: provider.name,
-              code: normalizeError(error).code,
-            },
-          )
+          if (error instanceof ControlPlaneStopped) throw error
+          if (captureSignal.aborted && captureSignal.reason instanceof ControlPlaneStopped) {
+            throw captureSignal.reason
+          }
+          captureFailure = artifactCaptureErrorCode(error, captureSignal)
+          if (captureFailure !== "ARTIFACT_CAPTURE_TIMED_OUT") {
+            unavailableReason = isMissingRuntime(error) ? "RUNTIME_MISSING" : "RUNTIME_UNAVAILABLE"
+            captureFailure = null
+            this.#logger.warn(
+              "artifact.capture_unavailable",
+              "Persisted runner result could not access its disposable runtime",
+              {
+                runId: current.id,
+                provider: provider.name,
+                code: normalizeError(error).code,
+              },
+            )
+          }
         }
       }
 
-      if (runtime === null) {
+      if (captureFailure !== null) {
+        this.#recordArtifactCaptureFailed(current, captureFailure)
+      } else if (runtime === null) {
         this.#recordArtifactCaptureUnavailable(current, unavailableReason)
       } else {
-        await this.#collectArtifacts(current, provider, runtime, scope)
+        await this.#collectArtifacts(current, provider, runtime, scope, captureSignal)
       }
     }
 
     if (!this.#running) return
     current = this.#store.getRunInternal(initialRun.id)
     if (current === null || isTerminalRunStatus(current.status)) return
-    await this.#claimTerminal(
-      current.id,
-      statusForTerminal(terminal),
-      `runner.${terminal.outcome}`,
-      terminalError(terminal),
-      undefined,
-      terminal.agentExit?.exitCode,
-    )
+    await this.#claimRunnerTerminal(current, terminal, terminal.agentExit?.exitCode)
   }
 
   async #prepareWorkspace(
@@ -708,8 +709,13 @@ export class RunExecutor implements ManagedComponent {
         provider,
         runtime,
         ...(repositoryCredential === undefined ? {} : { repositoryCredential }),
-        timeoutMs: Math.max(1, Date.parse(run.deadlineAt as string) - this.#clock().getTime()),
+        // Workspace helper process IDs are stable across restart, so their
+        // complete spawn specs must be stable too. The absolute run deadline
+        // remains the control-plane owner; this is only the provider hard-stop
+        // ceiling for an otherwise orphaned helper process.
+        timeoutMs: run.timeoutMs,
         terminationGraceMs: PROCESS_TERMINATION_GRACE_MS,
+        signal: this.#observationSignal(),
         emit: async (event) => {
           const data = repositorySecrets?.redactor.redactString(event.data) ?? event.data
           const log = this.#appendOutput(run, event.stream, event.event, data, event.timestamp)
@@ -815,7 +821,7 @@ export class RunExecutor implements ManagedComponent {
               })
             }
             acceptedSequence = frame.sequence
-            if (terminalPayload !== undefined) {
+            if (terminalPayload !== undefined && accepted.terminalDisposition === "reserved") {
               acceptedTerminal = terminalPayload
               this.#clearDeadline(initialRun.id)
             }
@@ -835,11 +841,13 @@ export class RunExecutor implements ManagedComponent {
           },
           onCursor: async (cursor) => {
             if (!this.#running) throw new ControlPlaneStopped()
-            this.#store.upsertRunnerSession({
-              ...session,
+            this.#store.advanceRunnerProviderCursor({
+              runId: initialRun.id,
+              ownerId: initialRun.ownerId,
+              runnerSessionId: session.runnerSessionId,
+              protocolVersion: session.protocolVersion,
               providerCursor: cursor,
               runnerSequence: acceptedSequence,
-              terminalResult: null,
               updatedAt: this.#now(),
             })
           },
@@ -869,76 +877,33 @@ export class RunExecutor implements ManagedComponent {
 
     if (!this.#running) return
     if (acceptedTerminal === undefined) {
+      const current = this.#store.getRunInternal(initialRun.id)
+      if (current !== null && isTerminalRunStatus(current.status)) return
       throw new AppError({
         code: "RUNNER_PROTOCOL_ERROR",
         message: "Runner completion did not produce accepted terminal evidence",
       })
     }
-    let current = await this.#reconcileSessionStarted(
-      initialRun,
-      session.runnerSessionId,
-      acceptedTerminal,
-    )
+    let current = this.#store.getRunInternal(initialRun.id)
+    this.#assertTerminalCanFinalize(current, acceptedTerminal)
     if (current === null || isTerminalRunStatus(current.status)) return
     await this.#collectArtifacts(current, provider, runtime, scope)
     if (!this.#running) return
     current = this.#store.getRunInternal(initialRun.id)
     if (current === null || isTerminalRunStatus(current.status)) return
-    const terminal = statusForTerminal(acceptedTerminal)
-    const structuredError = terminalError(acceptedTerminal)
-    await this.#claimTerminal(
-      current.id,
-      terminal,
-      `runner.${terminal}`,
-      structuredError,
-      undefined,
+    await this.#claimRunnerTerminal(
+      current,
+      acceptedTerminal,
       acceptedTerminal.agentExit?.exitCode ?? result.exitCode,
     )
   }
 
-  async #reconcileSessionStarted(
-    initialRun: Run,
-    runnerSessionId: string,
-    terminal: RunnerTerminalPayload,
-  ): Promise<Run | null> {
-    const current = await this.#reconcileAcceptedSessionStarted(initialRun, runnerSessionId)
-    if (current === null || current.status !== "provisioning") return current
-
-    if (terminal.outcome === "succeeded") {
+  #assertTerminalCanFinalize(run: Run | null, terminal: RunnerTerminalPayload): void {
+    if (run?.status === "provisioning" && terminal.outcome === "succeeded") {
       throw new AppError({
         code: "RUNNER_PROTOCOL_ERROR",
         message: "A successful runner result lacked accepted session-start evidence",
       })
-    }
-    return current
-  }
-
-  async #reconcileAcceptedSessionStarted(
-    initialRun: Run,
-    runnerSessionId: string,
-  ): Promise<Run | null> {
-    let current = this.#store.getRunInternal(initialRun.id)
-    if (current === null || current.status !== "provisioning") return current
-    if (!this.#hasAcceptedSessionStarted(current, runnerSessionId)) return current
-    await this.#markRunning(current.id)
-    current = this.#store.getRunInternal(current.id)
-    return current
-  }
-
-  #hasAcceptedSessionStarted(run: Run, runnerSessionId: string): boolean {
-    let after = 0
-    for (;;) {
-      const logs = this.#store.listRunLogs(run.ownerId, run.id, after, 1_000)
-      if (
-        logs.some(
-          (log) => log.eventType === "session.started" && log.runnerSessionId === runnerSessionId,
-        )
-      ) {
-        return true
-      }
-      const last = logs.at(-1)
-      if (logs.length < 1_000 || last === undefined) return false
-      after = last.sequence
     }
   }
 
@@ -953,30 +918,27 @@ export class RunExecutor implements ManagedComponent {
     })
   }
 
-  async #markRunning(runId: string): Promise<void> {
-    const current = this.#store.getRunInternal(runId)
-    if (current === null || current.status !== "provisioning") return
-    const at = this.#now()
-    const running = this.#store.transitionRun({
-      runId,
-      expectedStatus: "provisioning",
-      expectedVersion: current.statusVersion,
-      toStatus: "running",
-      reason: "agent.session_started",
-      at,
-      audit: this.#transitionAudit(current, "agent.start"),
-      systemLog: { eventType: "run.running", data: "Agent session started" },
+  #recordArtifactCaptureFailed(run: Run, code: string): void {
+    this.#store.appendRunLogNext({
+      ownerId: run.ownerId,
+      runId: run.id,
+      stream: "system",
+      eventType: "artifact.capture_failed",
+      data: JSON.stringify({ code }),
+      createdAt: this.#now(),
     })
-    if (running !== null) {
-      const provisioningAt = this.#store
-        .listRunStatusEvents(running.ownerId, running.id)
-        .find(({ toStatus }) => toStatus === "provisioning")?.createdAt
-      this.#telemetry?.metrics.record(
-        "meanwhile.run.provision.duration",
-        Math.max(0, this.#clock().getTime() - Date.parse(provisioningAt ?? running.updatedAt)),
-        { agent: running.agentType, provider: running.provider },
-      )
+  }
+
+  #artifactCaptureSignal(run: Run): AbortSignal {
+    if (run.deadlineAt === null) {
+      throw new AppError({ code: "INTERNAL", message: "Run deadline is missing" })
     }
+    const remainingMs = Date.parse(run.deadlineAt) - this.#clock().getTime()
+    const deadlineSignal =
+      remainingMs <= 0
+        ? AbortSignal.abort(new DOMException("Artifact capture deadline elapsed", "TimeoutError"))
+        : AbortSignal.timeout(remainingMs)
+    return AbortSignal.any([this.#observationSignal(), deadlineSignal])
   }
 
   async #collectArtifacts(
@@ -984,14 +946,16 @@ export class RunExecutor implements ManagedComponent {
     provider: RuntimeProvider,
     runtime: RuntimeHandle,
     scope?: TelemetryScope,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (run.artifactPaths.length === 0) return
+    const captureSignal = signal ?? this.#artifactCaptureSignal(run)
     await this.#span(
       scope,
       "meanwhile.artifact.collect",
       { "run.id": run.id, "provider.name": provider.name },
       async (span) => {
-        const failure = await this.#collectArtifactsInternal(run, provider, runtime)
+        const failure = await this.#collectArtifactsInternal(run, provider, runtime, captureSignal)
         if (failure === null) span?.setOutcome("succeeded")
         else span?.setOutcome("failed", stableTelemetryCode(failure))
       },
@@ -1002,12 +966,14 @@ export class RunExecutor implements ManagedComponent {
     run: Run,
     provider: RuntimeProvider,
     runtime: RuntimeHandle,
+    signal: AbortSignal,
   ): Promise<string | null> {
     const values: Record<string, string> = {}
     // SecretRedactor intentionally does not expose values; resolve again only
     // inside this operation to construct the exact-byte artifact scanner.
     let secrets: ReturnType<EnvironmentSecretResolver["resolve"]> | null = null
     try {
+      signal.throwIfAborted()
       secrets = this.#secrets.resolve(run.secretRefs, secretScope(run.ownerId, "agent"))
       Object.assign(values, secrets.environment)
       const collector = new ArtifactCollector({
@@ -1021,10 +987,13 @@ export class RunExecutor implements ManagedComponent {
         runId: run.id,
         declaredPaths: run.artifactPaths,
         workspace: new ProviderArtifactWorkspace(provider, runtime),
+        signal,
       })
+      signal.throwIfAborted()
       this.#store.insertArtifacts(
         artifacts.map((collected) => artifactMetadata(collected) as Artifact),
       )
+      signal.throwIfAborted()
       for (const collected of artifacts) {
         this.#telemetry?.metrics.increment("meanwhile.artifact.count", 1, {
           "artifact.kind": collected.kind,
@@ -1034,6 +1003,10 @@ export class RunExecutor implements ManagedComponent {
         })
       }
     } catch (error) {
+      if (error instanceof ControlPlaneStopped) throw error
+      if (signal.aborted && signal.reason instanceof ControlPlaneStopped) {
+        throw signal.reason
+      }
       const at = this.#now()
       if (error instanceof ArtifactCollectionError && error.code === "ARTIFACT_SECRET_DETECTED") {
         this.#store.insertAudit(
@@ -1050,17 +1023,9 @@ export class RunExecutor implements ManagedComponent {
           }),
         )
       }
-      this.#store.appendRunLogNext({
-        ownerId: run.ownerId,
-        runId: run.id,
-        stream: "system",
-        eventType: "artifact.capture_failed",
-        data: JSON.stringify({
-          code: error instanceof ArtifactCollectionError ? error.code : "ARTIFACT_CAPTURE_FAILED",
-        }),
-        createdAt: at,
-      })
-      return error instanceof ArtifactCollectionError ? error.code : "ARTIFACT_CAPTURE_FAILED"
+      const code = artifactCaptureErrorCode(error, signal)
+      this.#recordArtifactCaptureFailed(run, code)
+      return code
     } finally {
       secrets?.dispose()
       for (const key of Object.keys(values)) values[key] = ""
@@ -1070,7 +1035,29 @@ export class RunExecutor implements ManagedComponent {
 
   async #fail(runId: string, error: unknown): Promise<void> {
     const normalized = normalizeError(error)
-    await this.#claimTerminal(runId, "failed", "run.failed", normalized.toStructuredError())
+    const current = this.#store.getRunInternal(runId)
+    if (current === null || isTerminalRunStatus(current.status)) return
+    const at = this.#now()
+    const claim = this.#store.claimRunOutcome({
+      kind: "control_plane_failure",
+      ownerId: current.ownerId,
+      runId,
+      status: "failed",
+      at,
+      error: normalized.toStructuredError(),
+      resultAudit: {
+        actorApiKeyId: null,
+        action: "run.failed",
+        requestId: `system:${this.#id()}`,
+        traceId: null,
+        metadata: { from: current.status, to: "failed" },
+      },
+      systemLog: { eventType: "run.failed", data: "Run failed" },
+    })
+    if (claim?.outcome === "claimed") {
+      this.#recordOutcomeMetrics(current, claim.run)
+      this.#clearDeadline(runId)
+    }
   }
 
   async #timeout(runId: string, scope?: TelemetryScope): Promise<void> {
@@ -1101,75 +1088,100 @@ export class RunExecutor implements ManagedComponent {
   async #timeoutInternal(runId: string, scope?: TelemetryScope): Promise<void> {
     const current = this.#store.getRunInternal(runId)
     if (current === null || isTerminalRunStatus(current.status)) return
-    if ((this.#store.getRunnerSession(runId)?.terminalResult ?? null) !== null) return
-    const runtime = this.#store.getRuntimeForRun(runId)
-    if (runtime?.processHandle !== null && runtime?.processHandle !== undefined) {
-      try {
-        const baseProvider = this.#providers.get(runtime.provider)
-        const provider =
-          scope === undefined
-            ? baseProvider
-            : observeRuntimeProvider(baseProvider, scope, { runId }, () => this.#clock().getTime())
-        await this.#runner.cancel(provider, restoreProcessHandle(runtime.processHandle))
-      } catch {
-        // The durable timeout claim below remains authoritative.
-      }
-    }
-    const terminal = await this.#claimTerminal(runId, "timed_out", "run.timed_out", null)
-    if (terminal?.deadlineAt !== null && terminal?.deadlineAt !== undefined) {
+    const at = this.#now()
+    const claim = this.#store.claimRunOutcome({
+      kind: "timeout",
+      ownerId: current.ownerId,
+      runId,
+      at,
+      resultAudit: {
+        actorApiKeyId: null,
+        action: "run.timed_out",
+        requestId: `system:${this.#id()}`,
+        traceId: null,
+        metadata: { from: current.status, to: "timed_out" },
+      },
+      systemLog: { eventType: "run.timed_out", data: "Run timed_out" },
+    })
+    if (claim?.outcome !== "claimed") return
+    this.#recordOutcomeMetrics(current, claim.run)
+    this.#clearDeadline(runId)
+    if (claim.run.deadlineAt !== null) {
       this.#telemetry?.metrics.record(
         "meanwhile.run.timeout.latency",
-        Math.max(0, this.#clock().getTime() - Date.parse(terminal.deadlineAt)),
-        { agent: terminal.agentType, provider: terminal.provider },
+        Math.max(0, this.#clock().getTime() - Date.parse(claim.run.deadlineAt)),
+        { agent: claim.run.agentType, provider: claim.run.provider },
       )
     }
+    await this.#signalRunner(runId, scope, "run.timeout_signal_failed")
     await this.#stopRuntime(runId, undefined, scope)
   }
 
-  async #claimTerminal(
-    runId: string,
-    status: Extract<RunStatus, "succeeded" | "failed" | "cancelled" | "timed_out">,
-    reason: string,
-    error: StructuredError | null,
-    context?: RequestContext,
+  async #claimRunnerTerminal(
+    current: Run,
+    terminal: RunnerTerminalPayload,
     exitCode?: number | null,
   ): Promise<Run | null> {
-    const current = this.#store.getRunInternal(runId)
-    if (current === null || isTerminalRunStatus(current.status)) return current
     const at = this.#now()
-    const terminal = this.#store.transitionRun({
-      runId,
-      expectedStatus: current.status,
-      expectedVersion: current.statusVersion,
-      toStatus: status,
-      reason,
+    const status = statusForTerminal(terminal)
+    const claim = this.#store.claimRunOutcome({
+      kind: "runner",
+      ownerId: current.ownerId,
+      runId: current.id,
+      status,
+      terminalResult: jsonObject(terminal),
       at,
-      error,
+      error: terminalError(terminal),
       ...(exitCode === undefined ? {} : { exitCode }),
-      systemLog: { eventType: reason, data: `Run ${status}` },
-      audit: {
-        actorApiKeyId: context?.apiKeyId ?? null,
-        action: reason,
-        requestId: context?.requestId ?? `system:${this.#id()}`,
-        traceId: context?.traceId ?? null,
+      systemLog: { eventType: `runner.${status}`, data: `Run ${status}` },
+      resultAudit: {
+        actorApiKeyId: null,
+        action: `runner.${status}`,
+        requestId: `system:${this.#id()}`,
+        traceId: null,
         metadata: { from: current.status, to: status },
       },
     })
-    if (terminal !== null) {
-      this.#telemetry?.metrics.increment("meanwhile.run.outcomes", 1, {
-        agent: current.agentType,
-        provider: current.provider,
-        outcome: status,
+    if (claim?.outcome !== "claimed") return claim?.run ?? null
+    this.#recordOutcomeMetrics(current, claim.run)
+    this.#clearDeadline(current.id)
+    return claim.run
+  }
+
+  async #signalRunner(
+    runId: string,
+    scope: TelemetryScope | undefined,
+    event: string,
+  ): Promise<void> {
+    const runtime = this.#store.getRuntimeForRun(runId)
+    if (runtime?.processHandle === null || runtime?.processHandle === undefined) return
+    try {
+      const baseProvider = this.#providers.get(runtime.provider)
+      const provider =
+        scope === undefined
+          ? baseProvider
+          : observeRuntimeProvider(baseProvider, scope, { runId }, () => this.#clock().getTime())
+      await this.#runner.cancel(provider, restoreProcessHandle(runtime.processHandle))
+    } catch (error) {
+      this.#logger.warn(event, "Runner cancellation signal failed", {
+        runId,
+        error: normalizeError(error).code,
       })
-      this.#telemetry?.metrics.record(
-        "meanwhile.run.duration",
-        Math.max(0, this.#clock().getTime() - Date.parse(current.createdAt)),
-        { agent: current.agentType, provider: current.provider, outcome: status },
-      )
-      const runtime = this.#store.getRuntimeForRun(runId)
-      if (runtime !== null) this.#store.markRuntimeCleanupPending(runtime.id, at)
     }
-    return terminal
+  }
+
+  #recordOutcomeMetrics(previous: Run, terminal: Run): void {
+    if (!isTerminalRunStatus(terminal.status)) return
+    this.#telemetry?.metrics.increment("meanwhile.run.outcomes", 1, {
+      agent: previous.agentType,
+      provider: previous.provider,
+      outcome: terminal.status,
+    })
+    this.#telemetry?.metrics.record(
+      "meanwhile.run.duration",
+      Math.max(0, this.#clock().getTime() - Date.parse(previous.createdAt)),
+      { agent: previous.agentType, provider: previous.provider, outcome: terminal.status },
+    )
   }
 
   async #stopRuntime(
@@ -1204,8 +1216,6 @@ export class RunExecutor implements ManagedComponent {
         runId,
         code: normalizeError(error).code,
       })
-    } finally {
-      this.#store.markRuntimeCleanupPending(runtime.id, this.#now())
     }
   }
 
@@ -1351,9 +1361,10 @@ class ProviderArtifactWorkspace implements ArtifactWorkspace {
   async list(
     path: string,
     limits: { readonly maxEntries: number; readonly maxDepth: number },
+    signal: AbortSignal,
   ): Promise<readonly WorkspaceEntry[]> {
     const root = relativePath(path)
-    const rootInfo = await this.#stat(root, limits.maxEntries)
+    const rootInfo = await this.#stat(root, limits.maxEntries, signal)
     if (rootInfo.type === "file" || rootInfo.type === "symlink") return [toWorkspaceEntry(rootInfo)]
 
     const result: WorkspaceEntry[] = [toWorkspaceEntry(rootInfo)]
@@ -1371,9 +1382,14 @@ class ProviderArtifactWorkspace implements ArtifactWorkspace {
           { limit: limits.maxEntries },
         )
       }
-      for (const entry of await this.provider.listFiles(this.runtime, directory.path, {
-        maxEntries: remaining,
-      })) {
+      for (const entry of await this.provider.listFiles(
+        this.runtime,
+        directory.path,
+        {
+          maxEntries: remaining,
+        },
+        signal,
+      )) {
         const depth = directory.depth + 1
         if (depth > limits.maxDepth) {
           throw new ArtifactCollectionError(
@@ -1389,16 +1405,20 @@ class ProviderArtifactWorkspace implements ArtifactWorkspace {
     return result
   }
 
-  readFile(path: string, maxBytes: number): Promise<Uint8Array> {
-    return this.provider.readFile(this.runtime, relativePath(path), { maxBytes })
+  readFile(path: string, maxBytes: number, signal: AbortSignal): Promise<Uint8Array> {
+    return this.provider.readFile(this.runtime, relativePath(path), { maxBytes }, signal)
   }
 
-  async #stat(path: ReturnType<typeof relativePath>, maxEntries: number): Promise<RuntimeFileInfo> {
+  async #stat(
+    path: ReturnType<typeof relativePath>,
+    maxEntries: number,
+    signal: AbortSignal,
+  ): Promise<RuntimeFileInfo> {
     if (path === ".") {
       return { path, type: "directory", size: 0, modifiedAt: new Date(0).toISOString() }
     }
     const parent = relativePath(posix.dirname(path) === "." ? "." : posix.dirname(path))
-    const entries = await this.provider.listFiles(this.runtime, parent, { maxEntries })
+    const entries = await this.provider.listFiles(this.runtime, parent, { maxEntries }, signal)
     const found = entries.find((entry) => entry.path === path)
     if (found === undefined) {
       throw new ArtifactCollectionError(
@@ -1425,6 +1445,17 @@ const utf8ByteLength = (value: string): number => new TextEncoder().encode(value
 const stableTelemetryCode = (value: string): string =>
   /^[A-Z][A-Z0-9_]{1,63}$/.test(value) ? value : "INTERNAL"
 
+const artifactCaptureErrorCode = (error: unknown, signal: AbortSignal): string => {
+  if (
+    signal.aborted &&
+    signal.reason instanceof DOMException &&
+    signal.reason.name === "TimeoutError"
+  ) {
+    return "ARTIFACT_CAPTURE_TIMED_OUT"
+  }
+  return error instanceof ArtifactCollectionError ? error.code : "ARTIFACT_CAPTURE_FAILED"
+}
+
 const streamForFrame = (frame: RunnerFrame): RunLogStream => {
   if (frame.type === "agent.stderr") return "stderr"
   if (frame.type === "session.update" || frame.type === "permission.resolved") return "agent"
@@ -1442,20 +1473,6 @@ const terminalError = (terminal: RunnerTerminalPayload): StructuredError | null 
     message: terminal.error.message,
     retryable: false,
   }
-}
-
-const sanitizeRunnerTerminal = (
-  value: unknown,
-  redactor: SecretRedactor,
-): RunnerTerminalPayload => {
-  const parsed = runnerTerminalPayloadSchema.safeParse(redactor.redact(value))
-  if (!parsed.success) {
-    throw new AppError({
-      code: "RUNNER_PROTOCOL_ERROR",
-      message: "Redacted runner terminal evidence is invalid",
-    })
-  }
-  return parsed.data
 }
 
 const parsePersistedRunnerTerminal = (value: unknown): RunnerTerminalPayload => {

@@ -17,7 +17,7 @@ Large architectural proposals should begin with a short issue containing:
 2. the current controlling code path;
 3. the invariant that does not hold;
 4. the smallest boundary that can own the fix;
-5. migration, compatibility, security, and operational consequences;
+5. schema replacement, compatibility, security, and operational consequences;
 6. the proof that will establish completion.
 
 Do not start with a framework or abstraction proposal.
@@ -69,7 +69,7 @@ Read [Architecture](docs/architecture.md), [Provider contract](docs/provider-con
 
 Prefer finishing the deepest dependency your change needs before adding its consumers:
 
-1. domain, errors, validated config, telemetry facade, migrations, and store;
+1. domain, errors, validated config, telemetry facade, current schema, and store;
 2. runner protocol, ACP session, deterministic fixture, and standalone runner;
 3. provider/artifact/deployment contracts, registries, fakes, and local implementations;
 4. agent session, executor, timeout, cancellation, reconciliation, cleanup, and API;
@@ -165,14 +165,15 @@ Changes to auth, secrets, process execution, filesystem traversal, artifacts, pr
 
 ## Database changes
 
-- Add an ordered explicit migration; never mutate schema implicitly.
-- Never edit a migration included in a release.
+- Edit the one current schema explicitly.
+- Treat every schema fingerprint change as requiring a fresh data root.
+- Never add upgrade, backfill, repair, or dual-read database code.
 - Keep owner, state, order, and uniqueness invariants relational.
 - Prefix owner-scoped indexes with `owner_id`.
 - Use compare-and-swap predicates or status versions for state claims.
 - Write transition audit evidence in the same transaction.
-- Test fresh initialization and upgrade from supported schema fixtures.
-- Document backup, rollback, and compatibility effects.
+- Test fresh initialization, atomic failure, fingerprint drift, and foreign/partial database rejection.
+- Document backup, fresh-root, rollback, and compatibility effects.
 
 Resolved secret values and artifact bodies never belong in SQLite.
 
@@ -184,7 +185,7 @@ Meanwhile has independent compatibility surfaces:
 - runner protocol;
 - Cloudflare bridge protocol;
 - provider and deploy adapter contracts;
-- database migrations;
+- exact database schema identity;
 - artifact representation;
 - agent catalog schema.
 
@@ -236,7 +237,7 @@ Keep each pull request independently understandable. Include:
 - problem and user/operational consequence;
 - controlling path and ownership decision;
 - behavior before and after;
-- security, compatibility, migration, and cleanup impact;
+- security, compatibility, schema-replacement, and cleanup impact;
 - exact verification commands and results;
 - live-provider evidence when applicable;
 - known limitations that remain.
