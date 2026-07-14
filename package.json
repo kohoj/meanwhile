@@ -50,7 +50,7 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check . && tsc --noEmit && bun run notices:check && bun run runtime:build && bun test",
-    "notices:prepare": "rm -rf providers/cloudflare-sandbox/image/node_modules && bun install --cwd providers/cloudflare-sandbox/image --frozen-lockfile --production --os=linux --cpu=x64",
+    "notices:prepare": "rm -rf node_modules providers/cloudflare-sandbox/node_modules providers/cloudflare-sandbox/image/node_modules && bun install --frozen-lockfile && bun install --cwd providers/cloudflare-sandbox/image --frozen-lockfile --production --os=linux --cpu=x64",
     "notices:generate": "bun run notices:prepare && bun scripts/third-party-notices.ts --write",
     "notices:check": "bun run notices:prepare && bun scripts/third-party-notices.ts --check",
     "test:live:cloudflare": "MEANWHILE_LIVE_CLOUDFLARE=1 bun test ./test/live/cloudflare-sandbox.test.ts",

@@ -1,4 +1,5 @@
-import { realpath } from "node:fs/promises"
+import { readdir, realpath } from "node:fs/promises"
+import { isAbsolute, relative } from "node:path"
 
 type PackageManifest = {
   readonly name: string
@@ -37,16 +38,19 @@ const packageScopes = [
     name: "control-plane-and-runner" as const,
     packagePath: `${repositoryRoot}/package.json`,
     resolveFrom: repositoryRoot,
+    resolutionBoundary: repositoryRoot,
   },
   {
     name: "cloudflare-bridge" as const,
     packagePath: `${repositoryRoot}/providers/cloudflare-sandbox/package.json`,
     resolveFrom: `${repositoryRoot}/providers/cloudflare-sandbox`,
+    resolutionBoundary: repositoryRoot,
   },
   {
     name: "cloudflare-runtime-agent" as const,
     packagePath: `${repositoryRoot}/providers/cloudflare-sandbox/image/package.json`,
     resolveFrom: `${repositoryRoot}/providers/cloudflare-sandbox/image`,
+    resolutionBoundary: `${repositoryRoot}/providers/cloudflare-sandbox/image`,
   },
 ]
 
@@ -62,6 +66,7 @@ if (mode === "--write") {
     .catch(() => "")
   if (actual !== expected) {
     console.error("THIRD_PARTY_NOTICES is stale; run `bun run notices:generate`.")
+    console.error(describeDrift(actual, expected))
     process.exit(1)
   }
   console.log("THIRD_PARTY_NOTICES matches installed production dependency graphs.")
@@ -83,17 +88,22 @@ async function renderNotices(): Promise<string> {
 
   for (const scope of packageScopes) {
     const manifest = await readManifest(scope.packagePath)
-    const pending = (await dependencyNames(manifest, scope.resolveFrom)).map((name) => ({
-      name,
-      resolveFrom: scope.resolveFrom,
-    }))
+    const resolutionBoundary = await realpath(scope.resolutionBoundary)
+    const resolveFrom = await realpath(scope.resolveFrom)
+    const pending = (await dependencyNames(manifest, resolveFrom, resolutionBoundary)).map(
+      (name) => ({ name, resolveFrom }),
+    )
     const visited = new Set<string>()
 
     while (pending.length > 0) {
       const dependency = pending.shift()
       if (!dependency) break
 
-      const packageRoot = await resolvePackageRoot(dependency.name, dependency.resolveFrom)
+      const packageRoot = await resolvePackageRoot(
+        dependency.name,
+        dependency.resolveFrom,
+        resolutionBoundary,
+      )
       const packageManifest = await readManifest(`${packageRoot}/package.json`)
       if (!packageManifest.name || !packageManifest.version) {
         throw new Error(
@@ -119,13 +129,13 @@ async function renderNotices(): Promise<string> {
         })
       }
 
-      for (const child of await dependencyNames(packageManifest, packageRoot)) {
+      for (const child of await dependencyNames(packageManifest, packageRoot, resolutionBoundary)) {
         pending.push({ name: child, resolveFrom: packageRoot })
       }
     }
   }
 
-  const packages = [...notices.values()].sort((left, right) => left.id.localeCompare(right.id))
+  const packages = [...notices.values()].sort((left, right) => compareText(left.id, right.id))
   const lines = [
     "THIRD-PARTY SOFTWARE NOTICES",
     "",
@@ -167,7 +177,7 @@ async function renderNotices(): Promise<string> {
 
   lines.push("", "LICENSE TEXTS")
   for (const group of [...groupedTexts.values()].sort((left, right) =>
-    left.text.localeCompare(right.text),
+    compareText(left.text, right.text),
   )) {
     lines.push("", `Applies to: ${group.packages.sort().join(", ")}`, "", group.text)
   }
@@ -201,8 +211,12 @@ async function renderNotices(): Promise<string> {
   return `${lines.join("\n").trimEnd()}\n`
 }
 
-async function resolvePackageRoot(name: string, resolveFrom: string): Promise<string> {
-  const resolved = await tryResolvePackageRoot(name, resolveFrom)
+async function resolvePackageRoot(
+  name: string,
+  resolveFrom: string,
+  resolutionBoundary: string,
+): Promise<string> {
+  const resolved = await tryResolvePackageRoot(name, resolveFrom, resolutionBoundary)
   if (resolved === undefined) {
     throw new Error(`could not locate package.json for ${name} required from ${resolveFrom}`)
   }
@@ -212,13 +226,15 @@ async function resolvePackageRoot(name: string, resolveFrom: string): Promise<st
 async function tryResolvePackageRoot(
   name: string,
   resolveFrom: string,
+  resolutionBoundary: string,
 ): Promise<string | undefined> {
   let directory = resolveFrom
-  while (true) {
+  while (isWithin(directory, resolutionBoundary)) {
     const installed = `${directory}/node_modules/${name}`
     if (await Bun.file(`${installed}/package.json`).exists()) return realpath(installed)
+    if (directory === resolutionBoundary) break
     const parent = parentPath(directory)
-    if (parent === directory) break
+    if (parent === directory || !isWithin(parent, resolutionBoundary)) break
     directory = parent
   }
 
@@ -229,7 +245,10 @@ async function tryResolvePackageRoot(
       if (parent === candidate) break
       candidate = parent
     }
-    if (await Bun.file(`${candidate}/package.json`).exists()) return realpath(candidate)
+    if (await Bun.file(`${candidate}/package.json`).exists()) {
+      const packageRoot = await realpath(candidate)
+      if (isWithin(packageRoot, resolutionBoundary)) return packageRoot
+    }
   } catch {
     // Target-platform optional packages can be present on disk while the host
     // resolver intentionally refuses them.
@@ -242,9 +261,17 @@ async function readManifest(path: string): Promise<PackageManifest> {
 }
 
 async function readLicenseText(packageRoot: string): Promise<string | undefined> {
+  const publishedFiles = (await readdir(packageRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+    .map((entry) => entry.name)
+    .sort(compareText)
   for (const candidate of licenseCandidates) {
-    const file = Bun.file(`${packageRoot}/${candidate}`)
-    if (await file.exists()) return normalizeNoticeText(await file.text())
+    const publishedName = publishedFiles.find(
+      (name) => name.toLowerCase() === candidate.toLowerCase(),
+    )
+    if (publishedName !== undefined) {
+      return normalizeNoticeText(await Bun.file(`${packageRoot}/${publishedName}`).text())
+    }
   }
   return undefined
 }
@@ -256,6 +283,30 @@ function normalizeNoticeText(value: string): string {
     .map((line) => line.trimEnd())
     .join("\n")
     .trim()
+}
+
+function describeDrift(actual: string, expected: string): string {
+  const actualLines = actual.split("\n")
+  const expectedLines = expected.split("\n")
+  const maximum = Math.max(actualLines.length, expectedLines.length)
+  let index = 0
+  while (index < maximum && actualLines[index] === expectedLines[index]) index += 1
+  const printable = (value: string | undefined) => JSON.stringify(value?.slice(0, 300) ?? null)
+  return [
+    `actual sha256=${sha256(actual)} lines=${actualLines.length}`,
+    `expected sha256=${sha256(expected)} lines=${expectedLines.length}`,
+    `first difference at line ${index + 1}`,
+    `actual: ${printable(actualLines[index])}`,
+    `expected: ${printable(expectedLines[index])}`,
+  ].join("\n")
+}
+
+function sha256(value: string): string {
+  return new Bun.CryptoHasher("sha256").update(value).digest("hex")
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
 }
 
 function sourceUrl(manifest: PackageManifest): string | undefined {
@@ -276,11 +327,23 @@ function parentPath(path: string): string {
   return separator <= 0 ? "/" : path.slice(0, separator)
 }
 
-async function dependencyNames(manifest: PackageManifest, resolveFrom: string): Promise<string[]> {
+function isWithin(path: string, boundary: string): boolean {
+  const remainder = relative(boundary, path)
+  return (
+    remainder === "" ||
+    (!isAbsolute(remainder) && remainder !== ".." && !remainder.startsWith("../"))
+  )
+}
+
+async function dependencyNames(
+  manifest: PackageManifest,
+  resolveFrom: string,
+  resolutionBoundary: string,
+): Promise<string[]> {
   const required = Object.keys(manifest.dependencies ?? {})
   const installedOptional: string[] = []
   for (const name of Object.keys(manifest.optionalDependencies ?? {})) {
-    if ((await tryResolvePackageRoot(name, resolveFrom)) !== undefined) {
+    if ((await tryResolvePackageRoot(name, resolveFrom, resolutionBoundary)) !== undefined) {
       installedOptional.push(name)
     }
   }

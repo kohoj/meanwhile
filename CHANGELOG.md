@@ -32,6 +32,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Timeline message identity now includes ACP role as well as turn and message ID, so an agent reusing one ID for thought and final output cannot collapse them.
 - Cloudflare process output now carries explicit stdout/stderr closure markers; the bridge fails retryably instead of publishing an exit cursor before both eventually consistent log tails are complete.
 - The Cloudflare Codex wrapper retains its process-private authentication home through adapter exit and invokes the native pinned Codex executable directly.
+- Third-party notice verification now rebuilds clean dependency roots and confines resolution to each declared graph, so cached, hoisted, or ancestor packages cannot make the release manifest depend on CI host state.
 
 ### Security
 
