@@ -22,11 +22,12 @@ import type {
   JsonValue,
   Run,
 } from "../domain"
+import { AppError } from "../errors"
 import type { Store } from "../persistence/store"
 import {
   type SecretAccessScope,
   type SecretEnvironment,
-  SecretRedactor,
+  type SecretRedactor,
   type SecretReferenceValidator,
   SecretResolutionError,
 } from "../secrets"
@@ -610,10 +611,11 @@ export class DeploymentExecutor {
     options: DeploymentExecutionOptions,
   ): Promise<DeploymentRecord> {
     const deploymentId = running.id
-    const fallbackRedactor = new SecretRedactor([])
     let resolvedSecrets: SecretEnvironment | null = null
-    let guard = new DeploymentOutputGuard(fallbackRedactor)
+    let guard = new DeploymentOutputGuard()
     const activeEmissions = new Set<Promise<void>>()
+    let evidenceWriteFailed = false
+    let targetSucceeded = false
     try {
       assertExecutionContinues(signal, options)
       const adapter = this.#adapters.get(running.target)
@@ -627,7 +629,6 @@ export class DeploymentExecutor {
         purpose: "deployment",
       })
       assertExecutionContinues(signal, options)
-      fallbackRedactor.dispose()
       guard = new DeploymentOutputGuard(resolvedSecrets.redactor)
       const source = await this.#sourceResolver.open({
         ownerId: running.ownerId,
@@ -647,7 +648,10 @@ export class DeploymentExecutor {
           signal,
           emit: async (event) => {
             assertExecutionContinues(signal, options)
-            const emission = this.#appendAdapterLog(running, guard, event)
+            const emission = this.#appendAdapterLog(running, guard, event).catch((error) => {
+              evidenceWriteFailed = true
+              throw error
+            })
             activeEmissions.add(emission)
             try {
               await emission
@@ -662,6 +666,7 @@ export class DeploymentExecutor {
       assertExecutionContinues(signal, options)
 
       const url = validateDeployResult(result, guard)
+      targetSucceeded = true
 
       const finishedAt = this.#now().toISOString()
       const succeeded = await this.#repository.transitionWithAudit({
@@ -687,6 +692,12 @@ export class DeploymentExecutor {
       if (signal.aborted && options.preserveRunningOnAbort === true) {
         await Promise.allSettled(activeEmissions)
         throw new DeploymentExecutionInterruptedError()
+      }
+      if (evidenceWriteFailed || targetSucceeded) {
+        await Promise.allSettled(activeEmissions)
+        throw new DeploymentExecutionInterruptedError(
+          "Deployment target state requires idempotent reconciliation.",
+        )
       }
       const failure = guard.failure(error)
       await this.#repository.appendLog({
@@ -719,8 +730,7 @@ export class DeploymentExecutor {
       }
       return failed
     } finally {
-      if (resolvedSecrets === null) fallbackRedactor.dispose()
-      else resolvedSecrets.dispose()
+      resolvedSecrets?.dispose()
     }
   }
 
@@ -744,8 +754,8 @@ class DeploymentExecutionInterruptedError extends Error {
   override readonly name = "DeploymentExecutionInterruptedError"
   readonly code = "DEPLOYMENT_RECONCILIATION_REQUIRED"
 
-  constructor() {
-    super("Deployment execution was interrupted for control-plane shutdown.")
+  constructor(message = "Deployment execution was interrupted for control-plane shutdown.") {
+    super(message)
   }
 }
 
@@ -1007,18 +1017,18 @@ const stableDeploymentTelemetryCode = (value: string): string =>
   /^[A-Z][A-Z0-9_]{1,63}$/.test(value) ? value : "DEPLOYMENT_EXECUTION_FAILED"
 
 class DeploymentOutputGuard {
-  readonly #redactor: SecretRedactor
+  readonly #redactor: SecretRedactor | null
 
-  constructor(redactor: SecretRedactor) {
+  constructor(redactor: SecretRedactor | null = null) {
     this.#redactor = redactor
   }
 
   redact(value: string): string {
-    return truncate(this.#redactor.redactString(value), 16_384)
+    return truncate(this.#redactor?.redactString(value) ?? value, 16_384)
   }
 
   containsSecret(value: unknown): boolean {
-    return this.#redactor.contains(value)
+    return this.#redactor?.contains(value) ?? false
   }
 
   fields(value: unknown): Readonly<Record<string, SafeJsonValue>> {
@@ -1253,44 +1263,37 @@ function normalizeEventName(value: string): string {
 }
 
 function decodeStoredDeploymentLog(chunk: DeploymentLogChunk): DeploymentLogRecord {
+  let value: unknown
   try {
-    const value: unknown = JSON.parse(chunk.data)
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      const record = value as RawEncodedDeploymentLog
-      const level = record.level
-      const event = record.event
-      const message = record.message
-      const fields = record.fields
-      if (
-        record.version === 1 &&
-        isDeploymentLogLevel(level) &&
-        typeof event === "string" &&
-        typeof message === "string" &&
-        isJsonObject(fields)
-      ) {
-        return {
-          deploymentId: chunk.deploymentId,
-          sequence: chunk.sequence,
-          level,
-          event: normalizeEventName(event),
-          message,
-          fields,
-          createdAt: chunk.createdAt,
-        }
+    value = JSON.parse(chunk.data)
+  } catch (cause) {
+    throw new AppError({ code: "INTERNAL", message: "Deployment log evidence is invalid", cause })
+  }
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const record = value as RawEncodedDeploymentLog
+    const level = record.level
+    const event = record.event
+    const message = record.message
+    const fields = record.fields
+    if (
+      record.version === 1 &&
+      isDeploymentLogLevel(level) &&
+      typeof event === "string" &&
+      typeof message === "string" &&
+      isJsonObject(fields)
+    ) {
+      return {
+        deploymentId: chunk.deploymentId,
+        sequence: chunk.sequence,
+        level,
+        event: normalizeEventName(event),
+        message,
+        fields,
+        createdAt: chunk.createdAt,
       }
     }
-  } catch {
-    // Rows from an older plain-text format remain readable as system evidence.
   }
-  return {
-    deploymentId: chunk.deploymentId,
-    sequence: chunk.sequence,
-    level: chunk.stream === "stderr" ? "error" : "info",
-    event: "deployment.output",
-    message: truncate(chunk.data, 16_384),
-    fields: {},
-    createdAt: chunk.createdAt,
-  }
+  throw new AppError({ code: "INTERNAL", message: "Deployment log evidence is invalid" })
 }
 
 interface RawEncodedDeploymentLog {

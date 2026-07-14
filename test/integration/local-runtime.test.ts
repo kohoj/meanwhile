@@ -181,6 +181,36 @@ describe("LocalRuntimeProvider", () => {
     expect((await provider.inspect(runtime)).status).toBe("missing")
   })
 
+  test("delivers ordered process input idempotently and binds each sequence once", async () => {
+    const provider = await localProvider()
+    const runtime = await provider.create({ runtimeId: "session-input" })
+    await provider.start(runtime)
+    const process = await provider.spawn(runtime, {
+      processId: "session-input-process",
+      argv: [globalThis.process.execPath, "-e", "setInterval(() => {}, 10_000)"],
+      cwd: relativePath("."),
+      input: "mailbox",
+    })
+    const first = {
+      sequence: 1,
+      id: "70c78f7e-a915-4a4b-a9cb-e805f534f606",
+      data: "first",
+    }
+
+    await provider.send(process, first)
+    await provider.send(process, first)
+    await expect(
+      provider.send(process, {
+        ...first,
+        id: "4f9795b2-ac1a-436a-aed8-ef917d2f9566",
+        data: "different",
+      }),
+    ).rejects.toMatchObject({ code: "PROCESS_INPUT_CONFLICT", operation: "send" })
+
+    await provider.signal(process, "SIGTERM")
+    await provider.wait(process)
+  })
+
   test("aborting output observation leaves the local process running", async () => {
     const provider = await localProvider()
     const runtime = await provider.create({ runtimeId: "run-observation-abort" })

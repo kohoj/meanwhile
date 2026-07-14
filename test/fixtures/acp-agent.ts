@@ -28,10 +28,11 @@ const fixture = acp
     return { sessionId }
   })
   .onRequest(acp.methods.agent.session.prompt, async (context) => {
-    const session = sessions.get(context.params.sessionId)
-    if (!session) {
+    if (!sessions.has(context.params.sessionId)) {
       throw new Error("Unknown fixture session")
     }
+    const session = new AbortController()
+    sessions.set(context.params.sessionId, session)
 
     const text = context.params.prompt
       .filter((block): block is acp.TextContent & { type: "text" } => block.type === "text")

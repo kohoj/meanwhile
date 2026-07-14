@@ -7,6 +7,7 @@ import type {
   ProcessEvent,
   ProcessExit,
   ProcessHandle,
+  ProcessInput,
   ProcessSignal,
   ProcessSpec,
   ProcessState,
@@ -106,8 +107,8 @@ export function observeRuntimeProvider(
       observe("create", () => provider.create(input)),
     start: (runtime: RuntimeHandle): Promise<void> =>
       observe("start", () => provider.start(runtime)),
-    inspect: (runtime: RuntimeHandle): Promise<RuntimeState> =>
-      observe("inspect", () => provider.inspect(runtime)),
+    inspect: (runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState> =>
+      observe("inspect", () => provider.inspect(runtime, signal)),
     stop: (runtime: RuntimeHandle): Promise<void> => observe("stop", () => provider.stop(runtime)),
     destroy: (runtime: RuntimeHandle): Promise<void> =>
       observe("destroy", () => provider.destroy(runtime)),
@@ -120,19 +121,28 @@ export function observeRuntimeProvider(
       observe("signal", () => provider.signal(process, signal)),
     wait: (process: ProcessHandle): Promise<ProcessExit> =>
       observe("wait", () => provider.wait(process)),
+    ...(provider.send === undefined
+      ? {}
+      : {
+          send: (process: ProcessHandle, input: ProcessInput): Promise<void> =>
+            observe("send", () => provider.send?.(process, input) as Promise<void>),
+        }),
     writeFiles: (runtime: RuntimeHandle, files: readonly RuntimeFile[]): Promise<void> =>
       observe("writeFiles", () => provider.writeFiles(runtime, files)),
     listFiles: (
       runtime: RuntimeHandle,
       path: RelativePath,
       options: ListRuntimeFilesOptions,
+      signal?: AbortSignal,
     ): Promise<RuntimeFileInfo[]> =>
-      observe("listFiles", () => provider.listFiles(runtime, path, options)),
+      observe("listFiles", () => provider.listFiles(runtime, path, options, signal)),
     readFile: (
       runtime: RuntimeHandle,
       path: RelativePath,
       options: ReadRuntimeFileOptions,
-    ): Promise<Uint8Array> => observe("readFile", () => provider.readFile(runtime, path, options)),
+      signal?: AbortSignal,
+    ): Promise<Uint8Array> =>
+      observe("readFile", () => provider.readFile(runtime, path, options, signal)),
     ...(provider.expose === undefined
       ? {}
       : {

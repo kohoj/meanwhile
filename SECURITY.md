@@ -62,7 +62,7 @@ Examples include:
 - cleanup that can destroy active or cross-owner compute;
 - deployment from mutable or unauthorized source;
 - preview origin confusion, path escape, active-content access to API authority, or cache isolation failure;
-- malicious migrations, dependency compromise, or release artifact provenance issues within this repository.
+- malicious schema changes, dependency compromise, or release artifact provenance issues within this repository.
 
 Underlying Cloudflare, Bun, ACP SDK, model provider, deployment platform, or operating-system vulnerabilities should also be reported to the affected upstream project through its private security process. Report them to Meanwhile when our integration makes the impact exploitable or requires downstream mitigation.
 

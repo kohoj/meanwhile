@@ -29,6 +29,8 @@ export interface PrepareWorkspaceInput {
   readonly repositoryCredential?: string
   readonly timeoutMs: number
   readonly terminationGraceMs: number
+  /** Releases observation on control-plane shutdown without signaling the process. */
+  readonly signal: AbortSignal
   readonly emit: (log: WorkspacePreparationLog) => Promise<void>
 }
 
@@ -41,6 +43,7 @@ export class WorkspacePreparer {
   constructor(private readonly bundles: WorkspaceBundleReader) {}
 
   async prepare(input: PrepareWorkspaceInput): Promise<PreparedWorkspace> {
+    input.signal.throwIfAborted()
     if (input.source.type === "bundle") {
       const files = await this.bundles.read(input.ownerId, input.source.artifactId)
       await input.provider.writeFiles(input.runtime, files)
@@ -122,7 +125,7 @@ export class WorkspacePreparer {
     const process = await input.provider.spawn(input.runtime, spec)
     let stdout = ""
     const consume = async () => {
-      for await (const event of input.provider.events(process, null)) {
+      for await (const event of input.provider.events(process, null, input.signal)) {
         if (event.stream === "stdout") stdout += event.data
         await input.emit({
           stream: event.stream,
@@ -132,7 +135,10 @@ export class WorkspacePreparer {
         })
       }
     }
-    const [exit] = await Promise.all([input.provider.wait(process), consume()])
+    const [exit] = await Promise.all([
+      abortable(input.provider.wait(process), input.signal),
+      consume(),
+    ])
     if (exit.exitCode !== 0) {
       throw new AppError({
         code: "PROVIDER_UNAVAILABLE",
@@ -143,4 +149,22 @@ export class WorkspacePreparer {
     }
     return { stdout }
   }
+}
+
+function abortable<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<Value> {
+  signal.throwIfAborted()
+  return new Promise<Value>((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"))
+    signal.addEventListener("abort", abort, { once: true })
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", abort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort)
+        reject(error)
+      },
+    )
+  })
 }

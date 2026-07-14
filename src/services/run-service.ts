@@ -7,6 +7,7 @@ import {
   isTerminalRunStatus,
   type RequestContext,
   type Run,
+  type RunEvent,
   type RunLogChunk,
   type WorkspaceSource,
 } from "../domain"
@@ -69,7 +70,13 @@ export interface RunCommandSink {
 export interface RunServiceOptions {
   readonly store: Pick<
     Store,
-    "createRun" | "getIdempotentRun" | "getRun" | "listRuns" | "listRunLogs" | "listArtifacts"
+    | "createRun"
+    | "getIdempotentRun"
+    | "getRun"
+    | "listRuns"
+    | "listRunLogs"
+    | "listRunEvents"
+    | "listArtifacts"
   >
   readonly commands: RunCommandSink
   readonly workspaceInputs?: WorkspaceInputStore
@@ -87,6 +94,11 @@ export type RunPage = Page<Run>
 
 export interface RunLogPage {
   readonly items: readonly RunLogChunk[]
+  readonly nextCursor: number | null
+}
+
+export interface RunEventPage {
+  readonly items: readonly RunEvent[]
   readonly nextCursor: number | null
 }
 
@@ -309,6 +321,19 @@ export class RunService {
     }
   }
 
+  async events(
+    ownerId: string,
+    runId: string,
+    options: { after: number; limit: number },
+  ): Promise<RunEventPage> {
+    this.#requireRun(ownerId, runId)
+    const items = this.#store.listRunEvents(ownerId, runId, options.after, options.limit)
+    return {
+      items,
+      nextCursor: items.length === 0 ? null : (items.at(-1)?.sequence ?? null),
+    }
+  }
+
   async artifacts(ownerId: string, runId: string): Promise<readonly Artifact[]> {
     this.#requireRun(ownerId, runId)
     return this.#store.listArtifacts(ownerId, runId)
@@ -354,6 +379,39 @@ export class RunService {
     }
   }
 
+  async *followEvents(
+    ownerId: string,
+    runId: string,
+    after: number,
+    signal: AbortSignal,
+  ): AsyncIterable<RunEvent | null> {
+    this.#requireRun(ownerId, runId)
+    let cursor = after
+    while (!signal.aborted) {
+      const items = this.#store.listRunEvents(ownerId, runId, cursor, 1_000)
+      for (const item of items) {
+        cursor = item.sequence
+        yield item
+      }
+
+      const run = this.#requireRun(ownerId, runId)
+      if (isTerminalRunStatus(run.status)) {
+        for (;;) {
+          const tail = this.#store.listRunEvents(ownerId, runId, cursor, 1_000)
+          for (const item of tail) {
+            cursor = item.sequence
+            yield item
+          }
+          if (tail.length < 1_000) return
+        }
+      }
+      if (items.length === 1_000) continue
+
+      await abortableDelay(this.#followPollMs, signal)
+      if (!signal.aborted) yield null
+    }
+  }
+
   #requireRun(ownerId: string, runId: string): Run {
     const run = this.#store.getRun(ownerId, runId)
     if (run === null) {
@@ -363,10 +421,10 @@ export class RunService {
   }
 }
 
-const hashCanonical = (value: unknown): string =>
+export const hashCanonical = (value: unknown): string =>
   new Bun.CryptoHasher("sha256").update(canonicalJson(value)).digest("hex")
 
-const canonicalJson = (value: unknown): string => {
+export const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value !== "object") {
     const serialized = JSON.stringify(value)
     if (serialized === undefined) throw new TypeError("Run idempotency input must be JSON")

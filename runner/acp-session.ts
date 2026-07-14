@@ -10,6 +10,7 @@ import {
   type RunnerPermissionPolicy,
   type RunnerSpec,
   type RunnerTerminalPayload,
+  type SessionRunnerSpec,
 } from "./protocol"
 
 const CLIENT_NAME = "meanwhile-runner"
@@ -52,7 +53,7 @@ export interface RunAcpSessionOptions {
   terminateGraceMs?: number
 }
 
-interface AgentProcess {
+export interface AgentProcess {
   readonly pid: number
   readonly stdin: Bun.FileSink
   readonly stdout: ReadableStream<Uint8Array>
@@ -127,7 +128,7 @@ class AgentTeardown {
   }
 }
 
-class ExactValueRedactor {
+export class ExactValueRedactor {
   readonly values: string[]
   readonly longestValueLength: number
 
@@ -210,7 +211,7 @@ class StreamingExactValueRedactor {
   }
 }
 
-class SdkConsoleBoundary {
+export class SdkConsoleBoundary {
   private readonly original = {
     debug: console.debug,
     error: console.error,
@@ -458,8 +459,8 @@ export async function runAcpSession(
   }
 }
 
-function spawnAgent(
-  spec: RunnerSpec,
+export function spawnAgent(
+  spec: RunnerSpec | SessionRunnerSpec,
   ambient: Readonly<Record<string, string | undefined>>,
   workingDirectory: string,
 ): AgentProcess {
@@ -475,7 +476,7 @@ function spawnAgent(
 }
 
 function buildAgentEnvironment(
-  spec: RunnerSpec,
+  spec: RunnerSpec | SessionRunnerSpec,
   ambient: Readonly<Record<string, string | undefined>>,
 ): Record<string, string> {
   const environment: Record<string, string> = {}
@@ -501,14 +502,14 @@ function buildAgentEnvironment(
   return environment
 }
 
-async function resolveAgentWorkingDirectory(): Promise<string> {
+export async function resolveAgentWorkingDirectory(): Promise<string> {
   const workspaceRoot = await realpath(process.cwd())
   // `workspace` is a logical policy, not a provider path. The provider has
   // already placed the runner at its physical workspace root.
   return workspaceRoot
 }
 
-function fileSinkWritable(sink: Bun.FileSink): WritableStream<Uint8Array> {
+export function fileSinkWritable(sink: Bun.FileSink): WritableStream<Uint8Array> {
   return new WritableStream<Uint8Array>({
     async write(chunk) {
       sink.write(chunk)
@@ -523,7 +524,7 @@ function fileSinkWritable(sink: Bun.FileSink): WritableStream<Uint8Array> {
   })
 }
 
-function boundedAcpInput(
+export function boundedAcpInput(
   input: ReadableStream<Uint8Array>,
   maximumLineBytes: number,
 ): ReadableStream<Uint8Array> {
@@ -563,7 +564,7 @@ function boundedAcpInput(
   )
 }
 
-function resolvePermission(
+export function resolvePermission(
   policy: RunnerPermissionPolicy,
   request: acp.RequestPermissionRequest,
 ): {
@@ -610,7 +611,7 @@ function resolvePermission(
   }
 }
 
-function summarizeCapabilities(capabilities: acp.AgentCapabilities | undefined): {
+export function summarizeCapabilities(capabilities: acp.AgentCapabilities | undefined): {
   loadSession: boolean
   session: { close: boolean }
   prompt: { image: boolean; audio: boolean; embeddedContext: boolean }
@@ -633,7 +634,7 @@ function summarizeCapabilities(capabilities: acp.AgentCapabilities | undefined):
   }
 }
 
-function boundedSessionUpdate(value: JsonValue): {
+export function boundedSessionUpdate(value: JsonValue): {
   update: Record<string, JsonValue>
   truncated: boolean
   originalBytes?: number
@@ -727,7 +728,7 @@ async function emitStderrChunks(text: string, events: RunnerEventTarget): Promis
   }
 }
 
-async function closeAcpSession(
+export async function closeAcpSession(
   context: acp.ClientContext,
   sessionId: string,
   graceMs: number,

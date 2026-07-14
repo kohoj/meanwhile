@@ -5,6 +5,9 @@ import {
   type RunnerFrame,
   type RunnerSpec,
   runnerFrameSchema,
+  type SessionRunnerFrame,
+  type SessionRunnerSpec,
+  sessionRunnerFrameSchema,
 } from "../../runner/protocol"
 import { CloudflareRuntimeProvider } from "../../src/providers/cloudflare-provider"
 import {
@@ -86,7 +89,7 @@ liveTest(
       })
       expect(
         (await Array.fromAsync(provider.events(modeProbe, null))).map(({ data }) => data).join(""),
-      ).toBe("mode-preserved\n")
+      ).toBe("mode-preserved")
       expect(await provider.wait(modeProbe)).toMatchObject({ exitCode: 0, reason: "exited" })
 
       const process = await provider.spawn(runtime, {
@@ -124,9 +127,15 @@ liveTest(
         timeoutMs: 60_000,
         terminationGraceMs: 5_000,
       })
-      const runnerFrames = parseRunnerFrames(
-        await Array.fromAsync(provider.events(runnerProcess, null)),
-      )
+      const runnerEvents = await Array.fromAsync(provider.events(runnerProcess, null))
+      const runnerFrames = parseRunnerFrames(runnerEvents)
+      if (runnerFrames.length === 0) {
+        throw new Error(
+          `Remote runner emitted no protocol frames: ${JSON.stringify(
+            runnerEvents.map(({ stream, data }) => ({ stream, data: data.slice(0, 1_000) })),
+          )}`,
+        )
+      }
       expect(runnerFrames).toContainEqual(
         expect.objectContaining({
           type: "session.started",
@@ -142,6 +151,81 @@ liveTest(
         }),
       )
       expect(await provider.wait(runnerProcess)).toMatchObject({ exitCode: 0, reason: "exited" })
+
+      const sessionId = `live-session-${crypto.randomUUID()}`
+      const sessionProcess = await provider.spawn(runtime, {
+        processId: `live-session-runner-${crypto.randomUUID()}`,
+        argv: ["meanwhile-runner"],
+        cwd: relativePath("."),
+        initialStdin: `${JSON.stringify({
+          protocolVersion: RUNNER_PROTOCOL_VERSION,
+          mode: "session",
+          sessionId,
+          runnerSessionId: "live-session-runner",
+          agent: { executable: "meanwhile-demo-agent", args: [] },
+          permissionPolicy: { mode: "deny-all" },
+          environment: {},
+          secretEnvironmentNames: [],
+          idleTimeoutMs: 60_000,
+        } satisfies SessionRunnerSpec)}\n`,
+        input: "mailbox",
+        timeoutMs: 90_000,
+        terminationGraceMs: 5_000,
+      })
+      const ready = await waitForSessionFrame(
+        provider,
+        sessionProcess,
+        null,
+        (frame) => frame.type === "session.ready",
+      )
+      const turnId = `live-turn-${crypto.randomUUID()}`
+      const turnCommandId = crypto.randomUUID()
+      await provider.send(sessionProcess, {
+        sequence: 1,
+        id: turnCommandId,
+        data: JSON.stringify({
+          version: 1,
+          sequence: 1,
+          id: turnCommandId,
+          type: "turn.start",
+          turnId,
+          prompt: "prove one live remote session turn",
+          timeoutBudgetMs: 30_000,
+        }),
+      })
+      const terminal = await waitForSessionFrame(
+        provider,
+        sessionProcess,
+        ready.cursor,
+        (frame) => frame.type === "turn.terminal" && frame.payload.turnId === turnId,
+      )
+      expect(terminal.frames).toContainEqual(
+        expect.objectContaining({
+          type: "turn.terminal",
+          payload: { turnId, result: { outcome: "succeeded", stopReason: "end_turn" } },
+        }),
+      )
+      const closeCommandId = crypto.randomUUID()
+      await provider.send(sessionProcess, {
+        sequence: 2,
+        id: closeCommandId,
+        data: JSON.stringify({
+          version: 1,
+          sequence: 2,
+          id: closeCommandId,
+          type: "session.close",
+        }),
+      })
+      const closed = await waitForSessionFrame(
+        provider,
+        sessionProcess,
+        terminal.cursor,
+        (frame) => frame.type === "session.closed",
+      )
+      expect(closed.frames).toContainEqual(
+        expect.objectContaining({ type: "session.closed", payload: { reason: "requested" } }),
+      )
+      expect(await provider.wait(sessionProcess)).toMatchObject({ exitCode: 0, reason: "exited" })
 
       const cancellable = await provider.spawn(runtime, {
         processId: `live-cancel-${crypto.randomUUID()}`,
@@ -204,4 +288,28 @@ function parseRunnerFrames(events: readonly ProcessEvent[]): RunnerFrame[] {
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => runnerFrameSchema.parse(JSON.parse(line)))
+}
+
+async function waitForSessionFrame(
+  provider: CloudflareRuntimeProvider,
+  process: ProcessHandle,
+  cursor: string | null,
+  predicate: (frame: SessionRunnerFrame) => boolean,
+): Promise<{ readonly cursor: string; readonly frames: readonly SessionRunnerFrame[] }> {
+  let buffer = ""
+  const frames: SessionRunnerFrame[] = []
+  for await (const event of provider.events(process, cursor, AbortSignal.timeout(30_000))) {
+    if (event.stream !== "stdout") continue
+    buffer += event.data
+    for (;;) {
+      const newline = buffer.indexOf("\n")
+      if (newline < 0) break
+      const line = buffer.slice(0, newline)
+      buffer = buffer.slice(newline + 1)
+      if (line.length === 0) continue
+      frames.push(sessionRunnerFrameSchema.parse(JSON.parse(line)))
+    }
+    if (frames.some(predicate)) return { cursor: event.cursor, frames }
+  }
+  throw new Error("Cloudflare session runner exited before emitting expected evidence")
 }

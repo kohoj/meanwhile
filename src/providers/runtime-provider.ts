@@ -16,6 +16,8 @@ export interface RuntimeCapabilities {
   readonly isolation: RuntimeIsolation
   readonly processRecovery: boolean
   readonly eventReplay: boolean
+  /** Ordered, idempotent input delivery to an already-running process. */
+  readonly processInput: boolean
   readonly portExposure: boolean
   /** Signals delivered with their exact POSIX meaning by this adapter. */
   readonly processSignals: readonly ProcessSignal[]
@@ -45,7 +47,11 @@ export interface ProcessHandle {
 }
 
 export interface CreateRuntimeInput {
-  /** A stable, control-plane-generated identifier. It contains no owner data. */
+  /**
+   * A stable, control-plane-generated identifier. It contains no owner data.
+   * `create` is idempotent for this identity: an exact retry returns the same
+   * logical runtime rather than allocating another one.
+   */
   readonly runtimeId: string
 }
 
@@ -66,6 +72,8 @@ export interface ProcessSpec {
   readonly cwd: RelativePath
   readonly env?: Readonly<Record<string, string>>
   readonly initialStdin?: string
+  /** Keeps a provider-private command mailbox open for later input. */
+  readonly input?: "closed" | "mailbox"
   /** Time until the runner/control-plane policy deadline, measured from spawn. */
   readonly timeoutMs?: number
   /**
@@ -104,6 +112,24 @@ export interface ProcessEvent {
   readonly stream: "stdout" | "stderr"
   /** UTF-8 text. The runner protocol guarantees bounded textual frames. */
   readonly data: string
+}
+
+export interface ProcessInput {
+  readonly sequence: number
+  readonly id: string
+  readonly data: string
+}
+
+export function assertProcessInput(input: ProcessInput): void {
+  if (!Number.isSafeInteger(input.sequence) || input.sequence < 1) {
+    throw new TypeError("process input sequence must be a positive safe integer")
+  }
+  if (!/^[0-9a-f-]{36}$/.test(input.id)) {
+    throw new TypeError("process input id must be a lowercase UUID")
+  }
+  if (new TextEncoder().encode(input.data).byteLength > 1024 * 1024 || input.data.includes("\0")) {
+    throw new TypeError("process input data is invalid or exceeds 1 MiB")
+  }
 }
 
 export interface RuntimeFile {
@@ -151,6 +177,7 @@ export type RuntimeProviderOperation =
   | "spawn"
   | "inspectProcess"
   | "events"
+  | "send"
   | "signal"
   | "wait"
   | "writeFiles"
@@ -200,9 +227,11 @@ export interface RuntimeProvider {
   readonly capabilities: RuntimeCapabilities
   readonly provenance: RuntimeProviderProvenance
 
+  /** Idempotent for an exact `runtimeId`; conflicting reuse must fail closed. */
   create(input: CreateRuntimeInput): Promise<RuntimeHandle>
   start(runtime: RuntimeHandle): Promise<void>
-  inspect(runtime: RuntimeHandle): Promise<RuntimeState>
+  /** Aborts only this observation; it must not mutate the runtime. */
+  inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState>
   stop(runtime: RuntimeHandle): Promise<void>
   destroy(runtime: RuntimeHandle): Promise<void>
 
@@ -219,17 +248,23 @@ export interface RuntimeProvider {
   ): AsyncIterable<ProcessEvent>
   signal(process: ProcessHandle, signal: ProcessSignal): Promise<void>
   wait(process: ProcessHandle): Promise<ProcessExit>
+  /** Available only when `capabilities.processInput` is true. */
+  send?(process: ProcessHandle, input: ProcessInput): Promise<void>
 
   writeFiles(runtime: RuntimeHandle, files: readonly RuntimeFile[]): Promise<void>
+  /** Aborts only this file observation; it must not mutate the runtime. */
   listFiles(
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ListRuntimeFilesOptions,
+    signal?: AbortSignal,
   ): Promise<RuntimeFileInfo[]>
+  /** Aborts only this file observation; it must not mutate the runtime. */
   readFile(
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ReadRuntimeFileOptions,
+    signal?: AbortSignal,
   ): Promise<Uint8Array>
 
   expose?(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint>
@@ -333,6 +368,7 @@ export async function processSpecFingerprint(spec: ProcessSpec): Promise<string>
     cwd: spec.cwd,
     environment,
     initialStdin: spec.initialStdin === undefined ? null : await sha256(spec.initialStdin),
+    input: spec.input ?? "closed",
     timeoutMs: spec.timeoutMs ?? null,
     terminationGraceMs: spec.terminationGraceMs ?? null,
   })

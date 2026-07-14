@@ -1,0 +1,68 @@
+#!/usr/bin/env bun
+
+import { rmSync } from "node:fs"
+import { chmod, mkdir, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+
+const metadata = process.env["CODEX_AUTH_METADATA_JSON"]
+const idToken = process.env["CODEX_AUTH_ID_TOKEN"]
+const accessToken = process.env["CODEX_AUTH_ACCESS_TOKEN"]
+const refreshToken = process.env["CODEX_AUTH_REFRESH_TOKEN"]
+const accountId = process.env["CODEX_AUTH_ACCOUNT_ID"]
+const openAiApiKey = process.env["CODEX_AUTH_OPENAI_API_KEY"]
+let privateHome: string | null = null
+const tokenAuthentication = [idToken, accessToken, refreshToken, accountId]
+const hasAnyToken = tokenAuthentication.some((value) => value !== undefined)
+const hasAllTokens = tokenAuthentication.every((value) => value !== undefined)
+const hasAnyAuthentication = metadata !== undefined || hasAnyToken || openAiApiKey !== undefined
+
+if (
+  hasAnyAuthentication &&
+  (metadata === undefined || (hasAnyToken && !hasAllTokens) || (!hasAllTokens && !openAiApiKey))
+) {
+  throw new Error("Codex authentication is incomplete")
+}
+
+if (metadata !== undefined) {
+  const authentication = JSON.parse(metadata)
+  if (typeof authentication !== "object" || authentication === null || Array.isArray(authentication)) {
+    throw new Error("Codex authentication metadata is invalid")
+  }
+  authentication.OPENAI_API_KEY = openAiApiKey ?? null
+  if (hasAllTokens) {
+    authentication.tokens = {
+      id_token: idToken,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      account_id: accountId,
+    }
+  } else {
+    delete authentication.tokens
+  }
+  privateHome = `/tmp/meanwhile-codex-${process.pid}-${crypto.randomUUID()}`
+  await mkdir(privateHome, { mode: 0o700, recursive: false })
+  await chmod(privateHome, 0o700)
+  await writeFile(join(privateHome, "auth.json"), JSON.stringify(authentication), { mode: 0o600 })
+  process.env["CODEX_HOME"] = privateHome
+  for (const name of [
+    "CODEX_AUTH_METADATA_JSON",
+    "CODEX_AUTH_ID_TOKEN",
+    "CODEX_AUTH_ACCESS_TOKEN",
+    "CODEX_AUTH_REFRESH_TOKEN",
+    "CODEX_AUTH_ACCOUNT_ID",
+    "CODEX_AUTH_OPENAI_API_KEY",
+  ]) {
+    delete process.env[name]
+  }
+}
+
+process.env["CODEX_PATH"] ??=
+  "/opt/meanwhile/agents/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+process.env["NO_BROWSER"] ??= "1"
+
+if (privateHome !== null) {
+  const directory = privateHome
+  process.once("exit", () => rmSync(directory, { force: true, recursive: true }))
+}
+
+await import("/opt/meanwhile/agents/node_modules/@agentclientprotocol/codex-acp/dist/index.js")

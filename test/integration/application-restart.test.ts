@@ -72,6 +72,66 @@ describe("application restart", () => {
       await application?.close()
     }
   }, 30_000)
+
+  test("reconnects a live ACP session and resumes its exact turn journal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "meanwhile-session-restart-"))
+    roots.push(root, `${root}.lock`)
+    const key = await issueApiKey()
+    const config = configuration(root, key.key, await reservePort())
+    let application: Awaited<ReturnType<typeof start>> | undefined
+    try {
+      application = await start(config, key.key)
+      const session = await application.client.sessions.create(
+        {
+          workspace: {
+            type: "files",
+            files: [
+              {
+                path: "README.md",
+                contentBase64: new TextEncoder().encode("session restart proof").toBase64(),
+              },
+            ],
+          },
+          agentType: "demo",
+          provider: "local",
+          env: { FIXTURE_DELAY_MS: "1200" },
+          idleTimeoutMs: 10_000,
+        },
+        { idempotencyKey: "session-restart" },
+      )
+      await waitForSession(application.client, session.id, "idle")
+      const turn = await application.client.sessions.send(session.id, "survive restart", {
+        timeoutMs: 5_000,
+        idempotencyKey: "session-restart-turn",
+      })
+      const before = await waitForSession(application.client, session.id, "running")
+      const agentSessionId = required(before.agentSessionId)
+      await application.close()
+
+      application = await start(config, key.key)
+      expect(
+        (
+          await application.client.sessions.waitForTurn(session.id, turn.id, {
+            timeoutMs: 10_000,
+            pollIntervalMs: 25,
+          })
+        ).status,
+      ).toBe("succeeded")
+      const recovered = await waitForSession(application.client, session.id, "idle")
+      expect(recovered.agentSessionId).toBe(agentSessionId)
+      const events = (await application.client.sessions.events(session.id, { limit: 1_000 })).items
+      expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index + 1))
+      expect(
+        events.filter((event) => event.type === "turn.started" && event.turnId === turn.id),
+      ).toHaveLength(1)
+
+      await application.client.sessions.close(session.id)
+      await waitForSession(application.client, session.id, "closed")
+      await waitForSessionCleanup(application.application, session.id)
+    } finally {
+      await application?.close()
+    }
+  }, 30_000)
 })
 
 async function start(config: AppConfig, apiKey: string) {
@@ -119,6 +179,8 @@ function configuration(root: string, apiKey: string, previewPort: number): AppCo
     runnerPath: resolve("dist/meanwhile-runner"),
     agentCatalogPath: resolve("config/agents.json"),
     defaultProvider: "local",
+    runConcurrency: 2,
+    sessionConcurrency: 2,
     localProvider: { enabled: true, unsafeHostExecution: false },
     secretSourceCatalog: [],
     logLevel: "error",
@@ -141,4 +203,33 @@ async function reservePort(): Promise<number> {
 function required<T>(value: T | null | undefined): T {
   if (value === null || value === undefined) throw new Error("Required value is missing")
   return value
+}
+
+async function waitForSession(
+  client: Meanwhile,
+  sessionId: string,
+  status: "idle" | "running" | "closed",
+) {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const session = await client.sessions.get(sessionId)
+    if (session.status === status) return session
+    if (session.status === "failed" || session.status === "continuity_lost") {
+      throw new Error(`Session reached ${session.status}: ${JSON.stringify(session.error)}`)
+    }
+    await Bun.sleep(25)
+  }
+  throw new Error(`Session did not reach ${status}`)
+}
+
+async function waitForSessionCleanup(
+  application: MeanwhileApplication,
+  sessionId: string,
+): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    if (application.store.getSessionRuntimeLease(sessionId)?.cleanupStatus === "succeeded") return
+    await Bun.sleep(25)
+  }
+  throw new Error("Session runtime cleanup did not succeed")
 }

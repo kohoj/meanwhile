@@ -10,6 +10,7 @@ import {
   INITIAL_EVENT_CURSOR,
   MAX_PROCESS_OUTPUT_BYTES,
   type ProcessEventsResponse,
+  type ProcessInputRequest,
   type ProcessSignal,
   type ProcessSnapshot,
   type RuntimeFileInfo,
@@ -28,11 +29,14 @@ mock.module("cloudflare:workers", () => ({
 let createBridgeApp: typeof import("../src/worker").createBridgeApp
 let InMemoryBridgeRegistry: typeof import("../src/worker").InMemoryBridgeRegistry
 let CloudflareBridgeRuntime: typeof import("../src/sandbox").CloudflareBridgeRuntime
+let processCompletionMarker: typeof import("../src/sandbox").processCompletionMarker
 let shellJoin: typeof import("../src/sandbox").shellJoin
 
 beforeAll(async () => {
   ;({ createBridgeApp, InMemoryBridgeRegistry } = await import("../src/worker"))
-  ;({ CloudflareBridgeRuntime, shellJoin } = await import("../src/sandbox"))
+  ;({ CloudflareBridgeRuntime, processCompletionMarker, shellJoin } = await import(
+    "../src/sandbox"
+  ))
 })
 
 const TOKEN = "test-bridge-token-that-is-at-least-thirty-two-bytes"
@@ -76,6 +80,9 @@ describe("Cloudflare Sandbox bridge", () => {
     ) as { dependencies: Record<string, string>; scripts: Record<string, string> }
     const dockerfile = await Bun.file(new URL("../Dockerfile", import.meta.url)).text()
     const wrangler = await Bun.file(new URL("../wrangler.jsonc", import.meta.url)).text()
+    const codexWrapper = await Bun.file(new URL("../image/codex-acp", import.meta.url)).text()
+    const piAdapterWrapper = await Bun.file(new URL("../image/pi-acp", import.meta.url)).text()
+    const piRuntimeWrapper = await Bun.file(new URL("../image/pi-runtime", import.meta.url)).text()
 
     expect(packageManifest.dependencies["@cloudflare/sandbox"]).toBe("0.12.3")
     expect(packageManifest.scripts["runner:stage"]).toContain("--target=bun-linux-x64-baseline")
@@ -87,12 +94,24 @@ describe("Cloudflare Sandbox bridge", () => {
     )
     expect(dockerfile).toContain("bun install --frozen-lockfile --production")
     expect(dockerfile).toContain("image/claude-agent-acp /opt/meanwhile/bin/claude-agent-acp")
+    expect(dockerfile).toContain("image/codex-acp /opt/meanwhile/bin/codex-acp")
+    expect(dockerfile).toContain("image/pi-acp /opt/meanwhile/bin/pi-acp")
+    expect(dockerfile).toContain("image/pi-runtime /opt/meanwhile/bin/pi-runtime")
+    expect(codexWrapper).toContain("CODEX_AUTH_ACCESS_TOKEN")
+    expect(codexWrapper).toContain('process.once("exit"')
+    expect(codexWrapper).not.toContain("CODEX_AUTH_JSON")
+    expect(piAdapterWrapper).toContain('"/opt/meanwhile/bin/pi-runtime"')
+    expect(piRuntimeWrapper).toStartWith("#!/usr/bin/env bun")
     const runtimeAgentManifest = JSON.parse(
       await Bun.file(new URL("../image/package.json", import.meta.url)).text(),
     ) as { dependencies: Record<string, string> }
     expect(runtimeAgentManifest.dependencies["@agentclientprotocol/claude-agent-acp"]).toBe(
       "0.58.1",
     )
+    expect(runtimeAgentManifest.dependencies["@agentclientprotocol/codex-acp"]).toBe("1.1.2")
+    expect(runtimeAgentManifest.dependencies["@openai/codex"]).toBe("0.144.3")
+    expect(runtimeAgentManifest.dependencies["pi-acp"]).toBe("0.0.31")
+    expect(runtimeAgentManifest.dependencies["@earendil-works/pi-coding-agent"]).toBe("0.80.6")
     expect(wrangler).toContain('"SANDBOX_TRANSPORT": "rpc"')
     expect(wrangler).toContain('"instance_type": "standard-1"')
   })
@@ -189,6 +208,38 @@ describe("Cloudflare Sandbox bridge", () => {
     }
   })
 
+  test("frames both streams without terminating the provider's managing shell", async () => {
+    const fixture = createSdkFixture()
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox)
+    await runtime.spawn(PROCESS_ID, {
+      operationId: PROCESS_ID.slice(3),
+      argv: ["/bin/sh", "-c", "printf stdout; printf stderr >&2; exit 7"],
+      input: "closed",
+    })
+
+    const process = Bun.spawn(
+      [
+        "/bin/sh",
+        "-c",
+        `${fixture.command}; observed_status=$?; /usr/bin/printf manager-alive; (exit "$observed_status")`,
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+      process.exited,
+    ])
+    const marker = processCompletionMarker(PROCESS_ID)
+
+    expect(exitCode).toBe(7)
+    expect(stdout).toBe(`stdout\n${marker}\nmanager-alive`)
+    expect(stderr).toBe(`stderr\n${marker}\n`)
+  })
+
   test("binds idempotent process identity to the complete secret-safe specification", async () => {
     const fixture = createFixture()
     const request = {
@@ -221,6 +272,31 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(fixture.runtime.calls.filter((call) => call === "spawn")).toHaveLength(2)
   })
 
+  test("binds each process-input sequence before forwarding it to the sandbox", async () => {
+    const fixture = createFixture()
+    const input = {
+      sequence: 1,
+      id: "70c78f7e-a915-4a4b-a9cb-e805f534f606",
+      data: JSON.stringify({ type: "turn.start", prompt: "private prompt" }),
+    }
+    const send = (body: unknown) =>
+      fixture.request(`/v1/runtimes/${RUNTIME_ID}/processes/${PROCESS_ID}/input`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify(body),
+      })
+
+    expect((await send(input)).status).toBe(200)
+    expect((await send(input)).status).toBe(200)
+    const conflict = await send({ ...input, data: "different private prompt" })
+    const text = await conflict.text()
+
+    expect(conflict.status).toBe(409)
+    expect(JSON.parse(text)).toMatchObject({ error: { code: "PROCESS_INPUT_CONFLICT" } })
+    expect(text).not.toContain("private prompt")
+    expect(fixture.runtime.calls.filter((call) => call === "send")).toHaveLength(2)
+  })
+
   test("uses a component-wise replay cursor without duplicating stream data", () => {
     const encoded = encodeEventCursor({ stdoutOffset: 12, stderrOffset: 7, terminalSeen: true })
     expect(decodeEventCursor(encoded)).toEqual({
@@ -251,7 +327,8 @@ describe("Cloudflare Sandbox bridge", () => {
         return process
       },
       async getProcessLogs() {
-        return { stdout, stderr, processId: PROCESS_ID }
+        const marker = status === "completed" ? completionFrame(PROCESS_ID) : ""
+        return { stdout: `${stdout}${marker}`, stderr: `${stderr}${marker}`, processId: PROCESS_ID }
       },
     } as unknown as Sandbox
     const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
@@ -298,9 +375,10 @@ describe("Cloudflare Sandbox bridge", () => {
         return process
       },
       async getProcessLogs() {
+        const marker = completionFrame(PROCESS_ID)
         return {
-          stdout: terminalObserved ? "final-runner-frame\n" : "stale-prefix\n",
-          stderr: "",
+          stdout: terminalObserved ? `final-runner-frame\n${marker}` : "stale-prefix\n",
+          stderr: terminalObserved ? marker : "",
           processId: PROCESS_ID,
         }
       },
@@ -317,7 +395,7 @@ describe("Cloudflare Sandbox bridge", () => {
     ).toEqual(["final-runner-frame\n", "exit"])
   })
 
-  test("waits for terminal accumulated logs to become quiescent before publishing exit", async () => {
+  test("waits for explicit terminal output closure beyond an earlier quiet window", async () => {
     let status: "running" | "completed" = "running"
     let logReads = 0
     const process = {
@@ -339,9 +417,11 @@ describe("Cloudflare Sandbox bridge", () => {
       },
       async getProcessLogs() {
         logReads += 1
+        const complete = status === "completed" && logReads >= 16
+        const marker = complete ? completionFrame(PROCESS_ID) : ""
         return {
-          stdout: status === "completed" && logReads >= 4 ? `${prefix}${terminal}` : prefix,
-          stderr: "",
+          stdout: complete ? `${prefix}${terminal}${marker}` : prefix,
+          stderr: marker,
           processId: PROCESS_ID,
         }
       },
@@ -358,7 +438,57 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(
       second.events.map((event) => (event.type === "output" ? event.data : event.type)),
     ).toEqual([terminal, "exit"])
-    expect(logReads).toBeGreaterThanOrEqual(9)
+    expect(logReads).toBeGreaterThanOrEqual(16)
+  })
+
+  test("fails retryably instead of publishing an exit for incomplete terminal output", async () => {
+    const process = {
+      id: PROCESS_ID,
+      command: "runner",
+      status: "completed" as const,
+      startTime: new Date("2026-07-13T00:00:00.000Z"),
+      endTime: new Date("2026-07-13T00:00:01.000Z"),
+      exitCode: 0,
+      async getStatus() {
+        return "completed" as const
+      },
+    }
+    const sandbox = {
+      async getProcess() {
+        return process
+      },
+      async getProcessLogs() {
+        return { stdout: "runner-started\n", stderr: "", processId: PROCESS_ID }
+      },
+    } as unknown as Sandbox
+
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).events(
+        PROCESS_ID,
+        INITIAL_EVENT_CURSOR,
+        1_024,
+      ),
+    ).rejects.toMatchObject({
+      code: "PROCESS_OUTPUT_INCOMPLETE",
+      status: 503,
+      details: {
+        retryable: true,
+        stdout: {
+          bytes: 15,
+          markerSeen: false,
+          precededByLineBreak: false,
+          suffixCodeUnits: null,
+          suffixContainsOnlyLineBreaks: null,
+        },
+        stderr: {
+          bytes: 0,
+          markerSeen: false,
+          precededByLineBreak: false,
+          suffixCodeUnits: null,
+          suffixContainsOnlyLineBreaks: null,
+        },
+      },
+    })
   })
 
   test("rejects UTF-8 output beyond the replay budget and detects provider truncation", async () => {
@@ -379,7 +509,8 @@ describe("Cloudflare Sandbox bridge", () => {
         return process
       },
       async getProcessLogs() {
-        return { stdout, stderr: "", processId: PROCESS_ID }
+        const marker = status === "completed" ? completionFrame(PROCESS_ID) : ""
+        return { stdout: `${stdout}${marker}`, stderr: marker, processId: PROCESS_ID }
       },
     } as unknown as Sandbox
     const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
@@ -408,7 +539,10 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(fixture.stdinPath).toMatch(/^\/tmp\/meanwhile-bridge\/[0-9a-f-]{36}\.stdin$/)
     expect(fixture.stdinPath.startsWith("/workspace/")).toBe(false)
     expect(fixture.stdinContent).toBe("private prompt\n")
-    expect(fixture.command.endsWith(` < '${fixture.stdinPath}'`)).toBe(true)
+    expect(fixture.command).toContain(` < '${fixture.stdinPath}'`)
+    expect(
+      fixture.command.match(new RegExp(processCompletionMarker(PROCESS_ID), "g")),
+    ).toHaveLength(2)
     expect(fixture.deletedPaths).toEqual([fixture.stdinPath])
   })
 
@@ -673,6 +807,10 @@ class FakeRuntime implements BridgeRuntime {
     return processSnapshot("killed")
   }
 
+  async send(_processId: string, _input: ProcessInputRequest): Promise<void> {
+    this.calls.push("send")
+  }
+
   async wait(): Promise<ProcessSnapshot> {
     this.calls.push("wait")
     return processSnapshot("completed")
@@ -743,6 +881,10 @@ function processSnapshot(status: ProcessSnapshot["status"]): ProcessSnapshot {
   }
 }
 
+function completionFrame(processId: string): string {
+  return `\n${processCompletionMarker(processId)}\n`
+}
+
 function authorizationHeader(): HeadersInit {
   return {
     authorization: `Bearer ${TOKEN}`,
@@ -764,6 +906,7 @@ function spawnRequest(stdin: string): SpawnProcessRequest {
     operationId: PROCESS_ID.slice(3),
     argv: ["/opt/meanwhile/bin/meanwhile-runner"],
     stdin,
+    input: "closed",
   }
 }
 

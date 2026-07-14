@@ -30,6 +30,7 @@ function sharedProviderContract(
     test("lifecycle is explicit and cleanup is idempotent", async () => {
       const provider = await factory()
       const runtime = await provider.create({ runtimeId: "contract-lifecycle" })
+      expect(await provider.create({ runtimeId: "contract-lifecycle" })).toEqual(runtime)
 
       expect((await provider.inspect(runtime)).status).toBe("created")
       await provider.start(runtime)
@@ -68,6 +69,15 @@ function sharedProviderContract(
       await expect(
         provider.listFiles(runtime, relativePath("."), { maxEntries: 1 }),
       ).rejects.toMatchObject({ code: "ENTRY_LIMIT_EXCEEDED" })
+      const abortReason = new DOMException("Stop observing files", "AbortError")
+      const aborted = AbortSignal.abort(abortReason)
+      await expect(provider.inspect(runtime, aborted)).rejects.toBe(abortReason)
+      await expect(
+        provider.listFiles(runtime, relativePath("."), { maxEntries: 10 }, aborted),
+      ).rejects.toBe(abortReason)
+      await expect(
+        provider.readFile(runtime, relativePath("src/main.ts"), { maxBytes: 1_024 }, aborted),
+      ).rejects.toBe(abortReason)
       await provider.destroy(runtime)
     })
 

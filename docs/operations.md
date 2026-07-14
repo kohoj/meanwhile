@@ -1,6 +1,6 @@
 # Operations
 
-This document defines the implemented operating contract for Meanwhile's single-control-plane topology. The repository is pre-release; run the referenced checks on the exact revision before operating it. [AGENTS.md](../AGENTS.md) remains the source of architectural invariants.
+This document defines the implemented operating contract for Meanwhile's single-control-plane topology. Run the referenced checks on the exact revision before operating it. [AGENTS.md](../AGENTS.md) remains the source of architectural invariants.
 
 ## Supported topology
 
@@ -34,6 +34,8 @@ Bun loads local `.env` files for development. Production should inject environme
 | `MEANWHILE_RUNNER_PATH` | Yes outside source development | Fixed standalone runner executable |
 | `MEANWHILE_AGENT_CATALOG` | No | Agent catalog path; defaults to `config/agents.json` |
 | `MEANWHILE_DEFAULT_PROVIDER` | No | Registry name used when a request omits an allowed provider |
+| `MEANWHILE_RUN_CONCURRENCY` | No | Maximum concurrently admitted one-shot executions; defaults to `2` |
+| `MEANWHILE_SESSION_CONCURRENCY` | No | Maximum concurrently admitted new session leases and session cleanup operations; defaults to `2`; already-live sessions are always reattached during recovery |
 | `MEANWHILE_LOCAL_PROVIDER` | No | `auto`, `enabled`, or `disabled`; `auto` admits new local runs only for a loopback API host while the internal adapter remains available for cleanup/reconciliation |
 | `MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER` | Only for explicit non-loopback local execution | Acknowledges that authenticated tenants can execute as the control-plane OS user |
 | `MEANWHILE_SECRET_ENV_ALLOWLIST` | For local-bootstrap `env://` sources | Comma-separated validated names available only to the bootstrap owner; source and target must match, reserved names are forbidden, and empty denies all |
@@ -58,7 +60,7 @@ Properties:
 - SQLite contains relational state and artifact references, never artifact bodies or resolved secret values.
 - Artifact objects are immutable and content-addressed.
 - Runtime working directories are disposable even when located beneath the data root.
-- Audit, run logs, status history, deployments, and cleanup state survive service restart.
+- Audit, run/session event journals, run logs, status history, deployments, and both runtime cleanup lifecycles survive service restart.
 - Preview output is derived from immutable artifacts; it is not a second source of truth.
 - An adjacent lease directory keyed by physical data-root identity is the single-writer authority for both the service and maintenance commands; a symlink alias cannot acquire a second lease.
 
@@ -69,13 +71,13 @@ Set restrictive filesystem ownership for the service account. The control plane 
 The startup order is:
 
 1. validate environment configuration and initialize telemetry before application composition;
-2. create the data root, acquire its exclusive lease, open SQLite, and apply transactional migrations;
+2. create the data root, acquire its exclusive lease, open SQLite, and initialize or verify the exact current schema;
 3. bootstrap the optional local identity and validate the agent catalog;
 4. compose provider, artifact, and deployment registries and require the configured default provider to exist;
 5. start reconciliation, execution, deployment, and cleanup supervisors;
 6. bind the Bun HTTP server and expose readiness.
 
-Invalid configuration, data-root ownership, migration/schema state, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment and resumes automatically when persisted successful previews exist. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
+Invalid configuration, data-root ownership, schema identity, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment and resumes automatically when persisted successful previews exist. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
 
 Development target:
 
@@ -110,8 +112,9 @@ After an unclean restart:
 - queued runs remain eligible;
 - terminal runs remain immutable;
 - provisioning/running runs are inspected and replayed from persisted cursors;
-- active sessions reconnect where supported;
-- exited sessions finalize from accepted runner evidence and process facts;
+- active one-shot runner sessions reconnect where supported;
+- durable agent sessions reconnect to the same process and ACP identity where provider input/replay/recovery capabilities permit;
+- exited one-shot and durable sessions finalize from accepted runner evidence and process facts; an unrecoverable durable session becomes `continuity_lost`;
 - missing or irrecoverable compute becomes `RUNTIME_LOST` after bounded reconciliation;
 - pending deployments and runtime cleanup resume from durable state.
 
@@ -130,45 +133,44 @@ The existing public run status remains authoritative while reconciliation is unc
 
 `/readyz` gates admission on control-plane supervisor availability and reports telemetry health without making optional exporter health authoritative. Configuration, schema, catalog, registry, and default-provider failures prevent startup. Runner binaries, agent executables, storage writability, and provider reachability belong to the deeper `doctor` diagnostic rather than a per-request dependency probe.
 
-`doctor` validates environment configuration, data-directory/SQLite writability and migrations, the strict agent catalog, locally admitted agent executables, the standalone runner, configured provider health, default-provider registration, the local-static target, and optionally a configured control plane's readiness. It does not resolve a remote runtime's executables on the control-plane host. Cloudflare bridge health is included when that provider is configured. It is diagnostic, not a substitute for the provider image checks and live proof.
+`doctor` validates environment configuration, data-directory/SQLite writability and exact schema identity, the strict agent catalog, locally admitted agent executables, the standalone runner, configured provider health, default-provider registration, the local-static target, and optionally a configured control plane's readiness. It does not resolve a remote runtime's executables on the control-plane host. Cloudflare bridge health is included when that provider is configured. It is diagnostic, not a substitute for the provider image checks and live proof.
 
 ## Telemetry
 
 Meanwhile emits three distinct evidence products:
 
-1. durable owner-visible run logs;
+1. durable owner-visible run logs plus run/session event journals;
 2. operational JSON logs, manual OpenTelemetry spans, metrics, and diagnostics;
 3. append-only audit records.
 
 Never route all three through one logging sink and call that observability.
 
-Operational log records use a stable event name, level, timestamp, and applicable request/trace/owner/run/runtime/process/deployment/provider identifiers. Prompts, process output, repository credentials, file contents, resolved secrets, raw provider bodies, and signed URLs are forbidden fields. Process and workspace output is redacted and persisted only as owner-visible sequenced run logs; operational records carry byte counts, stream identity, cursors, and stable codes instead.
+Operational log records use a stable event name, level, timestamp, and applicable request/trace/owner/run/session/turn/runtime/process/deployment/provider identifiers. Prompts, process output, repository credentials, file contents, resolved secrets, raw provider bodies, and signed URLs are forbidden fields. Process and workspace output is redacted and persisted only as owner-visible product evidence; operational records carry byte counts, stream identity, cursors, and stable codes instead.
 
-Meanwhile passes trace parentage explicitly between operation scopes because it does not depend on Node async-context propagation under Bun. The restricted span facade enforces the attribute allowlist and outcome semantics; it never exposes a raw OpenTelemetry span. Observable queue, active-run/runtime, cleanup-backlog, and deployment gauges are read from durable SQLite state, so a control-plane restart cannot produce negative in-memory deltas.
+Meanwhile passes trace parentage explicitly between operation scopes because it does not depend on Node async-context propagation under Bun. The restricted span facade enforces the attribute allowlist and outcome semantics; it never exposes a raw OpenTelemetry span. Observable run/session queues, active-run/session/runtime state, both cleanup backlogs, and deployment gauges are read from durable SQLite state, so a control-plane restart cannot produce negative in-memory deltas.
 
-Metric labels are bounded: provider, agent, operation, status, and stable error code are reasonable; owner IDs, run IDs, URLs, messages, and prompts are not.
+Metric labels are bounded: provider, agent, operation, status, and stable error code are reasonable; owner, run, session, turn, and process IDs, URLs, messages, and prompts are not.
 
 OTLP export is optional and must remain disabled until the pinned OTel base SDK and exporter pass `test/contracts/telemetry.test.ts` under Bun. An exporter outage is visible locally and in health diagnostics but cannot block state transactions or change a run result.
 
-## Database migrations
+## Database schema
 
-Migrations are ordered, immutable after release, and applied in a transaction before readiness. A migration records its identity only after the schema change commits.
+Meanwhile owns one current schema. An empty database is initialized statement-by-statement in one transaction and receives the exact source fingerprint only after every statement succeeds. A nonempty database must already contain that exact identity or startup fails without modifying it. The initializer deliberately avoids Bun's multi-statement `Database.exec()` path because it does not reliably surface every statement-level failure.
 
 Rules:
 
-- never edit an already released migration;
+- edit the current schema directly and treat a fingerprint change as a fresh-data-root boundary;
 - make constraints and indexes explicit;
 - preserve owner scoping and append-only evidence;
-- backfill deterministically before enforcing a new constraint;
-- do not hide state transitions in migration-side application code;
-- test a fresh database and an upgrade from every supported release fixture;
-- record compatibility impact in `CHANGELOG.md`.
+- never add database upgrade, backfill, repair, or dual-read code;
+- test fresh initialization, atomic failure, fingerprint drift, and rejection of every foreign or partial database;
+- record the fresh-root requirement in `CHANGELOG.md`.
 
-A failed migration halts startup. Operators restore from backup or deploy a corrected forward migration; the service must not guess.
+A changed schema requires a new empty data root. Durable product data may move only through an explicit, separately designed export/import boundary; the service never guesses how database rows should be rewritten.
 
 ## Backup and restore
 
-A valid backup contains SQLite, every referenced workspace/artifact object, persisted local-static preview bytes, migration identities, service/Bun versions, and per-file hashes from one quiescent point.
+A valid backup contains SQLite, every referenced workspace/artifact object, exactly the local-static preview bytes referenced by successful deployment rows, the exact schema identity, service/Bun versions, and per-file hashes from one quiescent point.
 
 Stop the service, then use the maintenance boundary:
 
@@ -177,7 +179,7 @@ bun run cli -- data backup --output /backups/meanwhile-2026-07-14
 bun run cli -- data verify /backups/meanwhile-2026-07-14
 ```
 
-The adjacent data-root lease rejects the command if a control plane or another maintenance process is active. Backup also rejects queued, provisioning, running, or in-progress deployment/cleanup work. It serializes SQLite into a standalone non-WAL snapshot, walks the referenced immutable object graph, copies previews, hashes every file, and atomically publishes the manifest. Physical paths are canonicalized, so the output must be outside the live root even through symlink aliases.
+The adjacent data-root lease rejects the command if a control plane or another maintenance process is active. Backup also rejects queued/provisioning/running runs, operational agent sessions, or in-progress deployment/cleanup work. It serializes SQLite into a standalone non-WAL snapshot, walks the referenced immutable object graph, derives preview reachability from that snapshot, and verifies each publication against its immutable artifact before copying. Missing, extra, linked, orphan, or digest-mismatched preview files fail the operation. Physical paths are canonicalized, so the output must be outside the live root even through symlink aliases.
 
 Restore only into an absent or empty configured data root:
 
@@ -186,7 +188,7 @@ MEANWHILE_DATA_DIR=/srv/meanwhile-restored \
   bun run cli -- data restore /backups/meanwhile-2026-07-14
 ```
 
-Restore verifies before writing, stages the complete root, creates an empty disposable-runtime directory, reopens the database read-only, and publishes by rename. Then run `doctor`, start the service, confirm migrations and cleanup state, and exercise owner-scoped artifact/audit reads before admitting traffic.
+Restore verifies before writing, stages the complete root, creates an empty disposable-runtime directory, reopens the database read-only, and publishes by rename. Then run `doctor`, start the service, confirm schema identity and cleanup state, and exercise owner-scoped artifact/audit reads before admitting traffic.
 
 Ordinary copying of a live SQLite file is unsupported because it can omit WAL state and immutable bytes. Test restoration periodically; an unverified archive is not a backup strategy.
 
@@ -208,14 +210,16 @@ Monitor:
 - cleanup backlog and oldest eligible age;
 - attempts and explicit bounded backoff;
 - destroy latency and failure count by provider/error code;
-- active runtimes versus active runs;
-- terminal runs that still own an uncleared runtime.
+- active runtimes versus active runs and agent sessions;
+- terminal runs or closed sessions that still own an uncleared runtime.
 
-Never manually delete database runtime rows to silence the backlog. Diagnose provider reachability and handle validity, destroy the resource through the adapter, and preserve audit evidence. Cleanup never targets an authoritative `running` run.
+Never manually delete database runtime rows to silence the backlog. Diagnose provider reachability and handle validity, destroy the resource through the adapter, and preserve audit evidence. Cleanup never targets an authoritative `running` run or operational agent session.
 
 ## Cloudflare bridge operations
 
-The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and real-agent adapter are pinned as one compatibility unit. The custom image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the proven Claude ACP toolchain requirement.
+The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and real-agent toolchains are pinned as one compatibility unit. The reference image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the proven coding-agent process set. A production deployment may derive smaller agent-profile images while preserving the same adapter and provenance contract.
+
+The pinned SDK has no ongoing process-stdin primitive. Durable sessions therefore use a bridge-owned sequential mailbox: Durable Object state binds each `(process, sequence)` to one command fingerprint before sandbox publication. Treat mailbox support as a versioned provider capability, not generic shell input or remote ACP.
 
 Target workflow:
 
@@ -236,7 +240,7 @@ Before enabling it in the control plane:
 6. run `doctor` and the mock-bridge integration tests;
 7. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
 8. run `bun run proof:release:cloudflare` to prove the deterministic ACP/provider compatibility path with complete configured provenance;
-9. run `bun run proof:release:cloudflare:claude` to require real Claude generation, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, restart, backup/restore, and second boot;
+9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require real generation, two-turn continuity across control-plane restart, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, backup/restore, and second boot for every bundled toolchain;
 10. inspect Cloudflare for leaked test resources.
 
 The configured runner digest and matching custom-image reference/digest are operator/platform assertions used to pin execution identity. A base-image tag is never paired with a custom-image digest. These values are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
@@ -312,7 +316,7 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 
 ## Production readiness checklist
 
-- [ ] Exact release revision and migration level are recorded.
+- [ ] Exact release revision and schema fingerprint are recorded.
 - [ ] Full deterministic test suite passes under the supported Bun version.
 - [ ] `doctor` passes with production configuration.
 - [ ] API keys are provisioned through the persistent hashed-key lifecycle; bootstrap key is disabled.
@@ -322,9 +326,10 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 - [ ] Every configured ACP agent is pinned and catalog-validated.
 - [ ] Local provider is disabled for untrusted tenants.
 - [ ] Remote provider shared contract and live lifecycle tests pass.
+- [ ] Any provider admitting durable sessions has a live proof for ordered input, replay, reconnect, interrupt, close, and cleanup on the exact bridge/image revision.
 - [ ] The release proof passes on the exact revision, including telemetry export and backup restore; remote release requires complete configured runner/image provenance.
 - [ ] Bridge credentials are scoped, stored outside images, and rotatable.
-- [ ] Cleanup backlog, queue latency, run outcomes, and storage capacity are monitored.
+- [ ] Both cleanup backlogs, run/session queue latency, run/turn outcomes, continuity loss, and storage capacity are monitored.
 - [ ] OTLP compatibility is proven under Bun before export is enabled.
 - [ ] Preview origin, headers, routing, and public exposure are reviewed.
 - [ ] Threat model and security reporting route are current.

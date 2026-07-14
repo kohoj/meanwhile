@@ -1,13 +1,16 @@
 import { RunnerAbort, RunnerSessionError, runAcpSession } from "./acp-session"
+import { runAcpSupervisor } from "./acp-supervisor"
 import {
-  decodeRunnerSpec,
+  type AnyRunnerSpec,
+  decodeAnyRunnerSpec,
   encodeRunnerFrame,
   MAX_RUNNER_SPEC_BYTES,
   RUNNER_PROTOCOL_VERSION,
   type RunnerEvent,
   type RunnerFrame,
-  type RunnerSpec,
   type RunnerTerminalPayload,
+  type SessionRunnerEvent,
+  type SessionRunnerFrame,
 } from "./protocol"
 
 const EXIT_FAILED = 1
@@ -56,14 +59,60 @@ export class RunnerFrameWriter {
   }
 }
 
+export class SessionFrameWriter {
+  private sequence = 0
+  private pending: Promise<void> = Promise.resolve()
+
+  constructor(
+    private readonly sessionId: string,
+    private readonly runnerSessionId: string,
+    private readonly sink: FrameSink,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  emit(event: SessionRunnerEvent): Promise<void> {
+    const write = this.pending.then(async () => {
+      const frame = {
+        protocolVersion: RUNNER_PROTOCOL_VERSION,
+        sessionId: this.sessionId,
+        runnerSessionId: this.runnerSessionId,
+        sequence: ++this.sequence,
+        timestamp: this.now().toISOString(),
+        ...event,
+      } as SessionRunnerFrame
+      this.sink.write(`${JSON.stringify(frame)}\n`)
+      await this.sink.flush()
+    })
+    this.pending = write.catch(() => {})
+    return write
+  }
+
+  async close(): Promise<void> {
+    await this.pending
+    await this.sink.end()
+  }
+}
+
 export async function runMain(): Promise<number> {
-  let spec: RunnerSpec
+  let spec: AnyRunnerSpec
   try {
     const input = await readBoundedInput(Bun.stdin.stream(), MAX_RUNNER_SPEC_BYTES)
-    spec = decodeRunnerSpec(new TextDecoder().decode(input).trim())
+    spec = decodeAnyRunnerSpec(new TextDecoder().decode(input).trim())
   } catch {
     await writeDiagnostic("INVALID_RUNNER_SPEC")
     return EXIT_INVALID_INPUT
+  }
+
+  if ("mode" in spec) {
+    const frames = new SessionFrameWriter(spec.sessionId, spec.runnerSessionId, Bun.stdout.writer())
+    try {
+      await runAcpSupervisor(spec, frames)
+      await frames.close()
+      return 0
+    } catch {
+      await frames.close().catch(() => {})
+      return EXIT_FAILED
+    }
   }
 
   const frames = new RunnerFrameWriter(spec.runId, spec.runnerSessionId, Bun.stdout.writer())

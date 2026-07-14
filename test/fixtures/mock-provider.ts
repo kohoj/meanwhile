@@ -63,6 +63,7 @@ export class MockRuntimeProvider implements RuntimeProvider {
     isolation: "none" as const,
     processRecovery: true,
     eventReplay: true,
+    processInput: false,
     portExposure: true,
     processSignals: Object.freeze(["SIGINT", "SIGTERM", "SIGKILL"] as const),
   })
@@ -97,10 +98,12 @@ export class MockRuntimeProvider implements RuntimeProvider {
     this.#record("start", runtimeId)
   }
 
-  async inspect(runtime: RuntimeHandle): Promise<RuntimeState> {
+  async inspect(runtime: RuntimeHandle, signal?: AbortSignal): Promise<RuntimeState> {
+    throwIfAborted(signal)
     const runtimeId = this.#runtimeId(runtime, "inspect")
     const state = this.#runtimes.get(runtimeId)
     this.#record("inspect", runtimeId)
+    throwIfAborted(signal)
     return { status: state?.status ?? "missing", observedAt: new Date().toISOString() }
   }
 
@@ -253,7 +256,9 @@ export class MockRuntimeProvider implements RuntimeProvider {
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ListRuntimeFilesOptions,
+    signal?: AbortSignal,
   ): Promise<RuntimeFileInfo[]> {
+    throwIfAborted(signal)
     const [runtimeId, state] = this.#runtime(runtime, "listFiles")
     assertNonNegativeLimit(options.maxEntries, "maxEntries")
     const directory = relativePath(String(path))
@@ -274,7 +279,7 @@ export class MockRuntimeProvider implements RuntimeProvider {
       children.set(child, separator === -1 ? "file" : "directory")
     }
     this.#record("listFiles", runtimeId)
-    return [...children.entries()]
+    const result = [...children.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([name, type]) => {
         const childPath = relativePath(directory === "." ? name : `${directory}/${name}`)
@@ -286,13 +291,17 @@ export class MockRuntimeProvider implements RuntimeProvider {
           modifiedAt: new Date(0).toISOString(),
         }
       })
+    throwIfAborted(signal)
+    return result
   }
 
   async readFile(
     runtime: RuntimeHandle,
     path: RelativePath,
     options: ReadRuntimeFileOptions,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
+    throwIfAborted(signal)
     const [runtimeId, state] = this.#runtime(runtime, "readFile")
     assertNonNegativeLimit(options.maxBytes, "maxBytes")
     const file = state.files.get(relativePath(String(path)))
@@ -306,7 +315,9 @@ export class MockRuntimeProvider implements RuntimeProvider {
       )
     }
     this.#record("readFile", runtimeId)
-    return file.content.slice()
+    const result = file.content.slice()
+    throwIfAborted(signal)
+    return result
   }
 
   async expose(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint> {

@@ -1,6 +1,6 @@
 import { z } from "zod"
 
-export const BRIDGE_PROTOCOL_VERSION = 3 as const
+export const BRIDGE_PROTOCOL_VERSION = 4 as const
 export const CLOUDFLARE_SANDBOX_VERSION = "0.12.3" as const
 export const INITIAL_EVENT_CURSOR = "v2.0.0.0" as const
 export const MAX_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -94,6 +94,7 @@ export const spawnProcessRequestSchema = z
       .string()
       .refine((value) => encodedLength(value) <= MAX_STDIN_BYTES, "stdin is too large")
       .optional(),
+    input: z.enum(["closed", "mailbox"]).default("closed"),
   })
   .superRefine((request, context) => {
     if ((request.timeoutMs === undefined) !== (request.terminationGraceMs === undefined)) {
@@ -106,6 +107,13 @@ export const spawnProcessRequestSchema = z
     if (request.argv[0]?.length === 0) {
       context.addIssue({ code: "custom", path: ["argv", 0], message: "executable cannot be empty" })
     }
+    if (request.env && Object.hasOwn(request.env, "MEANWHILE_PROCESS_INBOX")) {
+      context.addIssue({
+        code: "custom",
+        path: ["env", "MEANWHILE_PROCESS_INBOX"],
+        message: "environment name is reserved by the bridge",
+      })
+    }
     const bytes = request.argv.reduce((total, argument) => total + encodedLength(argument), 0)
     if (bytes > MAX_ARGV_BYTES) {
       context.addIssue({ code: "custom", path: ["argv"], message: "argv is too large" })
@@ -114,6 +122,15 @@ export const spawnProcessRequestSchema = z
 
 export const signalProcessRequestSchema = z.strictObject({
   signal: z.literal("SIGKILL"),
+})
+
+export const processInputRequestSchema = z.strictObject({
+  sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  id: z.string().uuid(),
+  data: z
+    .string()
+    .refine((value) => encodedLength(value) <= 1024 * 1024, "process input is too large")
+    .refine((value) => !value.includes("\0"), "process input cannot contain NUL"),
 })
 
 const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
@@ -278,6 +295,7 @@ export const bridgeErrorResponseSchema = z.strictObject({
 export type CreateRuntimeRequest = z.infer<typeof createRuntimeRequestSchema>
 export type SpawnProcessRequest = z.infer<typeof spawnProcessRequestSchema>
 export type SignalProcessRequest = z.infer<typeof signalProcessRequestSchema>
+export type ProcessInputRequest = z.infer<typeof processInputRequestSchema>
 export type WriteFilesRequest = z.infer<typeof writeFilesRequestSchema>
 export type ProviderProcessStatus = z.infer<typeof providerProcessStatusSchema>
 export type ProcessSignal = z.infer<typeof processSignalSchema>
@@ -340,10 +358,22 @@ export async function processSpecFingerprint(request: SpawnProcessRequest): Prom
     cwd: request.cwd ?? ".",
     environment,
     initialStdin: request.stdin === undefined ? null : await sha256(request.stdin),
+    input: request.input,
     timeoutMs: request.timeoutMs ?? null,
     terminationGraceMs: request.terminationGraceMs ?? null,
   })
   return `sha256:${await sha256(canonical)}`
+}
+
+/** Binds one mailbox sequence to one opaque command without retaining its payload. */
+export async function processInputFingerprint(request: ProcessInputRequest): Promise<string> {
+  return sha256(
+    JSON.stringify({
+      version: 1,
+      id: request.id,
+      data: await sha256(request.data),
+    }),
+  )
 }
 
 export function encodeEventCursor(cursor: EventCursor): string {

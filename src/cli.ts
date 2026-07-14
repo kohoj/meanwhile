@@ -143,6 +143,12 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
     case "logs":
       await runLogs(rest, context)
       return 0
+    case "watch":
+      await watchRun(rest, context)
+      return 0
+    case "sessions":
+      await sessionsCommand(rest, context)
+      return 0
     case "cancel":
       await cancelRun(rest, context)
       return 0
@@ -204,44 +210,15 @@ async function createRun(args: readonly string[], context: CliContext): Promise<
     .trim()
   if (prompt.length === 0) throw argumentError("Run prompt must not be empty")
 
-  const repository = parsed.one("repo")
-  const directory = parsed.one("files")
-  if ((repository === undefined) === (directory === undefined)) {
-    throw argumentError("Exactly one of --repo or --files is required")
-  }
-
-  const revision = parsed.one("revision")
-  const credentialRef = parsed.one("credential-ref")
-  if (directory !== undefined && (revision !== undefined || credentialRef !== undefined)) {
-    throw argumentError("--revision and --credential-ref require --repo")
-  }
-
   const agentType = requiredOption(parsed, "agent")
   const provider =
     parsed.one("provider") ?? context.environment.MEANWHILE_DEFAULT_PROVIDER ?? "local"
   const timeoutMs = parseDuration(parsed.one("timeout") ?? "1h")
   const env = parseAssignments(parsed.many("env"), "--env", parseEnvironmentValue)
   const secretRefs = parseAssignments(parsed.many("secret"), "--secret", parseSecretReference)
-  for (const name of Object.keys(secretRefs)) {
-    if (Object.hasOwn(env, name)) {
-      throw argumentError("A name cannot appear in both --env and --secret", { name })
-    }
-  }
+  assertDisjointEnvironment(env, secretRefs)
 
-  const workspace =
-    repository === undefined
-      ? {
-          type: "files" as const,
-          files: await captureWorkspace(directory as string, context.cwd),
-        }
-      : {
-          type: "repository" as const,
-          url: repository,
-          ...(revision === undefined ? {} : { revision }),
-          ...(credentialRef === undefined
-            ? {}
-            : { credentialRef: parseSecretReference(credentialRef) }),
-        }
+  const workspace = await executionWorkspace(parsed, context)
   const body = {
     workspace,
     agentType,
@@ -392,6 +369,238 @@ async function runLogs(args: readonly string[], context: CliContext): Promise<vo
   }
 }
 
+async function watchRun(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, { values: ["after", "limit"], flags: ["json"] })
+  const runId = parsed.onlyPositional()
+  if (!parsed.flag("json")) {
+    throw argumentError("watch currently requires --json so its output remains stable for agents")
+  }
+  const after = parseInteger(parsed.one("after") ?? "0", "--after", 0, Number.MAX_SAFE_INTEGER)
+  const limit = parseInteger(parsed.one("limit") ?? "100", "--limit", 1, 1_000)
+  for await (const event of apiClient(context).runs.followEvents(runId, {
+    after,
+    limit,
+    signal: context.signal,
+  })) {
+    await context.stdout(`${JSON.stringify(event)}\n`)
+  }
+}
+
+async function sessionsCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [command, ...rest] = args
+  switch (command) {
+    case "create":
+      await createSession(rest, context)
+      return
+    case "list":
+      await listSessions(rest, context)
+      return
+    case "get":
+      await getSession(rest, context)
+      return
+    case "send":
+      await sendSessionTurn(rest, context)
+      return
+    case "turns":
+      await listSessionTurns(rest, context)
+      return
+    case "turn":
+      await getSessionTurn(rest, context)
+      return
+    case "watch":
+      await watchSession(rest, context)
+      return
+    case "interrupt":
+      await mutateSession(rest, context, "interrupt")
+      return
+    case "close":
+      await mutateSession(rest, context, "close")
+      return
+    default:
+      throw argumentError("Unknown sessions command", { command })
+  }
+}
+
+async function createSession(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, {
+    values: [
+      "repo",
+      "files",
+      "revision",
+      "credential-ref",
+      "agent",
+      "provider",
+      "env",
+      "secret",
+      "idle-timeout",
+      "idempotency-key",
+    ],
+  })
+  parsed.requireNoPositionals()
+  const env = parseAssignments(parsed.many("env"), "--env", parseEnvironmentValue)
+  const secretRefs = parseAssignments(parsed.many("secret"), "--secret", parseSecretReference)
+  assertDisjointEnvironment(env, secretRefs)
+  const idempotencyKey = parsed.one("idempotency-key")
+  const session = await apiClient(context).sessions.create(
+    {
+      workspace: await executionWorkspace(parsed, context),
+      agentType: requiredOption(parsed, "agent"),
+      provider: parsed.one("provider") ?? context.environment.MEANWHILE_DEFAULT_PROVIDER ?? "local",
+      env,
+      secretRefs,
+      idleTimeoutMs: parseDurationOption(parsed.one("idle-timeout") ?? "30m", "--idle-timeout"),
+    },
+    {
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      signal: context.signal,
+    },
+  )
+  await printJson(context, { session })
+}
+
+async function listSessions(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, { values: ["limit", "before"] })
+  parsed.requireNoPositionals()
+  const before = parsed.one("before")
+  await printJson(
+    context,
+    await apiClient(context).sessions.list({
+      limit: parseInteger(parsed.one("limit") ?? "50", "--limit", 1, 100),
+      ...(before === undefined ? {} : { before }),
+      signal: context.signal,
+    }),
+  )
+}
+
+async function getSession(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args)
+  await printJson(context, {
+    session: await apiClient(context).sessions.get(parsed.onlyPositional(), {
+      signal: context.signal,
+    }),
+  })
+}
+
+async function sendSessionTurn(args: readonly string[], context: CliContext): Promise<void> {
+  const delimiter = args.indexOf("--")
+  if (delimiter < 0) throw argumentError("Turn prompt must follow a -- delimiter")
+  const parsed = parseArguments(args.slice(0, delimiter), {
+    values: ["conflict", "timeout", "idempotency-key"],
+  })
+  const sessionId = parsed.onlyPositional()
+  const prompt = args
+    .slice(delimiter + 1)
+    .join(" ")
+    .trim()
+  if (prompt.length === 0) throw argumentError("Turn prompt must not be empty")
+  const conflictPolicy = parsed.one("conflict") ?? "reject"
+  if (!["reject", "enqueue", "interrupt_and_send"].includes(conflictPolicy)) {
+    throw argumentError("--conflict must be reject, enqueue, or interrupt_and_send")
+  }
+  const idempotencyKey = parsed.one("idempotency-key")
+  const turn = await apiClient(context).sessions.send(
+    sessionId,
+    {
+      prompt,
+      timeoutMs: parseDurationOption(parsed.one("timeout") ?? "1h", "--timeout"),
+      conflictPolicy: conflictPolicy as "reject" | "enqueue" | "interrupt_and_send",
+    },
+    {
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      signal: context.signal,
+    },
+  )
+  await printJson(context, { turn })
+}
+
+async function listSessionTurns(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, { values: ["after", "limit"] })
+  await printJson(
+    context,
+    await apiClient(context).sessions.turns(parsed.onlyPositional(), {
+      after: parseInteger(parsed.one("after") ?? "0", "--after", 0, Number.MAX_SAFE_INTEGER),
+      limit: parseInteger(parsed.one("limit") ?? "100", "--limit", 1, 1_000),
+      signal: context.signal,
+    }),
+  )
+}
+
+async function getSessionTurn(args: readonly string[], context: CliContext): Promise<void> {
+  const [sessionId, turnId] = parseArguments(args).requirePositionals(2)
+  await printJson(context, {
+    turn: await apiClient(context).sessions.getTurn(sessionId as string, turnId as string, {
+      signal: context.signal,
+    }),
+  })
+}
+
+async function watchSession(args: readonly string[], context: CliContext): Promise<void> {
+  const parsed = parseArguments(args, { values: ["after", "limit"], flags: ["json"] })
+  const sessionId = parsed.onlyPositional()
+  if (!parsed.flag("json")) {
+    throw argumentError("sessions watch requires --json so its output remains stable for agents")
+  }
+  const after = parseInteger(parsed.one("after") ?? "0", "--after", 0, Number.MAX_SAFE_INTEGER)
+  const limit = parseInteger(parsed.one("limit") ?? "100", "--limit", 1, 1_000)
+  for await (const event of apiClient(context).sessions.followEvents(sessionId, {
+    after,
+    limit,
+    signal: context.signal,
+  })) {
+    await context.stdout(`${JSON.stringify(event)}\n`)
+  }
+}
+
+async function mutateSession(
+  args: readonly string[],
+  context: CliContext,
+  operation: "interrupt" | "close",
+): Promise<void> {
+  const parsed = parseArguments(args)
+  const sessionId = parsed.onlyPositional()
+  const session = await apiClient(context).sessions[operation](sessionId, {
+    signal: context.signal,
+  })
+  await printJson(context, { session })
+}
+
+async function executionWorkspace(parsed: ParsedArguments, context: CliContext) {
+  const repository = parsed.one("repo")
+  const directory = parsed.one("files")
+  if ((repository === undefined) === (directory === undefined)) {
+    throw argumentError("Exactly one of --repo or --files is required")
+  }
+  const revision = parsed.one("revision")
+  const credentialRef = parsed.one("credential-ref")
+  if (directory !== undefined && (revision !== undefined || credentialRef !== undefined)) {
+    throw argumentError("--revision and --credential-ref require --repo")
+  }
+  return repository === undefined
+    ? {
+        type: "files" as const,
+        files: await captureWorkspace(directory as string, context.cwd),
+      }
+    : {
+        type: "repository" as const,
+        url: repository,
+        ...(revision === undefined ? {} : { revision }),
+        ...(credentialRef === undefined
+          ? {}
+          : { credentialRef: parseSecretReference(credentialRef) }),
+      }
+}
+
+function assertDisjointEnvironment(
+  env: Readonly<Record<string, string>>,
+  secretRefs: Readonly<Record<string, string>>,
+): void {
+  for (const name of Object.keys(secretRefs)) {
+    if (Object.hasOwn(env, name)) {
+      throw argumentError("A name cannot appear in both --env and --secret", { name })
+    }
+  }
+}
+
 async function createDeployment(args: readonly string[], context: CliContext): Promise<void> {
   const parsed = parseArguments(args, {
     values: ["artifact", "workspace", "target", "config", "secret"],
@@ -486,7 +695,16 @@ async function auditCommand(args: readonly string[], context: CliContext): Promi
   parsed.requireNoPositionals()
   const before = parsed.one("before")
   const resourceType = parsed.one("resource-type")
-  const allowed = ["owner", "api_key", "run", "runtime", "artifact", "deployment"] as const
+  const allowed = [
+    "owner",
+    "api_key",
+    "run",
+    "session",
+    "turn",
+    "runtime",
+    "artifact",
+    "deployment",
+  ] as const
   if (resourceType !== undefined && !allowed.includes(resourceType as (typeof allowed)[number])) {
     throw argumentError("--resource-type is invalid", { resourceType })
   }
@@ -1027,15 +1245,19 @@ function parseInteger(value: string, option: string, minimum: number, maximum: n
 }
 
 function parseDuration(value: string): number {
+  return parseDurationOption(value, "--timeout")
+}
+
+function parseDurationOption(value: string, option: string): number {
   const match = /^(\d+)(ms|s|m|h)?$/.exec(value)
-  if (match === null) throw argumentError("--timeout must be an integer with ms, s, m, or h")
+  if (match === null) throw argumentError(`${option} must be an integer with ms, s, m, or h`)
   const number = Number(match[1])
   const multiplier: number = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[
     (match[2] ?? "ms") as "ms" | "s" | "m" | "h"
   ]
   const milliseconds = number * multiplier
   if (!Number.isSafeInteger(milliseconds) || milliseconds < 1_000 || milliseconds > 86_400_000) {
-    throw argumentError("--timeout must be between 1s and 24h")
+    throw argumentError(`${option} must be between 1s and 24h`)
   }
   return milliseconds
 }
@@ -1113,7 +1335,16 @@ Usage:
   meanwhile list [--limit N] [--before CURSOR]
   meanwhile get RUN_ID
   meanwhile logs RUN_ID [--follow] [--after N] [--limit N]
+  meanwhile watch RUN_ID --json [--after N] [--limit N]
   meanwhile cancel RUN_ID
+  meanwhile sessions create (--repo URL | --files DIR) --agent NAME [options]
+  meanwhile sessions list [--limit N]
+  meanwhile sessions get SESSION_ID
+  meanwhile sessions send SESSION_ID [--conflict POLICY] [--timeout DURATION] -- PROMPT
+  meanwhile sessions turns SESSION_ID
+  meanwhile sessions watch SESSION_ID --json [--after N] [--limit N]
+  meanwhile sessions interrupt SESSION_ID
+  meanwhile sessions close SESSION_ID
   meanwhile artifacts list RUN_ID
   meanwhile artifacts get ARTIFACT_ID
   meanwhile artifacts download ARTIFACT_ID [--path PATH] --output FILE
@@ -1142,6 +1373,10 @@ Run options:
   --secret NAME=env://VAR     Secret reference; repeatable
   --timeout 30s|10m|1h        Provisioning-through-agent deadline
   --idempotency-key KEY       Safe retry identity
+
+Session options:
+  --idle-timeout 30s|10m|1h   Close an inactive live session and release compute
+  --conflict POLICY           reject, enqueue, or interrupt_and_send
 
 Deployment options:
   --config NAME=JSON          Target configuration; repeatable

@@ -1,7 +1,8 @@
 import { createRoute, type OpenAPIHono, z } from "@hono/zod-openapi"
 import { streamSSE } from "hono/streaming"
-import { AppError, errorEnvelope, normalizeError } from "../errors"
+import { errorEnvelope, normalizeError } from "../errors"
 import type { RunService } from "../services/run-service"
+import { parseLastEventId } from "./cursor"
 import {
   type ApiEnv,
   ArtifactPageSchema,
@@ -13,6 +14,8 @@ import {
   IdParamSchema,
   jsonResponse,
   LogQuerySchema,
+  RunEventPageSchema,
+  RunEventSchema,
   RunLogPageSchema,
   RunLogSchema,
   RunPageSchema,
@@ -22,7 +25,15 @@ import {
 
 type RunApi = Pick<
   RunService,
-  "create" | "list" | "get" | "cancel" | "logs" | "artifacts" | "followLogs"
+  | "create"
+  | "list"
+  | "get"
+  | "cancel"
+  | "logs"
+  | "events"
+  | "artifacts"
+  | "followLogs"
+  | "followEvents"
 >
 
 const createRunRoute = createRoute({
@@ -119,6 +130,31 @@ const getRunArtifactsRoute = createRoute({
   summary: "List immutable run artifacts",
   request: { params: IdParamSchema },
   responses: { 200: jsonResponse(ArtifactPageSchema, "Artifact metadata"), ...errorResponses },
+})
+
+const getRunEventsRoute = createRoute({
+  method: "get",
+  path: "/runs/{id}/events",
+  operationId: "listRunEvents",
+  tags: ["Runs"],
+  summary: "Read or follow the durable agent event stream",
+  request: {
+    params: IdParamSchema,
+    query: LogQuerySchema,
+    headers: z.object({
+      "Last-Event-ID": z.string().max(32).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "A durable event page or resumable SSE stream",
+      content: {
+        "application/json": { schema: RunEventPageSchema },
+        "text/event-stream": { schema: z.string() },
+      },
+    },
+    ...errorResponses,
+  },
 })
 
 export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
@@ -237,6 +273,66 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
     )
   })
 
+  routes.openapi(getRunEventsRoute, async (context) => {
+    const request = context.get("requestContext")
+    const { ownerId } = request
+    const { id } = context.req.valid("param")
+    const { follow, after, limit } = context.req.valid("query")
+    if (!follow) {
+      const page = await service.events(ownerId, id, { after, limit })
+      return context.json(
+        {
+          items: page.items.map((item) => RunEventSchema.parse(item)),
+          nextCursor: page.nextCursor,
+        },
+        200,
+      )
+    }
+
+    await service.get(ownerId, id)
+    const resumeAt = Math.max(after, parseLastEventId(context.req.valid("header")["Last-Event-ID"]))
+    return streamSSE(
+      context,
+      async (stream) => {
+        const cancellation = new AbortController()
+        const abort = () => cancellation.abort()
+        stream.onAbort(abort)
+        context.req.raw.signal.addEventListener("abort", abort, { once: true })
+        if (context.req.raw.signal.aborted) abort()
+        try {
+          await stream.writeSSE({ event: "ready", data: "{}", retry: 1_000 })
+          for await (const item of service.followEvents(
+            ownerId,
+            id,
+            resumeAt,
+            cancellation.signal,
+          )) {
+            if (item === null) {
+              await stream.writeSSE({ event: "heartbeat", data: "{}" })
+              continue
+            }
+            await stream.writeSSE({
+              event: "event",
+              id: String(item.sequence),
+              data: JSON.stringify(item),
+            })
+          }
+          await stream.writeSSE({ event: "end", data: "{}" })
+        } finally {
+          context.req.raw.signal.removeEventListener("abort", abort)
+        }
+      },
+      async (error, stream) => {
+        if (stream.aborted) return
+        const normalized = normalizeError(error)
+        await stream.writeSSE({
+          event: "error",
+          data: JSON.stringify(errorEnvelope(normalized, request.requestId)),
+        })
+      },
+    )
+  })
+
   routes.openapi(getRunArtifactsRoute, async (context) => {
     const { ownerId } = context.get("requestContext")
     const { id } = context.req.valid("param")
@@ -245,16 +341,4 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
   })
 
   return routes
-}
-
-const parseLastEventId = (value: string | undefined): number => {
-  if (value === undefined || value.length === 0) return 0
-  if (!/^\d+$/.test(value)) {
-    throw new AppError({ code: "INVALID_REQUEST", message: "Last-Event-ID must be an integer" })
-  }
-  const parsed = Number(value)
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new AppError({ code: "INVALID_REQUEST", message: "Last-Event-ID is out of range" })
-  }
-  return parsed
 }

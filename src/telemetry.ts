@@ -434,6 +434,26 @@ const METRIC_DEFINITIONS = {
     unit: "1",
     description: "Runtime cleanup records not yet completed.",
   },
+  "meanwhile.session.queue.depth": {
+    kind: "gauge",
+    unit: "1",
+    description: "Queued agent sessions awaiting a provisioning claim.",
+  },
+  "meanwhile.session.active": {
+    kind: "gauge",
+    unit: "1",
+    description: "Provisioning, idle, running, or closing agent sessions.",
+  },
+  "meanwhile.session.runtime.active": {
+    kind: "gauge",
+    unit: "1",
+    description: "Live runtime leases held by agent sessions.",
+  },
+  "meanwhile.session.cleanup.backlog": {
+    kind: "gauge",
+    unit: "1",
+    description: "Agent-session runtime leases awaiting destruction.",
+  },
   "meanwhile.deployment.running": {
     kind: "gauge",
     unit: "1",
@@ -443,6 +463,11 @@ const METRIC_DEFINITIONS = {
     kind: "counter",
     unit: "1",
     description: "Terminal run outcomes.",
+  },
+  "meanwhile.session.turn.outcomes": {
+    kind: "counter",
+    unit: "1",
+    description: "Terminal agent-session turn outcomes.",
   },
   "meanwhile.log.chunks": {
     kind: "counter",
@@ -473,6 +498,11 @@ const METRIC_DEFINITIONS = {
     kind: "counter",
     unit: "1",
     description: "Runtime cleanup lifecycle events.",
+  },
+  "meanwhile.runtime.provisioning_reconciliation.events": {
+    kind: "counter",
+    unit: "1",
+    description: "Interrupted runtime-provisioning reconciliation events.",
   },
   "meanwhile.deployment.outcomes": {
     kind: "counter",
@@ -514,6 +544,11 @@ const METRIC_DEFINITIONS = {
     unit: "ms",
     description: "Runtime destruction attempt latency.",
   },
+  "meanwhile.runtime.provisioning_reconciliation.duration": {
+    kind: "histogram",
+    unit: "ms",
+    description: "Interrupted runtime-provisioning reconciliation latency.",
+  },
   "meanwhile.deployment.duration": {
     kind: "histogram",
     unit: "ms",
@@ -539,6 +574,10 @@ export const SPAN_ATTRIBUTES = [
   "runtime.id",
   "process.id",
   "session.id",
+  "session.status",
+  "session.status_version",
+  "turn.id",
+  "turn.status",
   "deployment.id",
   "deployment.status",
   "provider.name",

@@ -15,6 +15,7 @@
   "exports": {
     ".": "./src/client.ts",
     "./contracts": "./src/api/contracts.ts",
+    "./timeline": "./src/timeline.ts",
     "./workspace": "./src/workspace.ts"
   },
   "bin": {
@@ -37,14 +38,19 @@
     "demo:pi:serve": "bun scripts/demo.ts --pi --serve",
     "preproof:release": "bun run runtime:build",
     "proof:release": "bun scripts/release-proof.ts --provider=local",
+    "proof:release:local:codex": "bun scripts/release-proof.ts --provider=local --agent=codex",
+    "proof:release:local:claude": "bun scripts/release-proof.ts --provider=local --agent=claude-code",
+    "proof:release:local:pi": "bun scripts/release-proof.ts --provider=local --agent=pi",
     "preproof:release:cloudflare": "bun run runtime:build",
     "proof:release:cloudflare": "bun scripts/release-proof.ts --provider=cloudflare --require-provenance",
+    "proof:release:cloudflare:codex": "bun scripts/release-proof.ts --provider=cloudflare --agent=codex --require-provenance",
     "proof:release:cloudflare:claude": "bun scripts/release-proof.ts --provider=cloudflare --agent=claude-code --require-provenance",
+    "proof:release:cloudflare:pi": "bun scripts/release-proof.ts --provider=cloudflare --agent=pi --require-provenance",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check . && tsc --noEmit && bun run notices:check && bun run runtime:build && bun test",
-    "notices:prepare": "rm -rf providers/cloudflare-sandbox/image/node_modules && bun install --cwd providers/cloudflare-sandbox/image --frozen-lockfile --production --os=linux --cpu=x64",
+    "notices:prepare": "rm -rf node_modules providers/cloudflare-sandbox/node_modules providers/cloudflare-sandbox/image/node_modules && bun install --frozen-lockfile && bun install --cwd providers/cloudflare-sandbox/image --frozen-lockfile --production --os=linux --cpu=x64",
     "notices:generate": "bun run notices:prepare && bun scripts/third-party-notices.ts --write",
     "notices:check": "bun run notices:prepare && bun scripts/third-party-notices.ts --check",
     "test:live:cloudflare": "MEANWHILE_LIVE_CLOUDFLARE=1 bun test ./test/live/cloudflare-sandbox.test.ts",

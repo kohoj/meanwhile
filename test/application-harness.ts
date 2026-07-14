@@ -18,7 +18,11 @@ export interface ApplicationHarness {
 }
 
 export const createApplicationHarness = async (
-  options: { readonly logLevel?: AppConfig["logLevel"] } = {},
+  options: {
+    readonly logLevel?: AppConfig["logLevel"]
+    readonly runConcurrency?: number
+    readonly sessionConcurrency?: number
+  } = {},
 ): Promise<ApplicationHarness> => {
   const directory = await mkdtemp(join(tmpdir(), "meanwhile-app-"))
   const key = await issueApiKey()
@@ -37,6 +41,8 @@ export const createApplicationHarness = async (
     runnerPath: resolve("dist/meanwhile-runner"),
     agentCatalogPath: resolve("config/agents.json"),
     defaultProvider: "local",
+    runConcurrency: options.runConcurrency ?? 2,
+    sessionConcurrency: options.sessionConcurrency ?? 2,
     localProvider: { enabled: true, unsafeHostExecution: false },
     secretSourceCatalog: ["TEST_RUNNER_SECRET"],
     logLevel: options.logLevel ?? "error",

@@ -8,3 +8,7 @@ image/*
 !image/package.json
 !image/bun.lock
 !image/claude-agent-acp
+!image/codex-acp
+!image/pi-acp
+!image/pi-runtime
+!image/pi-settings.json

@@ -2,14 +2,14 @@
 
 Meanwhile remotely executes repositories and agent actions that may be untrusted. Security is therefore an architectural boundary, not an input-sanitization feature.
 
-This document states the implemented model and its residual risks. It is not a certification. The repository is pre-release, and controls should be trusted only to the strength of their matching proof. Report security issues through [SECURITY.md](../SECURITY.md).
+This document states the implemented model and its residual risks. It is not a certification; controls should be trusted only to the strength of their matching proof. Report security issues through [SECURITY.md](../SECURITY.md).
 
 ## Security goals
 
 Meanwhile aims to provide:
 
-1. **Owner isolation** — one authenticated owner cannot discover, read, cancel, deploy, or fetch artifacts from another owner's resources.
-2. **Control-plane integrity** — workload code cannot choose durable run state, forge authorization, supply provider handles, or reach the database directly.
+1. **Owner isolation** — one authenticated owner cannot discover, read, cancel, interrupt, deploy, or fetch evidence/artifacts from another owner's resources.
+2. **Control-plane integrity** — workload code cannot choose durable run/session/turn state, forge authorization, supply provider handles, or reach the database directly.
 3. **Credential minimization** — credentials enter only the operation or process that needs them and known values do not become durable output.
 4. **Remote workload isolation** — untrusted code runs in a provider isolation boundary, not in the control-plane process.
 5. **Artifact integrity** — captured output is declared, bounded, traversal-safe, immutable, content-addressed, and owner-scoped.
@@ -41,7 +41,7 @@ High-value assets include:
 - owner API keys and key hashes;
 - control-plane, Cloudflare bridge, repository, model, and deployment credentials;
 - prompts, repository inputs, source code, process output, and artifacts;
-- run/deployment state, logs, audit history, and ownership relationships;
+- run/session/turn/deployment state, event journals, logs, audit history, and ownership relationships;
 - opaque runtime/process handles;
 - control-plane database and artifact bytes;
 - provider account resources, quota, and billing;
@@ -100,7 +100,7 @@ The runner and agent share one runtime. Unless a provider proves otherwise, code
 - SQLite and artifact storage are available only to the control-plane service account and trusted operators.
 - Provider and deployment SDKs enforce their documented account boundaries.
 - The Cloudflare bridge authenticates every request and rejects incompatible protocol versions.
-- API, runner, provider bridge, database migration, and artifact format versions are deployed compatibly.
+- API, runner, provider bridge, exact database schema, and artifact format versions are deployed as one tested release unit.
 - The control-plane clock is sufficiently accurate for persisted deadline instants, token expiry, and audit ordering. Sandbox clocks are untrusted; runner duration uses a relative monotonic budget and provider timestamps do not order durable evidence.
 - Exact known secret values are available to the redactor before any corresponding output is consumed.
 - Operators do not run untrusted workloads through the local provider.
@@ -128,6 +128,8 @@ Authorization must be structural. A route-level precheck followed by an unscoped
 | Prompt shell injection | Prompt is ACP data; process launch uses executable plus argv, never `sh -c` | The agent may intentionally run dangerous commands inside its sandbox |
 | Agent-specific output spoofing | ACP SDK and versioned bounded runner frames; no terminal scraping | A compromised agent may send valid but malicious ACP content |
 | Malformed runner event | Zod validation, protocol/run identity, sequence checks, size bounds, fail-fast protocol errors | Provider transport truncation may make recovery impossible |
+| Reordered or replaced session command | Durable command sequence, stable command ID, provider-side sequence/fingerprint binding, exact-retry semantics | A compromised trusted bridge can still alter delivery |
+| Fresh agent substituted after restart | Persisted process identity, event replay, ACP session identity, explicit `continuity_lost` on unrecoverable compute | Providers without recovery cannot promise continuity |
 | Child survives cancellation | Signal the runner process group; runner terminates its child group; stop/destroy as cleanup | Provider signal guarantees vary and must be capability-tested |
 | Resource exhaustion | Deadlines, file/log limits, process lifecycle, provider quotas, cleanup monitoring | A permitted run can still consume budget up to limits |
 
@@ -151,7 +153,7 @@ Artifact capture is not a general recursive copy. The collector reads only decla
 | Threat | Control | Residual risk |
 | --- | --- | --- |
 | Persist resolved value | Store only `secretRefs`; resolve immediately before use; retain only for operation lifetime | Process/runtime memory and provider internals can observe injected values |
-| Leak through logs/errors/audit/telemetry | Construct one redactor before consuming output; safe structured error taxonomy; forbidden telemetry fields | Unknown, transformed, fragmented, or encoded values may pass |
+| Leak through logs/errors/audit/telemetry | Runner redaction plus an independent control-plane redactor retained across the full observation lifetime; safe structured errors; forbidden telemetry fields | Unknown, transformed, fragmented, encoded, or rotated pre-restart values may pass |
 | Leak control-plane/provider credential to workload | Provider, bridge, artifact-store, and deploy credentials stay outside agent runtime | Adapter implementation defects can violate the boundary |
 | Cross-tenant environment lookup | Process-environment catalog is bootstrap-owner only, deny-by-default, target-bound, and reserves platform names | Additional tenants require a tenant secret-manager adapter; this catalog is intentionally not one |
 | Repository credential confused deputy | Environment resolver rejects checkout credentials; a future broker must bind owner, repository host, and lifetime | Private checkout is unavailable until that stronger boundary exists |
@@ -165,6 +167,7 @@ Secret redaction is defense in depth, not an isolation mechanism. Never market �
 | --- | --- | --- |
 | Forged bridge request | TLS, high-entropy bridge token, constant-time credential check where applicable, request validation | Shared-token theft grants bridge authority until rotation |
 | Replay or confused version | Versioned bridge protocol, operation/resource scoping, bounded request identity | Strong anti-replay may require signed requests/nonces in a later protocol |
+| Conflicting process-input retry | Each process sequence binds once to one secret-safe command fingerprint; exact retry is idempotent and conflicting reuse fails closed | Durable bridge-state compromise bypasses the binding |
 | Provider SDK leaks business logic | SDK types confined to adapter/bridge; core contract is provider-neutral | Adapter remains trusted code and needs review |
 | Sleep mistaken for cleanup | Explicit idempotent destroy; cleanup state and audit evidence | Provider-side asynchronous deletion may lag acknowledgement |
 | Sandbox peer reads runner files/secrets | Do not rely on same-sandbox process/file separation; minimize injected values | Workload can inspect anything provider exposes inside that sandbox |
@@ -181,8 +184,10 @@ Control-plane policy may branch on declared capabilities, never provider name. A
 | Arbitrary host-path deployment | Public API accepts logical source selectors only | Trusted operator tooling needs separate safeguards |
 | Deployment credential leak | Permit only adapter-declared secret targets, resolve refs only for the adapter operation, and redact logs/errors | Target SDK/process can observe supplied credential |
 | Adapter returns an unsafe URL | Canonical HTTP(S)-only validation rejects credentials, controls, oversized values, and exact known secrets before success is persisted | The destination itself may still serve malicious content |
+| Target succeeds before evidence commits | Keep ambiguous work `running`; replay the idempotent adapter by stable deployment ID and immutable source | A non-idempotent third-party target cannot satisfy this adapter contract |
 | Preview steals API authority | Separate origin/port, no API cookies, unguessable identity, defensive headers | User browser/network environment can still be attacked by hostile content |
 | MIME sniffing or script execution | Conservative media type, `nosniff`, CSP, no server-side execution | A static preview intentionally may execute its own client script within its origin |
+| Local preview bytes drift after publication | Restart, backup, and restore require the canonical manifest, exact file graph, and per-file digest | A trusted host administrator can still mutate bytes between verification and a request |
 
 `local-static` is a deployment adapter, not a trusted rendering engine.
 
@@ -190,13 +195,13 @@ Control-plane policy may branch on declared capabilities, never provider name. A
 
 | Threat | Control | Residual risk |
 | --- | --- | --- |
-| Duplicate run or terminal race | Unique idempotency scope, canonical hash, CAS state/version transitions | Database compromise bypasses invariants |
-| Late success overwrites cancel/timeout | Terminal states immutable; one atomic terminal claim | Incorrect transaction ownership is a critical implementation defect |
-| Cleanup destroys active runtime | Eligibility joined to authoritative run state in claim transaction | Provider handle aliasing must be prevented by adapter validation |
+| Duplicate run/session/turn or terminal race | Independently scoped idempotency keys, canonical hashes, CAS state/version transitions | Database compromise bypasses invariants |
+| Late success overwrites cancel/timeout | Atomic runner-result reservation plus one immutable public terminal claim | Incorrect transaction ownership is a critical implementation defect |
+| Cleanup destroys active runtime | Eligibility joined to authoritative run or session state in claim transaction | Provider handle aliasing must be prevented by adapter validation |
 | Audit diverges from mutation | State change and audit record share one transaction | Local administrator can rewrite SQLite; audit is not externally tamper-proof |
 | Restart loses accepted evidence | Persist state/log cursor before acknowledgement; replay and deduplicate | A provider without replay can lose unaccepted in-flight output |
 | Second writer corrupts local truth | Adjacent lease keyed by physical data-root identity excludes another service, maintenance command, or symlink alias | Host administrator can remove locks or mutate storage |
-| Backup omits artifact or WAL | Exclusive quiescent maintenance; standalone SQLite serialization; complete referenced-blob traversal; hashed manifest; read-only verification | Backup remains offline and depends on trusted local filesystem/hash implementation |
+| Backup omits or legitimizes unrelated bytes | Exclusive quiescent maintenance; standalone SQLite serialization; exact referenced object/preview graph; hashed manifest; read-only verification | Backup remains offline and depends on trusted local filesystem/hash implementation |
 | Garbage collection deletes live bytes | Reachability derives from durable references; dry-run/apply are separate; quiescence and lease are required | Storage/DB compromise can forge the reference graph |
 
 Audit is append-only application evidence, not a cryptographic transparency log. Operators requiring tamper resistance must export it to an append-only external system in a future explicit boundary.
@@ -209,11 +214,11 @@ Audit is append-only application evidence, not a cryptographic transparency log.
 | SSE amplification | Auth, owner scoping, cursor bounds, connection/backpressure limits | Authorized clients can still consume allocated resources |
 | Provider-test billing abuse | Health is bounded and non-provisioning by default; explicit lifecycle proof is gated | Authorized users may consume quota through legitimate runs |
 | High-cardinality telemetry attack | Bounded labels; IDs stay in logs/traces; payload fields bounded | Log volume still requires retention and owner/global quotas |
-| Storage/queue denial | Explicit input/log/artifact limits, deadlines, cleanup monitoring | Full multi-tenant quotas and admission control are production evolution work |
+| Storage/queue denial | Explicit input/log/artifact limits, deadlines, bounded process admission, cleanup monitoring | Per-owner/global quotas and request rate limits remain production evolution work |
 
 ## Local provider warning
 
-The local provider runs agent and repository code as host processes. Directory scoping, a different working directory, runner placement, environment filtering, and process groups do not make it a sandbox.
+The POSIX-only local provider runs agent and repository code as host processes. Directory scoping, a different working directory, runner placement, environment filtering, and process groups do not make it a sandbox.
 
 Use it only for:
 
@@ -231,6 +236,8 @@ Processes inside one Cloudflare Sandbox share a sandbox security context, includ
 - an injected model credential must be considered visible to sandbox code;
 - provider/account credentials remain in the control plane or bridge;
 - provider-owned process replay is a recovery facility, not a trusted signature of agent intent;
+- the session mailbox is a delivery mechanism, not a confidentiality boundary; the workload may observe same-sandbox files;
+- the bridge durably reserves a command sequence/fingerprint before mailbox publication because the pinned SDK has no ongoing stdin primitive;
 - explicit Sandbox destruction is required after terminalization;
 - bridge and container versions are deployed and tested as one compatibility unit.
 
@@ -254,19 +261,19 @@ Pinning improves reproducibility; it does not establish trust. Critical upstream
 
 Required adversarial tests include:
 
-- cross-owner read, list, cancel, artifact, deployment, log, and existence probes;
+- cross-owner read, list, cancel, interrupt, close, turn, event, artifact, deployment, log, and existence probes;
 - duplicate idempotency and competing terminal-state claims;
 - prompt and argv metacharacters without shell execution;
-- malformed, oversized, duplicated, out-of-order, and wrong-run runner frames;
+- malformed, oversized, duplicated, conflicting, out-of-order, and wrong-run/session/turn runner frames and commands;
 - absolute path, traversal, symlink race, and undeclared artifact attempts;
 - exact secret values in stdout, stderr, ACP updates, provider errors, audit metadata, telemetry, artifacts, and deployment logs;
 - preview path escape, MIME confusion, CSP, cache isolation, and API-origin separation;
 - forged, missing, rotated, and incompatible bridge credentials/protocols;
-- restart during provisioning, running, artifact capture, deployment, and destroy;
+- restart during provisioning, running, an active session turn, artifact capture, deployment, and destroy;
 - provider event replay expiry and missing compute;
 - future/malformed sandbox timestamps, UTC agent environment, and monotonic timeout enforcement;
 - missing/tampered execution provenance and adapter/capability drift before compute;
-- cleanup attempts against a running run;
+- cleanup attempts against a running run or operational session;
 - data-root lease exclusion, backup tampering, nested paths, restore consistency, and garbage-collection reachability.
 
 Tests assert stable error codes, ordering, side effects, and absence of secret bytes. They use deterministic clocks and adapters rather than arbitrary sleeps.

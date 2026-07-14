@@ -22,8 +22,9 @@ export interface ArtifactWorkspace {
   list(
     path: string,
     limits: { readonly maxEntries: number; readonly maxDepth: number },
+    signal: AbortSignal,
   ): Promise<readonly WorkspaceEntry[]>
-  readFile(path: string, maxBytes: number): Promise<Uint8Array>
+  readFile(path: string, maxBytes: number, signal: AbortSignal): Promise<Uint8Array>
 }
 
 export interface ArtifactScanInput {
@@ -56,6 +57,7 @@ export interface ArtifactCollectorInput {
   runId: string
   declaredPaths: readonly string[]
   workspace: ArtifactWorkspace
+  signal: AbortSignal
   /** Operation-scoped and disposed by the collector on every exit path. */
   scanner?: ArtifactScanner
 }
@@ -176,8 +178,8 @@ export class ArtifactCollector {
     input: ArtifactCollectorInput,
     scanner: ArtifactScanner,
   ): Promise<CollectedArtifact[]> {
+    input.signal.throwIfAborted()
     if (input.declaredPaths.length === 0) return []
-
     const declarations = input.declaredPaths
       .map((path) => normalizeArtifactPath(path, true))
       .sort(compareText)
@@ -192,19 +194,26 @@ export class ArtifactCollector {
     const artifacts: CollectedArtifact[] = []
     let enumeratedEntries = 0
     for (const declaration of declarations) {
+      input.signal.throwIfAborted()
       const declarationFinding = await scanner.scan({
         logicalPath: declaration,
         bytes: new Uint8Array(),
       })
+      input.signal.throwIfAborted()
       if (declarationFinding !== null) {
         throw secretFinding(declarationFinding)
       }
       const remainingEntries = this.#limits.maxEntries - enumeratedEntries
       if (remainingEntries <= 0) throw limitError("workspace entries", this.#limits.maxEntries)
-      const sourceEntries = await input.workspace.list(declaration, {
-        maxEntries: remainingEntries,
-        maxDepth: this.#limits.maxDepth,
-      })
+      const sourceEntries = await input.workspace.list(
+        declaration,
+        {
+          maxEntries: remainingEntries,
+          maxDepth: this.#limits.maxDepth,
+        },
+        input.signal,
+      )
+      input.signal.throwIfAborted()
       enumeratedEntries += sourceEntries.length
       if (enumeratedEntries > this.#limits.maxEntries) {
         throw limitError("workspace entries", this.#limits.maxEntries)
@@ -244,6 +253,7 @@ export class ArtifactCollector {
       const files = entries.filter((entry) => entry.type === "file")
       const collectedEntries: CollectedArtifactEntry[] = []
       for (const file of files) {
+        input.signal.throwIfAborted()
         let item = captured.get(file.path)
         if (item !== undefined) {
           if (
@@ -268,7 +278,8 @@ export class ArtifactCollector {
             throw limitError("total bytes", this.#limits.maxTotalBytes)
           }
 
-          const sourceBytes = await input.workspace.readFile(file.path, file.size)
+          const sourceBytes = await input.workspace.readFile(file.path, file.size, input.signal)
+          input.signal.throwIfAborted()
           // Workspace buffers remain provider-owned until copied. Snapshot
           // before scanner or store awaits can observe caller mutation.
           const bytes = Uint8Array.from(sourceBytes)
@@ -284,11 +295,13 @@ export class ArtifactCollector {
             logicalPath: file.path,
             bytes,
           })
+          input.signal.throwIfAborted()
           if (finding !== null) {
             throw secretFinding(finding)
           }
 
           const blob = await this.#store.put({ ownerId: input.ownerId, bytes })
+          input.signal.throwIfAborted()
           item = {
             source: file,
             blob,
@@ -326,6 +339,7 @@ export class ArtifactCollector {
         ownerId: input.ownerId,
         bytes: canonicalManifest,
       })
+      input.signal.throwIfAborted()
       artifacts.push({
         id: manifest.digest,
         ownerId: input.ownerId,
@@ -340,6 +354,7 @@ export class ArtifactCollector {
       })
     }
 
+    input.signal.throwIfAborted()
     return artifacts
   }
 }

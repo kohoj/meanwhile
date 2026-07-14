@@ -4,11 +4,13 @@ import {
   decodeRunnerSpec,
   encodeRunnerFrame,
   MAX_RUNNER_FRAME_BYTES,
+  parseAnyRunnerSpec,
   RUNNER_PROTOCOL_VERSION,
   type RunnerSpec,
   runnerFrameSchema,
   runnerSpecSchema,
   runnerTerminalPayloadSchema,
+  sessionRunnerCommandSchema,
 } from "../../runner/protocol"
 
 describe("runner protocol", () => {
@@ -121,6 +123,41 @@ describe("runner protocol", () => {
     expect(encoded.includes("\n")).toBe(false)
     expect(new TextEncoder().encode(encoded).byteLength).toBeLessThanOrEqual(MAX_RUNNER_FRAME_BYTES)
     expect(runnerFrameSchema.parse(JSON.parse(encoded))).toEqual(frame)
+  })
+
+  test("defines a versioned multi-turn session command stream without prompt argv", () => {
+    const parsed = parseAnyRunnerSpec({
+      protocolVersion: RUNNER_PROTOCOL_VERSION,
+      mode: "session",
+      sessionId: "session-1",
+      runnerSessionId: "session-runner-1",
+      agent: { executable: "codex-acp", args: [] },
+      permissionPolicy: { mode: "deny-all" },
+      environment: {},
+      secretEnvironmentNames: ["OPENAI_API_KEY"],
+      idleTimeoutMs: 60_000,
+    })
+    expect(parsed).toMatchObject({ mode: "session", sessionId: "session-1" })
+    expect(JSON.stringify(parsed)).not.toContain("repair the parser")
+    expect(
+      sessionRunnerCommandSchema.parse({
+        version: 1,
+        sequence: 1,
+        id: "70c78f7e-a915-4a4b-a9cb-e805f534f606",
+        type: "turn.start",
+        turnId: "turn-1",
+        prompt: "repair the parser",
+        timeoutBudgetMs: 60_000,
+      }),
+    ).toMatchObject({ type: "turn.start", turnId: "turn-1" })
+    expect(() =>
+      sessionRunnerCommandSchema.parse({
+        version: 1,
+        sequence: 0,
+        id: "70c78f7e-a915-4a4b-a9cb-e805f534f606",
+        type: "session.close",
+      }),
+    ).toThrow()
   })
 })
 

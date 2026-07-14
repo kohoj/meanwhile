@@ -1,6 +1,6 @@
 import { z } from "zod"
 
-export const RUNNER_PROTOCOL_VERSION = 2 as const
+export const RUNNER_PROTOCOL_VERSION = 3 as const
 
 export const MAX_RUNNER_SPEC_BYTES = 2 * 1024 * 1024
 export const MAX_RUNNER_FRAME_BYTES = 256 * 1024
@@ -56,6 +56,14 @@ const portableExecutableSchema = commandPartSchema.regex(
   "Agent executable must be a bare, portable PATH name",
 )
 
+const runnerAgentSchema = z
+  .object({
+    executable: portableExecutableSchema,
+    args: z.array(commandPartSchema).max(256),
+    workingDirectory: z.literal("workspace").optional(),
+  })
+  .strict()
+
 const toolKindSchema = z.enum([
   "read",
   "edit",
@@ -92,13 +100,7 @@ export const runnerSpecSchema = z
     protocolVersion: z.literal(RUNNER_PROTOCOL_VERSION),
     runId: withoutNullBytes(z.string().min(1).max(128)),
     runnerSessionId: withoutNullBytes(z.string().min(1).max(128)),
-    agent: z
-      .object({
-        executable: portableExecutableSchema,
-        args: z.array(commandPartSchema).max(256),
-        workingDirectory: z.literal("workspace").optional(),
-      })
-      .strict(),
+    agent: runnerAgentSchema,
     prompt: withoutNullBytes(z.string().max(MAX_PROMPT_LENGTH)),
     permissionPolicy: runnerPermissionPolicySchema,
     artifactPaths: z.array(relativePathSchema).max(256),
@@ -149,6 +151,26 @@ export const runnerSpecSchema = z
 
 export type RunnerSpec = z.infer<typeof runnerSpecSchema>
 export type RunnerPermissionPolicy = z.infer<typeof runnerPermissionPolicySchema>
+
+export const sessionRunnerSpecSchema = z
+  .object({
+    protocolVersion: z.literal(RUNNER_PROTOCOL_VERSION),
+    mode: z.literal("session"),
+    sessionId: withoutNullBytes(z.string().min(1).max(128)),
+    runnerSessionId: withoutNullBytes(z.string().min(1).max(128)),
+    agent: runnerAgentSchema,
+    permissionPolicy: runnerPermissionPolicySchema,
+    environment: z.record(
+      environmentNameSchema,
+      withoutNullBytes(z.string().max(MAX_ENVIRONMENT_VALUE_LENGTH)),
+    ),
+    secretEnvironmentNames: z.array(environmentNameSchema).max(128),
+    idleTimeoutMs: z.number().int().positive().max(MAX_TIMEOUT_BUDGET_MS),
+  })
+  .strict()
+
+export type SessionRunnerSpec = z.infer<typeof sessionRunnerSpecSchema>
+export type AnyRunnerSpec = RunnerSpec | SessionRunnerSpec
 
 const jsonPrimitiveSchema = z.union([z.string(), z.number(), z.boolean(), z.null()])
 export type JsonValue =
@@ -399,9 +421,142 @@ export type RunnerEvent = RunnerFrame extends infer Frame
   : never
 export type RunnerTerminalPayload = Extract<RunnerFrame, { type: "terminal" }>["payload"]
 
+const sessionFrameBase = {
+  protocolVersion: z.literal(RUNNER_PROTOCOL_VERSION),
+  sessionId: withoutNullBytes(z.string().min(1).max(128)),
+  runnerSessionId: withoutNullBytes(z.string().min(1).max(128)),
+  sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  timestamp: z.string().datetime({ offset: true }),
+}
+
+export const sessionRunnerFrameSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      ...sessionFrameBase,
+      type: z.literal("session.ready"),
+      payload: z
+        .object({
+          agentSessionId: z.string().min(1).max(512),
+          capabilities: agentCapabilitySummarySchema,
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...sessionFrameBase,
+      type: z.literal("turn.started"),
+      payload: z.object({ turnId: z.string().min(1).max(128) }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...sessionFrameBase,
+      type: z.literal("turn.update"),
+      payload: z
+        .object({
+          turnId: z.string().min(1).max(128),
+          update: z.record(z.string(), jsonValueSchema),
+          truncated: z.boolean(),
+          originalBytes: z.number().int().positive().optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...sessionFrameBase,
+      type: z.literal("turn.permission"),
+      payload: z
+        .object({
+          turnId: z.string().min(1).max(128),
+          toolCallId: z.string().min(1).max(512),
+          toolKind: toolKindSchema.optional(),
+          decision: z.enum(["allowed", "denied"]),
+          selectedOptionKind: z.enum(["allow_once", "reject_once", "reject_always"]).optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...sessionFrameBase,
+      type: z.literal("agent.stderr"),
+      payload: z
+        .object({ chunk: z.string().max(MAX_STDERR_CHUNK_BYTES), truncated: z.boolean() })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...sessionFrameBase,
+      type: z.literal("turn.terminal"),
+      payload: z
+        .object({ turnId: z.string().min(1).max(128), result: runnerTerminalPayloadSchema })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...sessionFrameBase,
+      type: z.literal("session.closed"),
+      payload: z
+        .object({ reason: z.enum(["requested", "idle_timeout", "agent_exit", "failed"]) })
+        .strict(),
+    })
+    .strict(),
+])
+
+export type SessionRunnerFrame = z.infer<typeof sessionRunnerFrameSchema>
+export type SessionRunnerEvent = SessionRunnerFrame extends infer Frame
+  ? Frame extends SessionRunnerFrame
+    ? Omit<Frame, keyof typeof sessionFrameBase>
+    : never
+  : never
+
+export const sessionRunnerCommandSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      version: z.literal(1),
+      sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      id: z.string().uuid(),
+      type: z.literal("turn.start"),
+      turnId: z.string().min(1).max(128),
+      prompt: withoutNullBytes(z.string().min(1).max(MAX_PROMPT_LENGTH)),
+      timeoutBudgetMs: z.number().int().positive().max(MAX_TIMEOUT_BUDGET_MS),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(1),
+      sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      id: z.string().uuid(),
+      type: z.literal("turn.interrupt"),
+      turnId: z.string().min(1).max(128),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(1),
+      sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      id: z.string().uuid(),
+      type: z.literal("session.close"),
+    })
+    .strict(),
+])
+
+export type SessionRunnerCommand = z.infer<typeof sessionRunnerCommandSchema>
+
 const encoder = new TextEncoder()
 
 export function parseRunnerSpec(input: unknown): RunnerSpec {
+  return runnerSpecSchema.parse(input)
+}
+
+export function parseAnyRunnerSpec(input: unknown): AnyRunnerSpec {
+  if (typeof input === "object" && input !== null && Reflect.get(input, "mode") === "session") {
+    return sessionRunnerSpecSchema.parse(input)
+  }
   return runnerSpecSchema.parse(input)
 }
 
@@ -411,6 +566,13 @@ export function decodeRunnerSpec(text: string): RunnerSpec {
   }
 
   return parseRunnerSpec(JSON.parse(text))
+}
+
+export function decodeAnyRunnerSpec(text: string): AnyRunnerSpec {
+  if (encoder.encode(text).byteLength > MAX_RUNNER_SPEC_BYTES) {
+    throw new Error("Runner specification exceeds the byte limit")
+  }
+  return parseAnyRunnerSpec(JSON.parse(text))
 }
 
 export function encodeRunnerFrame(frame: RunnerFrame): string {

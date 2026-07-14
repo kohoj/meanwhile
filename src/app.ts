@@ -3,6 +3,7 @@ import { OpenAPIHono } from "@hono/zod-openapi"
 import type { MiddlewareHandler } from "hono"
 import { AgentCatalog } from "./agents/catalog"
 import { RunnerSessionController } from "./agents/runner-session"
+import { SessionRunnerController } from "./agents/session-runner"
 import { createApiKeyRoutes } from "./api/api-keys"
 import { createArtifactRoutes } from "./api/artifacts"
 import { createAuditRoutes } from "./api/audit"
@@ -11,6 +12,7 @@ import { createDeploymentRoutes } from "./api/deployments"
 import { createProviderRoutes, RegistryProviderDiagnostics } from "./api/providers"
 import { createRunRoutes } from "./api/runs"
 import type { ApiEnv } from "./api/schemas"
+import { createSessionRoutes } from "./api/sessions"
 import { createSystemRoutes, registerOpenApiDocument } from "./api/system"
 import { LocalArtifactStore } from "./artifacts/local-artifact-store"
 import { WORKSPACE_BUNDLE_LIMITS, WorkspaceBundleStore } from "./artifacts/workspace-bundle"
@@ -48,6 +50,8 @@ import {
 import { RunExecutor } from "./services/run-executor"
 import { RunService } from "./services/run-service"
 import { RuntimeReaper, RuntimeReaperLoop } from "./services/runtime-reaper"
+import { SessionExecutor } from "./services/session-executor"
+import { SessionService } from "./services/session-service"
 import { WorkspacePreparer } from "./services/workspace-preparer"
 import { SERVICE_VERSION } from "./version"
 
@@ -127,6 +131,7 @@ export const createApplication = async (
     const auditService = new AuditService(store)
     const apiKeyService = new ApiKeyService(store)
     const workspaceBundles = new WorkspaceBundleStore(store, artifacts, WORKSPACE_BUNDLE_LIMITS)
+    const workspacePreparer = new WorkspacePreparer(workspaceBundles)
     const secrets = new EnvironmentSecretResolver({
       allowedSourceNames: config.secretSourceCatalog,
       allowedOwnerIds: [LOCAL_BOOTSTRAP_OWNER_ID],
@@ -157,7 +162,7 @@ export const createApplication = async (
       store,
       providers: providerRegistry,
       runner: new RunnerSessionController(),
-      workspace: new WorkspacePreparer(workspaceBundles),
+      workspace: workspacePreparer,
       artifactStore: artifacts,
       artifactLimits: {
         maxFiles: 1_000,
@@ -167,6 +172,7 @@ export const createApplication = async (
       secrets,
       logger: instrumentation.telemetry.logger,
       telemetry: instrumentation.telemetry,
+      concurrency: config.runConcurrency,
     })
     const runService = new RunService({
       store,
@@ -178,38 +184,83 @@ export const createApplication = async (
       executionProvenance,
       defaultProvider: config.defaultProvider,
     })
+    const sessionExecutor = new SessionExecutor({
+      store,
+      providers: providerRegistry,
+      runner: new SessionRunnerController(),
+      workspace: workspacePreparer,
+      secrets,
+      logger: instrumentation.telemetry.logger,
+      telemetry: instrumentation.telemetry,
+      concurrency: config.sessionConcurrency,
+    })
+    const sessionService = new SessionService({
+      store,
+      commands: sessionExecutor,
+      workspaceInputs: workspaceBundles,
+      agentIntents: catalog,
+      secretReferences: secrets,
+      providerNames: providerAdmission,
+      providerCapabilities: {
+        supportsProcessInput: (name) => {
+          const provider = providerRegistry.get(name)
+          return provider.capabilities.processInput && provider.send !== undefined
+        },
+      },
+      executionProvenance,
+      defaultProvider: config.defaultProvider,
+    })
     const reaper = new RuntimeReaper(store, providerRegistry, {
       telemetry: instrumentation.telemetry,
       observe: (event) => {
+        const provisioning = event.type.startsWith("runtime.provisioning.")
+        const status = event.type.split(".").at(-1) ?? "unknown"
         instrumentation.telemetry.logger
           .child({
             ownerId: event.ownerId,
             runId: event.runId,
             runtimeId: event.runtimeId,
           })
-          .info(event.type, "Runtime cleanup state changed", {
+          .info(
+            event.type,
+            provisioning
+              ? "Runtime provisioning reconciliation changed"
+              : "Runtime cleanup state changed",
+            {
+              provider: event.provider,
+              attempt: event.attempt,
+              status,
+              ...(event.type === "runtime.cleanup.failed" ||
+              event.type === "runtime.provisioning.reconcile_failed"
+                ? { errorCode: event.errorCode, exhausted: event.exhausted }
+                : {}),
+            },
+          )
+        instrumentation.telemetry.metrics.increment(
+          provisioning
+            ? "meanwhile.runtime.provisioning_reconciliation.events"
+            : "meanwhile.cleanup.events",
+          1,
+          {
             provider: event.provider,
-            attempt: event.attempt,
-            status: event.type.split(".").at(-1) ?? "unknown",
-            ...(event.type === "runtime.cleanup.failed"
-              ? { errorCode: event.errorCode, exhausted: event.exhausted }
-              : {}),
-          })
-        instrumentation.telemetry.metrics.increment("meanwhile.cleanup.events", 1, {
-          provider: event.provider,
-          status: event.type.split(".").at(-1) ?? "unknown",
-        })
+            status,
+          },
+        )
         if ("durationMs" in event) {
-          instrumentation.telemetry.metrics.record("meanwhile.cleanup.duration", event.durationMs, {
-            provider: event.provider,
-            status: event.type.split(".").at(-1) ?? "unknown",
-          })
+          instrumentation.telemetry.metrics.record(
+            provisioning
+              ? "meanwhile.runtime.provisioning_reconciliation.duration"
+              : "meanwhile.cleanup.duration",
+            event.durationMs,
+            { provider: event.provider, status },
+          )
         }
       },
     })
     const controlPlane = new ControlPlane([
       new RuntimeReaperLoop(reaper),
       runExecutor,
+      sessionExecutor,
       deploymentDispatcher,
     ])
 
@@ -279,6 +330,7 @@ export const createApplication = async (
     const controlApi = new OpenAPIHono<ApiEnv>()
     controlApi.use("*", authenticate)
     controlApi.route("/", createRunRoutes(runService))
+    controlApi.route("/", createSessionRoutes(sessionService))
     controlApi.route("/", createArtifactRoutes(artifactService))
     controlApi.route("/", createAuditRoutes(auditService))
     controlApi.route("/", createApiKeyRoutes(apiKeyService))
@@ -314,6 +366,10 @@ export const createApplication = async (
         "meanwhile.run.active",
         "meanwhile.runtime.active",
         "meanwhile.cleanup.backlog",
+        "meanwhile.session.queue.depth",
+        "meanwhile.session.active",
+        "meanwhile.session.runtime.active",
+        "meanwhile.session.cleanup.backlog",
         "meanwhile.deployment.running",
       ],
       () => {
@@ -323,6 +379,10 @@ export const createApplication = async (
           "meanwhile.run.active": state.activeRuns,
           "meanwhile.runtime.active": state.activeRuntimes,
           "meanwhile.cleanup.backlog": state.cleanupBacklog,
+          "meanwhile.session.queue.depth": state.queuedSessions,
+          "meanwhile.session.active": state.activeSessions,
+          "meanwhile.session.runtime.active": state.activeSessionRuntimes,
+          "meanwhile.session.cleanup.backlog": state.sessionCleanupBacklog,
           "meanwhile.deployment.running": state.runningDeployments,
         }
       },
@@ -335,7 +395,7 @@ export const createApplication = async (
       store,
       preview,
       async start() {
-        const resumePreview = store.listLocalDeploymentIds().length > 0
+        const resumePreview = store.listLocalDeploymentRoots().length > 0
         if (resumePreview) preview.start()
         try {
           await controlPlane.start()

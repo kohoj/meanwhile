@@ -1,10 +1,57 @@
 # Changelog
 
-All user-visible, operator-visible, compatibility, migration, and security-relevant changes to Meanwhile are recorded here.
+All user-visible, operator-visible, compatibility, schema, and security-relevant changes to Meanwhile are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+
+- Durable run/session runtime-provisioning intents and one-shot process-launch intents that close allocation/spawn-before-handle-persistence crash windows through exact-id provider reconciliation.
+- Durable `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent` resources across SQLite, HTTP/OpenAPI, the typed SDK, and CLI, preserving one ACP context across ordered prompts.
+- Explicit turn conflict policies (`reject`, `enqueue`, `interrupt_and_send`), independent session/turn idempotency, per-turn deadlines, interruption without continuity loss, idempotent close, and durable session-runtime cleanup.
+- One contiguous run event journal spanning status, validated runner evidence, logs, artifacts, and cleanup, with cursor pagination, resumable SSE, `meanwhile watch`, and pure presentation-neutral timeline reducers.
+- Provider-neutral ordered/idempotent process input plus complete local mailbox execution and a versioned Cloudflare bridge mailbox backed by durable sequence/fingerprint reservation.
+- Restart reconciliation for live interactive sessions, including provider/runner replay, exact evidence deduplication, undispatched command recovery, and explicit `continuity_lost` semantics.
+- Session telemetry for durable queue/active/runtime/cleanup state and bounded turn outcomes, plus owner-isolation, secret-redaction, timeout, replay, cleanup, and restart tests.
+- Exact Codex, Claude Code, and Pi ACP/runtime pairs in the Cloudflare compatibility image, with real-agent local and remote release-proof commands.
+
+### Changed
+
+- Run state now has only three write paths: dedicated provisioning claim, atomic `session.started` acceptance, and one public terminal-status commit. Atomic runner-terminal reservation is kept distinct from status mutation so artifact capture and restart finalization remain explicit. The generic transition API, persisted cancellation flag, restart-time evidence repair, and unscheduled-cleanup repair path were removed.
+- SQLite now has one current schema initialized atomically on an empty database and bound to an exact source fingerprint. Every foreign, partial, or differently fingerprinted database is rejected without upgrade, backfill, repair, or dual reads.
+- Invalid provenance and deployment-log rows now fail as persisted-contract violations instead of entering alternate read fallbacks.
+- Runner protocol v3 now supports both one-shot `RunnerSpec` and prompt-free `SessionRunnerSpec` modes with versioned turn, interrupt, and close commands.
+- Cloudflare bridge protocol v4 adds capability-gated process input without exposing SDK types or remote ACP to the control-plane core.
+- Data-root quiescence and operational telemetry now include durable sessions and their independent runtime-lease cleanup lifecycle.
+- Run and session admission are independently configurable; restart reconciliation always supervises already-live sessions, while session cleanup retains a separate bounded lane.
+- Session and turn history use keyset/cursor pagination, turns have a direct read route, and the SDK provides direct turn waits, explicit session-status waits, and replay-safe retry across temporary API unavailability.
+- API-key usage timestamps coalesce repeated authenticated reads into at most one durable write per minute.
+
+### Fixed
+
+- Run terminal races now use an explicit two-phase runner path: terminal-frame acceptance atomically reserves the runner result before artifact capture, then the sole public terminal-status transaction commits status, events, audit, terminal log, and cleanup eligibility together. Cancellation, timeout, and control-plane failure lose to an existing reservation; late terminal frames remain diagnostic.
+- Recovery now fails closed on the impossible split state of a terminal log without its atomic runner-session reservation instead of reconstructing lifecycle authority from logs.
+- Interrupted run/session provisioning and cleanup claims are recovered on restart, including bounded reconciliation and destruction of compute that may have been allocated before its handle was persisted.
+- One-shot runner spawn retries now reuse the durably accepted relative timeout budget, preventing restart-time budget drift from conflicting with an already-created provider process; process handle, run process identity, and audit materialize atomically.
+- Session runner process handle, public process identity, and start audit now materialize in one exact, idempotent transaction; split or conflicting persisted identity fails closed.
+- Runtime-start audit evidence is idempotently recovered from a proved running runtime, closing the session start-acknowledgement crash window without fabricating provider state.
+- Artifact capture after runner-terminal reservation now remains bounded by the run's original absolute deadline; provider runtime/file observations are abortable, recovery never restarts compute solely for capture, timeout evidence is structured, and the reserved runner result still finalizes deterministically.
+- Ambiguous deployment success now remains `running` for exact-id adapter reconciliation when durable logs or the success transaction fail, instead of permanently recording a false target failure.
+- Local-static restart reuse and data-root backup now verify one canonical publication manifest, the exact referenced file graph, and every byte digest; orphan or tampered preview files are rejected rather than archived or reused.
+- Local runtime destruction now waits for observed process exit publication before removing runtime state, eliminating a cleanup race with final exit metadata.
+- Session command sequences are filename and persistence identities, preventing one sequence from being rebound to a different command ID.
+- Timeline message identity now includes ACP role as well as turn and message ID, so an agent reusing one ID for thought and final output cannot collapse them.
+- Cloudflare process output now carries explicit stdout/stderr closure markers; the bridge fails retryably instead of publishing an exit cursor before both eventually consistent log tails are complete.
+- The Cloudflare Codex wrapper retains its process-private authentication home through adapter exit and invokes the native pinned Codex executable directly.
+- Third-party notice verification now rebuilds clean dependency roots and confines resolution to each declared graph, so cached, hoisted, or ancestor packages cannot make the release manifest depend on CI host state.
+
+### Security
+
+- Session prompts and resolved credentials stay out of process argv, runner specs, provider handles, telemetry, and durable evidence; the control plane retains an independent operation-scoped redactor through spawn/reconnect and redacts agent-controlled fields before SQLite accepts session output.
+- Cloudflare reserves each process-input sequence against a secret-safe fingerprint before sandbox delivery; exact retries are harmless and conflicting reuse fails closed.
+- Structured Codex login material is split into individually redacted secret values and reconstructed only inside the short-lived wrapper process instead of crossing the runner boundary as one opaque JSON credential.
 
 ## [0.1.1] - 2026-07-14
 
@@ -35,7 +82,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - Bun/Hono/Zod control plane with generated OpenAPI, bearer-key authentication, owner-scoped run/deployment APIs, cursor polling, and resumable SSE logs.
-- Explicit SQLite migrations and a single SQL store for runs, status events, idempotency, runtime cleanup, runner sessions, logs, immutable inputs, artifact metadata, deployments, and append-only audit evidence.
+- One exact SQLite schema and a single SQL store for runs, status events, idempotency, runtime cleanup, runner sessions, logs, immutable inputs, artifact metadata, deployments, and append-only audit evidence.
 - Versioned runtime-local `meanwhile-runner` using the official ACP TypeScript SDK for capability negotiation, prompt turns, non-interactive permissions, cancellation, deadlines, bounded event frames, and exact-value redaction.
 - Process-aware `RuntimeProvider` contract with opaque persistable handles, replay cursors, capabilities, safe errors, file operations, cancellation, lifecycle, health, and shared contract tests.
 - Complete local provider using `Bun.spawn` and the same standalone runner as remote runtimes; local execution is explicitly diagnosed as non-isolating.
@@ -82,7 +129,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Local process recovery now reads Linux kernel process identity directly instead of requiring a `ps` utility that minimal production images do not contain.
 - Sparse telemetry correlation is canonicalized before validation, preventing an unavailable optional identifier from obscuring the original failure.
 - The production image now carries both versioned protocol modules required by the control-plane import graph, and CI boots the built image through `/readyz` instead of treating a successful image build as runtime proof.
-- Doctor diagnostics now distinguish migration-history incompatibility from filesystem writability.
+- Doctor diagnostics now distinguish schema-identity mismatch from filesystem writability.
 - Sandbox/provider timestamps can no longer control durable log chronology or runner timeout duration.
 - Data-root maintenance now canonicalizes physical paths, preventing symlink aliases from bypassing writer exclusion or nesting a backup inside the live root; restore also revalidates each byte at publication time.
 - Protected control-plane responses now default to `Cache-Control: private, no-store`, including one-time API-key material and authenticated errors.
@@ -113,13 +160,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## Compatibility policy
 
-Version `0.1.0` is the first compatibility baseline for public HTTP schemas, runner and bridge protocols, database migrations, artifact representation, agent catalog, and adapter contracts:
+Version `0.1.0` established the first public HTTP schemas, runner and bridge protocols, database contract, artifact representation, agent catalog, and adapter contracts:
 
 - breaking public API or persisted-format changes require a major release;
 - additive backward-compatible API behavior may ship in a minor release;
 - compatible fixes and security patches may ship in a patch release;
 - runner and bridge mixed-version behavior must be stated independently from API SemVer;
-- released migrations are immutable and upgrades move forward through new migrations;
+- database state is accepted only when it matches the release's exact schema identity;
 - security advisories identify affected and fixed versions without exposing active credentials or tenant data.
 
 [Unreleased]: https://github.com/kohoj/meanwhile/compare/v0.1.1...HEAD

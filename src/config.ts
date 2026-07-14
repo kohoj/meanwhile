@@ -25,6 +25,8 @@ const environmentSchema = z.object({
   MEANWHILE_RUNNER_PATH: z.string().min(1).default("./dist/meanwhile-runner"),
   MEANWHILE_AGENT_CATALOG: z.string().min(1).default("./config/agents.json"),
   MEANWHILE_DEFAULT_PROVIDER: providerName.default("local"),
+  MEANWHILE_RUN_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
+  MEANWHILE_SESSION_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
   MEANWHILE_LOCAL_PROVIDER: z.enum(["auto", "enabled", "disabled"]).default("auto"),
   MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER: booleanFromEnvironment,
   MEANWHILE_SECRET_ENV_ALLOWLIST: z.string().default(""),
@@ -62,6 +64,8 @@ export interface AppConfig {
   readonly runnerPath: string
   readonly agentCatalogPath: string
   readonly defaultProvider: string
+  readonly runConcurrency: number
+  readonly sessionConcurrency: number
   readonly localProvider: {
     readonly enabled: boolean
     readonly unsafeHostExecution: boolean
@@ -135,6 +139,8 @@ export const loadConfig = (
     runnerPath: absolute(parsed.MEANWHILE_RUNNER_PATH),
     agentCatalogPath: absolute(parsed.MEANWHILE_AGENT_CATALOG),
     defaultProvider: parsed.MEANWHILE_DEFAULT_PROVIDER,
+    runConcurrency: parsed.MEANWHILE_RUN_CONCURRENCY,
+    sessionConcurrency: parsed.MEANWHILE_SESSION_CONCURRENCY,
     localProvider,
     secretSourceCatalog,
     logLevel: parsed.MEANWHILE_LOG_LEVEL,
