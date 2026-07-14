@@ -8,18 +8,12 @@ import type { AppConfig } from "../src/config"
 import { backupDataRoot, restoreDataRoot, verifyDataBackup } from "../src/data-root"
 import { initializeInstrumentation } from "../src/instrumentation"
 import type { TelemetryHealthSnapshot } from "../src/telemetry"
+import { sessionTimelineFromEvents } from "../src/timeline"
 import { SERVICE_VERSION } from "../src/version"
-import {
-  CLAUDE_ADAPTER_NAME,
-  CLAUDE_ADAPTER_VERSION,
-  CLAUDE_SDK_NAME,
-  CLAUDE_SDK_VERSION,
-  ClaudeSettingsError,
-  loadClaudeRunEnvironment,
-} from "./claude-settings"
+import { AgentToolchainError, agentCatalog, prepareAgentToolchain } from "./agent-toolchains"
 
 type ProofProvider = "local" | "cloudflare"
-type ProofAgent = "demo" | "claude-code"
+type ProofAgent = "demo" | "codex" | "claude-code" | "pi"
 
 interface PreparedProofAgent {
   readonly type: ProofAgent
@@ -121,7 +115,9 @@ try {
   running = await startInstance(config, key.key)
   const providerDiagnostics = await running.client.providers.test(provider)
   if (providerDiagnostics.health.status !== "healthy") {
-    throw new ProofError("PROVIDER_UNHEALTHY", "The selected provider is not healthy")
+    throw new ProofError("PROVIDER_UNHEALTHY", "The selected provider is not healthy", {
+      health: providerDiagnostics.health,
+    })
   }
 
   const created = await running.client.runs.create(
@@ -147,9 +143,14 @@ try {
     pollIntervalMs: 50,
   })
   if (run.status !== "succeeded" || run.executionProvenance === null) {
+    const failureLogs = await running.client.runs.logs(run.id, { limit: 1_000 })
     throw new ProofError("RUN_PROOF_FAILED", "The release-proof run did not succeed", {
       status: run.status,
       error: run.error,
+      eventTypes: failureLogs.items.map(({ eventType }) => eventType),
+      diagnostics: failureLogs.items
+        .filter(({ stream }) => stream === "stderr")
+        .map(({ eventType, data }) => ({ eventType, data: data.slice(0, 2_000) })),
     })
   }
   const logs = await running.client.runs.logs(run.id, { limit: 1_000 })
@@ -251,16 +252,104 @@ try {
   ) {
     throw new ProofError("CLEANUP_EVIDENCE_INCOMPLETE", "Runtime cleanup state is incomplete")
   }
-  await assertExpectedNotFound(running.client)
-  const telemetryHealth = await running.flushTelemetry()
-  const telemetry = telemetryCollector.evidence(telemetryHealth, running.operationalLogs, [
-    prompt,
-    agentResponse,
-    previewText,
-  ])
-  await assertPrivateValuesAbsent(dataDir, privateValues)
+  const firstSessionToken = roundTripToken.slice(0, 24)
+  const secondSessionToken = roundTripToken.slice(24, 48)
+  const session = await running.client.sessions.create(
+    {
+      workspace: { type: "files", files: [...proofAgent.workspaceFiles] },
+      agentType: proofAgent.type,
+      provider,
+      env: { ...proofAgent.environment },
+      secretRefs: { ...proofAgent.secretReferences },
+      idleTimeoutMs: 10 * 60_000,
+    },
+    { idempotencyKey: `release-session:${provider}:${proofAgent.type}:${revision.commit}` },
+  )
+  const readySession = await running.client.sessions.waitForStatus(session.id, "idle", {
+    timeoutMs: proofAgent.waitTimeoutMs,
+    pollIntervalMs: 50,
+  })
+  if (readySession.agentSessionId === null) {
+    throw new ProofError("SESSION_READY_EVIDENCE_MISSING", "The ACP session identity is missing")
+  }
+  const firstSessionPrompt =
+    proofAgent.type === "demo"
+      ? `Return both session tokens: ${firstSessionToken} ${secondSessionToken}`
+      : `This is a two-turn continuity check. Memorize the opaque identifier ${firstSessionToken} for my next message. Do not use tools. Your entire response must be exactly: STORED ${firstSessionToken}`
+  const firstTurn = await running.client.sessions.send(session.id, firstSessionPrompt, {
+    idempotencyKey: `release-session-first:${provider}:${proofAgent.type}:${revision.commit}`,
+    timeoutMs: proofAgent.timeoutMs,
+  })
+  const completedFirstTurn = await running.client.sessions.waitForTurn(session.id, firstTurn.id, {
+    timeoutMs: proofAgent.waitTimeoutMs,
+    pollIntervalMs: 50,
+  })
+  if (completedFirstTurn.status !== "succeeded") {
+    throw new ProofError("SESSION_FIRST_TURN_FAILED", "The first durable turn did not succeed", {
+      status: completedFirstTurn.status,
+      error: completedFirstTurn.error,
+    })
+  }
+  await running.client.sessions.waitForStatus(session.id, "idle", {
+    timeoutMs: 30_000,
+    pollIntervalMs: 50,
+  })
+  const firstSessionEvents = await running.client.sessions.events(session.id, { limit: 1_000 })
+  const firstTimeline = sessionTimelineFromEvents(firstSessionEvents.items)
+  const firstTurnResponse = firstTimeline.messages
+    .filter(({ role, turnId }) => role === "agent" && turnId === firstTurn.id)
+    .map(({ text }) => text)
+    .join("")
+  if (
+    firstTurnResponse.trim().length === 0 ||
+    (proofAgent.type !== "demo" && !firstTurnResponse.includes(firstSessionToken))
+  ) {
+    throw new ProofError(
+      "SESSION_FIRST_TURN_EVIDENCE_MISSING",
+      "The first durable turn response is missing",
+      {
+        eventTypes: firstSessionEvents.items.map(({ type }) => type),
+        updateKinds: firstSessionEvents.items.flatMap((event) => {
+          if (event.type !== "turn.update") return []
+          const update = event.payload["update"]
+          if (typeof update !== "object" || update === null || Array.isArray(update)) return []
+          const kind = Reflect.get(update, "sessionUpdate")
+          return typeof kind === "string" ? [kind] : []
+        }),
+        messages: firstTimeline.messages.map(({ id, role, turnId, text }) => ({
+          id,
+          role,
+          turnId,
+          expectedTurnId: firstTurn.id,
+          bytes: new TextEncoder().encode(text).byteLength,
+        })),
+        agentMessageShapes: firstSessionEvents.items.flatMap((event) => {
+          if (event.type !== "turn.update") return []
+          const update = event.payload["update"]
+          if (typeof update !== "object" || update === null || Array.isArray(update)) return []
+          if (Reflect.get(update, "sessionUpdate") !== "agent_message_chunk") return []
+          const content = Reflect.get(update, "content")
+          return [
+            {
+              updateKeys: Object.keys(update),
+              contentType:
+                typeof content === "object" && content !== null && !Array.isArray(content)
+                  ? Reflect.get(content, "type")
+                  : typeof content,
+              contentKeys:
+                typeof content === "object" && content !== null && !Array.isArray(content)
+                  ? Object.keys(content)
+                  : [],
+            },
+          ]
+        }),
+      },
+    )
+  }
 
   const runId = run.id
+  const sessionId = session.id
+  const agentSessionId = readySession.agentSessionId
   const deploymentId = deployment.id
   const deploymentUrl = deployment.url
   const provenanceDigest = run.executionProvenance.digest
@@ -282,6 +371,85 @@ try {
   ) {
     throw new ProofError("RESTART_PROOF_FAILED", "Durable evidence changed after restart")
   }
+
+  const recoveredSession = await running.client.sessions.waitForStatus(sessionId, "idle", {
+    timeoutMs: proofAgent.waitTimeoutMs,
+    pollIntervalMs: 50,
+  })
+  if (recoveredSession.agentSessionId !== agentSessionId) {
+    throw new ProofError(
+      "SESSION_CONTINUITY_CHANGED",
+      "The ACP session identity changed across control-plane restart",
+    )
+  }
+  const secondSessionPrompt =
+    proofAgent.type === "demo"
+      ? `Return both session tokens again: ${firstSessionToken} ${secondSessionToken}`
+      : `Continue the continuity check without using tools. Your entire response must be exactly two whitespace-separated identifiers: first the opaque identifier from my previous message, then ${secondSessionToken}. Do not add labels, punctuation, or explanation.`
+  const secondTurn = await running.client.sessions.send(sessionId, secondSessionPrompt, {
+    idempotencyKey: `release-session-second:${provider}:${proofAgent.type}:${revision.commit}`,
+    timeoutMs: proofAgent.timeoutMs,
+  })
+  const completedSecondTurn = await running.client.sessions.waitForTurn(sessionId, secondTurn.id, {
+    timeoutMs: proofAgent.waitTimeoutMs,
+    pollIntervalMs: 50,
+  })
+  if (completedSecondTurn.status !== "succeeded") {
+    throw new ProofError("SESSION_SECOND_TURN_FAILED", "The second durable turn did not succeed", {
+      status: completedSecondTurn.status,
+      error: completedSecondTurn.error,
+    })
+  }
+  const sessionEvents = await running.client.sessions.events(sessionId, { limit: 1_000 })
+  const sessionTimeline = sessionTimelineFromEvents(sessionEvents.items)
+  const secondTurnResponse = sessionTimeline.messages
+    .filter(({ role, turnId }) => role === "agent" && turnId === secondTurn.id)
+    .map(({ text }) => text)
+    .join("")
+  if (
+    !secondTurnResponse.includes(firstSessionToken) ||
+    !secondTurnResponse.includes(secondSessionToken)
+  ) {
+    throw new ProofError(
+      "SESSION_CONTINUITY_EVIDENCE_MISSING",
+      "The second turn did not preserve the first-turn token across restart",
+    )
+  }
+  await running.client.sessions.close(sessionId)
+  await running.client.sessions.waitForStatus(sessionId, "closed", {
+    timeoutMs: 30_000,
+    pollIntervalMs: 50,
+  })
+  const sessionCleanupAudit = await waitForCorrelatedAudit(
+    running.client,
+    "sessionId",
+    sessionId,
+    "runtime.destroy",
+    30_000,
+  )
+  const sessionRuntimeEvidence = running.application.store.getSessionRuntimeLease(sessionId)
+  if (
+    sessionRuntimeEvidence === null ||
+    sessionRuntimeEvidence.cleanupStatus !== "succeeded" ||
+    sessionRuntimeEvidence.destroyedAt === null
+  ) {
+    throw new ProofError(
+      "SESSION_CLEANUP_EVIDENCE_INCOMPLETE",
+      "Session runtime cleanup state is incomplete",
+    )
+  }
+  await assertExpectedNotFound(running.client)
+  const telemetryHealth = await running.flushTelemetry()
+  const telemetry = telemetryCollector.evidence(telemetryHealth, running.operationalLogs, [
+    prompt,
+    agentResponse,
+    previewText,
+    firstSessionPrompt,
+    firstTurnResponse,
+    secondSessionPrompt,
+    secondTurnResponse,
+  ])
+  await assertPrivateValuesAbsent(dataDir, privateValues)
   await running.close()
   running = null
 
@@ -305,13 +473,17 @@ try {
   const restoredDeployment = await running.client.deployments.get(deploymentId)
   const restoredArtifact = await running.client.artifacts.get(artifact.id)
   const restoredAudit = await running.client.audit.list({ resourceId: runId, limit: 100 })
+  const restoredSession = await running.client.sessions.get(sessionId)
+  const restoredTurns = await running.client.sessions.turns(sessionId, { limit: 100 })
   await assertPreview(deploymentUrl, previewText)
   if (
     restoredRun.status !== "succeeded" ||
     restoredRun.executionProvenance?.digest !== provenanceDigest ||
     restoredDeployment.status !== "succeeded" ||
     restoredArtifact.artifact.digest !== artifact.digest ||
-    restoredAudit.items.length !== recoveredAudit.items.length
+    restoredAudit.items.length !== recoveredAudit.items.length ||
+    restoredSession.status !== "closed" ||
+    restoredTurns.items.length !== 2
   ) {
     throw new ProofError("RESTORE_PROOF_FAILED", "Restored durable evidence is incomplete")
   }
@@ -358,6 +530,15 @@ try {
       agentProducedArtifact: true,
       sdkArtifactDownloadVerified: true,
       sdkDeploymentVerified: true,
+    },
+    session: {
+      id: sessionId,
+      turns: 2,
+      events: sessionEvents.items.length,
+      agentSessionIdentityPreserved: true,
+      controlPlaneRestartBetweenTurns: true,
+      continuityTokenVerified: true,
+      cleanupAuditId: sessionCleanupAudit.id,
     },
     telemetry,
     run: {
@@ -435,6 +616,8 @@ function proofConfig(input: {
     runnerPath: input.runnerPath,
     agentCatalogPath: input.catalogPath,
     defaultProvider: input.provider,
+    runConcurrency: 2,
+    sessionConcurrency: 2,
     localProvider: { enabled: input.provider === "local", unsafeHostExecution: false },
     secretSourceCatalog: input.secretSourceCatalog,
     logLevel: "error",
@@ -739,10 +922,20 @@ async function waitForAudit(
   action: string,
   timeoutMs: number,
 ) {
+  return waitForCorrelatedAudit(meanwhile, "runId", runId, action, timeoutMs)
+}
+
+async function waitForCorrelatedAudit(
+  meanwhile: Meanwhile,
+  correlation: "runId" | "sessionId",
+  id: string,
+  action: string,
+  timeoutMs: number,
+) {
   const deadline = performance.now() + timeoutMs
   while (performance.now() < deadline) {
     const page = await meanwhile.audit.list({ action, limit: 100 })
-    const record = page.items.find(({ metadata }) => metadata["runId"] === runId)
+    const record = page.items.find(({ metadata }) => metadata[correlation] === id)
     if (record !== undefined) return record
     await Bun.sleep(100)
   }
@@ -803,8 +996,8 @@ function selectedProvider(arguments_: readonly string[]): ProofProvider {
 function selectedProofAgent(arguments_: readonly string[]): ProofAgent {
   const option = arguments_.find((argument) => argument.startsWith("--agent="))
   const value = option?.slice("--agent=".length) ?? "demo"
-  if (value !== "demo" && value !== "claude-code") {
-    throw new ProofError("INVALID_ARGUMENT", "Agent must be demo or claude-code")
+  if (value !== "demo" && value !== "codex" && value !== "claude-code" && value !== "pi") {
+    throw new ProofError("INVALID_ARGUMENT", "Agent must be demo, codex, claude-code, or pi")
   }
   return value
 }
@@ -838,68 +1031,35 @@ async function prepareProofAgent(
     }
   }
 
-  if (provider !== "cloudflare") {
-    throw new ProofError(
-      "INVALID_ARGUMENT",
-      "The release proof uses the Cloudflare image for its pinned Claude ACP toolchain; use bun run demo:claude for the local proof",
-    )
-  }
-  const configured = await loadClaudeRunEnvironment()
-  const secretValues = { ...configured.secretValues }
-  const previous = new Map<string, string | undefined>()
-  for (const [name, value] of Object.entries(secretValues)) {
-    previous.set(name, Bun.env[name])
-    Bun.env[name] = value
-  }
+  const toolchain = await prepareAgentToolchain(type, provider, join(root, "agent-tools"))
   const catalogPath = join(root, "agents.json")
-  await Bun.write(
-    catalogPath,
-    JSON.stringify({
-      version: 1,
-      agents: {
-        "claude-code": {
-          transport: "stdio",
-          executable: "claude-agent-acp",
-          args: [],
-          workingDirectory: "workspace",
-          capabilities: { filesystem: true, terminal: true },
-          envNames: Object.keys(configured.environment),
-          secretEnvNames: Object.keys(configured.secretReferences),
-        },
-      },
-    }),
-  )
+  await Bun.write(catalogPath, JSON.stringify(agentCatalog(toolchain)))
+
+  const displayName = type === "codex" ? "Codex" : type === "claude-code" ? "Claude Code" : "Pi"
+  const proofText = (token: string) => `Meanwhile ${provider} ${displayName} proof ${token}`
 
   return {
     type,
-    adapter: `${CLAUDE_ADAPTER_NAME}@${CLAUDE_ADAPTER_VERSION}`,
-    runtime: `${CLAUDE_SDK_NAME}@${CLAUDE_SDK_VERSION}`,
+    adapter: toolchain.adapter,
+    runtime: toolchain.runtime,
     catalogPath,
-    environment: configured.environment,
-    secretReferences: configured.secretReferences,
-    secretValues: Object.values(secretValues),
+    environment: toolchain.environment,
+    secretReferences: toolchain.secretReferences,
+    secretValues: toolchain.secretValues,
     workspaceFiles: [
       {
         path: "README.md",
         contentBase64: encode(
-          "This workspace is a live Meanwhile Cloudflare Sandbox proof over ACP.\n",
+          `This workspace is a live Meanwhile ${provider} proof for ${displayName} over ACP.\n`,
         ),
       },
     ],
     timeoutMs: 4 * 60_000,
-    waitTimeoutMs: 6 * 60_000,
+    waitTimeoutMs: provider === "cloudflare" ? 8 * 60_000 : 6 * 60_000,
     prompt: (token) =>
-      `Create site/index.html as a complete HTML document containing the exact visible text 'Meanwhile Cloudflare Claude proof ${token}'. Do not modify any other file. Finish after saving it.`,
-    previewText: (token) => `Meanwhile Cloudflare Claude proof ${token}`,
-    restore() {
-      for (const [name, value] of previous) {
-        if (value === undefined) delete Bun.env[name]
-        else Bun.env[name] = value
-      }
-      for (const name of Object.keys(secretValues)) {
-        secretValues[name] = ""
-      }
-    },
+      `Create site/index.html as a complete HTML document containing the exact visible text '${proofText(token)}'. Do not modify any other file. Finish after saving it.`,
+    previewText: proofText,
+    restore: () => toolchain.restore(),
   }
 }
 
@@ -922,7 +1082,7 @@ function sha256(bytes: Uint8Array): string {
 
 function normalizeProofError(error: unknown): ProofError {
   if (error instanceof ProofError) return error
-  if (error instanceof ClaudeSettingsError) return new ProofError(error.code, error.message)
+  if (error instanceof AgentToolchainError) return new ProofError(error.code, error.message)
   if (error instanceof MeanwhileError)
     return new ProofError(error.code, error.message, error.details)
   return new ProofError("RELEASE_PROOF_FAILED", "Release proof failed")

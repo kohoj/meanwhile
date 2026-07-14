@@ -327,6 +327,10 @@ Concurrent input is explicit policy:
 
 The runtime lease persists opaque runtime/process handles, provider and runner cursors, command sequence, cleanup state, attempts, safe error, and retry schedule. Operational sessions are never cleanup-eligible. Closing is idempotent, terminalizes unfinished turns, and schedules durable bounded-retry destruction. A service restart reconnects the same process, replays and exactly deduplicates runner evidence, resumes undispatched commands, and preserves the same ACP agent-session identity when provider capabilities permit.
 
+New run and session admission are independently bounded. Recoverable sessions are always reattached even when their count exceeds new-session admission capacity; abandoning supervision to satisfy a concurrency number is not a valid optimization. Session cleanup uses a separate bounded lane so long-lived sessions cannot starve runtime destruction. Public history uses keyset/cursor pagination, and one turn is directly addressable without scanning prior turns.
+
+Timeline projection identity includes turn, message role, and ACP message ID. An agent may reuse one ACP message ID for thought and final output; those are distinct presentation facts and must never overwrite one another.
+
 An idle timeout closes the session and releases compute; it does not claim suspend/resume. Interactive permission approval is not implemented until the runner command protocol gains an explicit permission-response command and policy model.
 
 ## 7. Workspace, artifacts, and deployment
@@ -367,6 +371,7 @@ GET  /sessions
 GET  /sessions/:id
 POST /sessions/:id/turns
 GET  /sessions/:id/turns
+GET  /sessions/:id/turns/:turnId
 GET  /sessions/:id/events
 POST /sessions/:id/interrupt
 POST /sessions/:id/close
@@ -488,14 +493,15 @@ The bridge:
 - starts the fixed runner as a background process and delivers one validated runner spec as bounded stdin data; the pinned SDK lacks direct initial-stdin support, so the current bridge uses a random provider-private staging file, quoted redirection, and unconditional deletion without placing prompt data in argv;
 - supports multi-turn sessions through a capability-gated provider-private mailbox because the pinned SDK has no ongoing stdin primitive; a Durable Object first binds each process sequence to one secret-safe command fingerprint, exact retries are idempotent, conflicting reuse fails closed, and only then is the validated command published to the sandbox;
 - exposes cursor-bearing live/replayed stdout frames and separate safe diagnostics;
-- waits for bounded quiescence of the SDK's accumulated logs after terminal process state before publishing the exit cursor;
+- wraps each process with provider-private stdout/stderr closure markers and withholds the irreversible exit cursor until both markers are visible; a missing terminal marker is a retryable provider-evidence failure, never an excuse to publish a guessed tail;
 - retries only retryable transport failures with bounded, abortable backoff while preserving operation identity and, for events, the same durable cursor;
 - advertises only the hard termination primitive the pinned SDK actually implements; control-plane cancellation then stops remaining sandbox processes through the runtime lifecycle;
 - makes stop/destroy idempotent and explicitly destroys rather than confusing sleep with cleanup;
 - exposes health without credentials;
-- pins Sandbox npm, the custom image, standalone Bun runner, and bundled real-agent adapter together;
-- uses `standard-1` for the supported Claude proof because `lite` cannot hold the proven agent toolchain;
-- passes the shared provider contract, a gated real-account lifecycle test, and a real Claude generation/download/deployment proof.
+- pins Sandbox npm, the custom image, standalone Bun runner, and bundled real-agent toolchains together;
+- uses `standard-1` because the proven coding-agent toolchains exceed `lite` memory; the reference compatibility image may bundle multiple agents, while production profile images remain an adapter-level packaging choice;
+- materializes structured Codex authentication from individually redacted secret values into a process-private home and removes it on process exit;
+- passes the shared provider contract, a gated real-account lifecycle test, and real Codex, Claude Code, and Pi generation/session/download/deployment proofs.
 
 Do not import Cloudflare SDK types into core contracts. Do not use a PTY, repeated process launches, or remote ACP to emulate a session. Do not claim same-sandbox runner files, mailbox files, or environment variables are protected from the agent.
 
@@ -571,6 +577,7 @@ test/live/                        credential-gated remote proof
 test/fixtures/                    deterministic ACP agent and fakes
 scripts/demo.ts                   readable SDK create → logs → artifacts → deploy proof
 scripts/demo-environment.ts       hermetic local/live-agent proof setup and teardown
+scripts/agent-toolchains.ts       exact local/remote agent proof toolchains
 scripts/container-smoke.ts        packaged-image agent and deployment proof
 scripts/release-proof.ts          run → deploy → cleanup → restart → backup release evidence
 docs/                             architecture, provider authoring, operations
@@ -620,7 +627,7 @@ Tests must prove:
 - sandbox clock skew cannot control durable log timestamps or runner timeout duration, and the ACP child timezone is UTC;
 - the no-account demo completes create → run → logs → artifact → local deployment;
 - the release proof sends a revision-bound prompt through ACP, downloads the immutable agent-written artifact through the public SDK, deploys it through the SDK, verifies the returned URL and semantic OTLP signals, byte-scans live and backed-up durable data for exact private values, then proves cleanup, restart, hashed backup, restore, and a second boot;
-- the Cloudflare Claude proof requires real model generation inside the sandbox; a deterministic ACP fixture, health response, or lifecycle-only test is not accepted as equivalent evidence;
+- each Cloudflare agent proof requires real model generation and multi-turn continuity inside the sandbox; a deterministic ACP fixture, health response, or lifecycle-only test is not accepted as equivalent evidence;
 - pinned OTel SDK/exporter packages initialize and export under Bun.
 
 Assert ordering, error codes, and side effects with injected clocks and deterministic adapters. Do not sleep and hope. A mock proves replaceability; only the gated live test proves real provider integration.
@@ -640,9 +647,16 @@ bun run demo:codex
 bun run demo:codex:serve
 bun run demo:claude
 bun run demo:claude:serve
+bun run demo:pi
+bun run demo:pi:serve
 bun run proof:release
+bun run proof:release:local:codex
+bun run proof:release:local:claude
+bun run proof:release:local:pi
 bun run proof:release:cloudflare
+bun run proof:release:cloudflare:codex
 bun run proof:release:cloudflare:claude
+bun run proof:release:cloudflare:pi
 bun run doctor
 bun run runner:build
 bun run cli -- sessions create --agent <name> --provider <name> --files <dir>
@@ -720,11 +734,11 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 ## 18. Current status
 
 - The Bun control plane, SQLite store/migrations and data-root lifecycle, one-shot and multi-turn ACP runner, durable run/session event journals, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, complete owner-facing API/SDK/CLI resources, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
-- Durable sessions keep one ACP identity across ordered turns, explicit conflict policies, interrupt and per-turn timeout, process replay, control-plane restart, exact evidence deduplication, and independent runtime-lease cleanup. Local behavior and the Cloudflare bridge protocol are contract-tested; the exact branch still requires an explicit credential-gated live Cloudflare session proof before that remote path is called release-proven.
+- Durable sessions keep one ACP identity across ordered turns, explicit conflict policies, interrupt and per-turn timeout, process replay, control-plane restart, exact evidence deduplication, and independent runtime-lease cleanup. Local and Cloudflare paths are proven against the same public SDK and runner contracts.
 - The no-account demo proves create → ACP run → durable logs/status → SDK artifact download → SDK deployment → isolated preview. The release proof binds exact agent output to the revision, verifies the immutable downloaded bytes and deployed URL, validates telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
 - Authenticated local compatibility proofs run Codex, Claude Code, and Pi through pinned ACP adapters, require agent-written output, and complete artifact promotion plus preview verification without persisting local credentials.
-- The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner and Claude ACP adapter. The credential-gated acceptance proof requires Claude to generate a file remotely, then uses the public SDK to download, deploy, and fetch it while verifying telemetry, persistence, backup/restore, and cleanup.
+- The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. Each credential-gated acceptance proof requires real remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup.
 - Version `0.1.1` is the current tagged compatibility baseline, not a blanket production-support promise. Current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

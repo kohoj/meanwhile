@@ -160,7 +160,7 @@ const reduceAgentUpdate = <Timeline extends TimelineProjection>(
     const text = textContent(update["content"])
     if (text === null) return timeline
     const messageId = string(update["messageId"]) ?? `${messageRole}-message`
-    const id = turnId === null ? messageId : `${identityPrefix}:${messageId}`
+    const id = `${identityPrefix}:${messageRole}:${messageId}`
     return {
       ...timeline,
       messages: appendMessage(timeline.messages, id, messageRole, text, sequence, turnId),

@@ -44,6 +44,7 @@ test("the route inventory is exact and every control operation fails closed", as
     "/sessions/{id}/events",
     "/sessions/{id}/interrupt",
     "/sessions/{id}/turns",
+    "/sessions/{id}/turns/{turnId}",
   ]
   expect(Object.keys(specification.paths).sort()).toEqual(expectedPaths)
   expect(specification.security).toEqual([{ BearerAuth: [] }])
@@ -60,10 +61,13 @@ test("the route inventory is exact and every control operation fails closed", as
     if (publicPaths.has(path)) continue
     for (const method of httpMethods) {
       if (pathItem[method] === undefined) continue
-      const response = await harness.application.app.request(path.replace("{id}", resourceId), {
-        method: method.toUpperCase(),
-        headers: { "Content-Type": "application/json" },
-      })
+      const response = await harness.application.app.request(
+        path.replace("{id}", resourceId).replace("{turnId}", resourceId),
+        {
+          method: method.toUpperCase(),
+          headers: { "Content-Type": "application/json" },
+        },
+      )
       expect(response.status).toBe(401)
       expect(response.headers.get("Cache-Control")).toBe("private, no-store")
       expect(await response.json()).toMatchObject({ error: { code: "UNAUTHENTICATED" } })

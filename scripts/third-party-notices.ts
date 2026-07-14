@@ -1,3 +1,5 @@
+import { realpath } from "node:fs/promises"
+
 type PackageManifest = {
   readonly name: string
   readonly version: string
@@ -77,7 +79,7 @@ async function renderNotices(): Promise<string> {
     throw new Error(`notice generation requires Bun ${bunVersion}, received ${Bun.version}`)
   }
   const bunLicensePath = `${repositoryRoot}/licenses/BUN-${bunVersion}-LICENSE.md`
-  const bunLicense = (await Bun.file(bunLicensePath).text()).trim()
+  const bunLicense = normalizeNoticeText(await Bun.file(bunLicensePath).text())
 
   for (const scope of packageScopes) {
     const manifest = await readManifest(scope.packagePath)
@@ -93,6 +95,11 @@ async function renderNotices(): Promise<string> {
 
       const packageRoot = await resolvePackageRoot(dependency.name, dependency.resolveFrom)
       const packageManifest = await readManifest(`${packageRoot}/package.json`)
+      if (!packageManifest.name || !packageManifest.version) {
+        throw new Error(
+          `resolved ${dependency.name} to a package manifest without name/version at ${packageRoot}`,
+        )
+      }
       const id = `${packageManifest.name}@${packageManifest.version}`
       if (visited.has(id)) continue
       visited.add(id)
@@ -196,7 +203,9 @@ async function renderNotices(): Promise<string> {
 
 async function resolvePackageRoot(name: string, resolveFrom: string): Promise<string> {
   const resolved = await tryResolvePackageRoot(name, resolveFrom)
-  if (resolved === undefined) throw new Error(`could not locate package.json for ${name}`)
+  if (resolved === undefined) {
+    throw new Error(`could not locate package.json for ${name} required from ${resolveFrom}`)
+  }
   return resolved
 }
 
@@ -204,6 +213,15 @@ async function tryResolvePackageRoot(
   name: string,
   resolveFrom: string,
 ): Promise<string | undefined> {
+  let directory = resolveFrom
+  while (true) {
+    const installed = `${directory}/node_modules/${name}`
+    if (await Bun.file(`${installed}/package.json`).exists()) return realpath(installed)
+    const parent = parentPath(directory)
+    if (parent === directory) break
+    directory = parent
+  }
+
   try {
     let candidate = Bun.resolveSync(name, resolveFrom)
     while (!(await Bun.file(`${candidate}/package.json`).exists())) {
@@ -211,20 +229,12 @@ async function tryResolvePackageRoot(
       if (parent === candidate) break
       candidate = parent
     }
-    if (await Bun.file(`${candidate}/package.json`).exists()) return candidate
+    if (await Bun.file(`${candidate}/package.json`).exists()) return realpath(candidate)
   } catch {
     // Target-platform optional packages can be present on disk while the host
-    // resolver intentionally refuses them. Fall through to an exact lookup.
+    // resolver intentionally refuses them.
   }
-
-  let directory = resolveFrom
-  while (true) {
-    const installed = `${directory}/node_modules/${name}`
-    if (await Bun.file(`${installed}/package.json`).exists()) return installed
-    const parent = parentPath(directory)
-    if (parent === directory) return undefined
-    directory = parent
-  }
+  return undefined
 }
 
 async function readManifest(path: string): Promise<PackageManifest> {
@@ -234,9 +244,18 @@ async function readManifest(path: string): Promise<PackageManifest> {
 async function readLicenseText(packageRoot: string): Promise<string | undefined> {
   for (const candidate of licenseCandidates) {
     const file = Bun.file(`${packageRoot}/${candidate}`)
-    if (await file.exists()) return (await file.text()).replaceAll("\r\n", "\n").trim()
+    if (await file.exists()) return normalizeNoticeText(await file.text())
   }
   return undefined
+}
+
+function normalizeNoticeText(value: string): string {
+  return value
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim()
 }
 
 function sourceUrl(manifest: PackageManifest): string | undefined {

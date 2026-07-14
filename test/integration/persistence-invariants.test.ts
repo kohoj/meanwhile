@@ -118,6 +118,11 @@ describe("bootstrap identity", () => {
 
       expect(store.bootstrapIdentity(input)).toEqual({ created: true })
       expect(store.bootstrapIdentity(input)).toEqual({ created: false })
+      store.touchApiKey(input.apiKeyId, "2026-07-13T00:01:00.000Z")
+      store.touchApiKey(input.apiKeyId, "2026-07-13T00:01:30.000Z")
+      expect(store.listApiKeys(input.ownerId)[0]?.lastUsedAt).toBe("2026-07-13T00:01:00.000Z")
+      store.touchApiKey(input.apiKeyId, "2026-07-13T00:02:00.000Z")
+      expect(store.listApiKeys(input.ownerId)[0]?.lastUsedAt).toBe("2026-07-13T00:02:00.000Z")
       expect(
         store
           .listAudit(input.ownerId)

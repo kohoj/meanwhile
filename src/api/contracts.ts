@@ -641,9 +641,15 @@ export const SessionEventSchema = z.discriminatedUnion("type", [
 ])
 
 export const AgentSessionResponseSchema = z.object({ session: AgentSessionSchema })
-export const AgentSessionPageSchema = z.object({ items: z.array(AgentSessionSchema).readonly() })
+export const AgentSessionPageSchema = z.object({
+  items: z.array(AgentSessionSchema).readonly(),
+  nextCursor: z.string().nullable(),
+})
 export const SessionTurnResponseSchema = z.object({ turn: SessionTurnSchema })
-export const SessionTurnPageSchema = z.object({ items: z.array(SessionTurnSchema).readonly() })
+export const SessionTurnPageSchema = z.object({
+  items: z.array(SessionTurnSchema).readonly(),
+  nextCursor: z.number().int().positive().nullable(),
+})
 export const SessionEventPageSchema = z.object({
   items: z.array(SessionEventSchema).readonly(),
   nextCursor: z.number().int().positive().nullable(),

@@ -173,17 +173,31 @@ export class SessionService {
     return { session, replayed: !created }
   }
 
-  list(ownerId: string, limit: number): readonly AgentSession[] {
-    return this.#store.listAgentSessions(ownerId, limit)
+  list(
+    ownerId: string,
+    options: { readonly limit: number; readonly before?: string },
+  ): { readonly items: readonly AgentSession[]; readonly nextCursor: string | null } {
+    return this.#store.listAgentSessions(ownerId, options)
   }
 
   get(ownerId: string, sessionId: string): AgentSession {
     return this.#requireSession(ownerId, sessionId)
   }
 
-  turns(ownerId: string, sessionId: string): readonly SessionTurn[] {
+  getTurn(ownerId: string, sessionId: string, turnId: string): SessionTurn {
     this.#requireSession(ownerId, sessionId)
-    return this.#store.listSessionTurns(ownerId, sessionId)
+    const turn = this.#store.getSessionTurn(ownerId, sessionId, turnId)
+    if (turn === null) throw new AppError({ code: "NOT_FOUND", message: "Turn not found" })
+    return turn
+  }
+
+  turns(
+    ownerId: string,
+    sessionId: string,
+    options: { readonly after: number; readonly limit: number },
+  ): { readonly items: readonly SessionTurn[]; readonly nextCursor: number | null } {
+    this.#requireSession(ownerId, sessionId)
+    return this.#store.listSessionTurns(ownerId, sessionId, options.after, options.limit)
   }
 
   send(

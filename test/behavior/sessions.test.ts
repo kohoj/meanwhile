@@ -83,6 +83,7 @@ describe("durable interactive agent sessions", () => {
     harness = await createApplicationHarness()
     const created = await createSession(harness, {}, "owner-a-session")
     await waitForSession(harness, created.id, "idle")
+    const ownedTurn = await sendTurn(harness, created.id, "private", "reject", "owner-a-turn")
     const ownerB = crypto.randomUUID()
     const keyB = await issueApiKey()
     const createdAt = new Date().toISOString()
@@ -109,6 +110,7 @@ describe("durable interactive agent sessions", () => {
     for (const [path, init] of [
       [`/sessions/${created.id}`, {}],
       [`/sessions/${created.id}/turns`, {}],
+      [`/sessions/${created.id}/turns/${ownedTurn.id}`, {}],
       [`/sessions/${created.id}/events`, {}],
       [`/sessions/${created.id}/interrupt`, { method: "POST" }],
       [`/sessions/${created.id}/close`, { method: "POST" }],
@@ -125,9 +127,38 @@ describe("durable interactive agent sessions", () => {
       expect(response.status).toBe(404)
       expect(await response.json()).toMatchObject({ error: { code: "NOT_FOUND" } })
     }
-    expect(await (await asOwnerB("/sessions")).json()).toEqual({ items: [] })
+    expect(await (await asOwnerB("/sessions")).json()).toEqual({ items: [], nextCursor: null })
 
     await closeSession(harness, created.id)
+  })
+
+  test("bounds session admission and paginates durable session history", async () => {
+    harness = await createApplicationHarness({ sessionConcurrency: 1 })
+    const first = await createSession(harness, {}, "session-capacity-first")
+    const second = await createSession(harness, {}, "session-capacity-second")
+
+    await waitForSession(harness, first.id, "idle")
+    await Bun.sleep(100)
+    expect((await getSession(harness, second.id)).status).toBe("queued")
+
+    const firstPage = (await (await harness.request("/sessions?limit=1")).json()) as {
+      items: AgentSession[]
+      nextCursor: string | null
+    }
+    expect(firstPage.items).toHaveLength(1)
+    expect(firstPage.nextCursor).not.toBeNull()
+    const secondPage = (await (
+      await harness.request(`/sessions?limit=1&before=${firstPage.nextCursor}`)
+    ).json()) as { items: AgentSession[]; nextCursor: string | null }
+    expect(secondPage.items).toHaveLength(1)
+    expect(new Set([...firstPage.items, ...secondPage.items].map(({ id }) => id))).toEqual(
+      new Set([first.id, second.id]),
+    )
+    expect(secondPage.nextCursor).toBeNull()
+
+    await closeSession(harness, first.id)
+    await waitForSession(harness, second.id, "idle")
+    await closeSession(harness, second.id)
   })
 
   test("makes session and turn retries exact while keeping conflict policy explicit", async () => {
@@ -165,6 +196,21 @@ describe("durable interactive agent sessions", () => {
     expect(
       (await waitForTurns(harness, created.id, ["succeeded", "succeeded"])).map((turn) => turn.id),
     ).toEqual([first.id, queued.id])
+
+    const firstPage = (await (
+      await harness.request(`/sessions/${created.id}/turns?limit=1`)
+    ).json()) as { items: SessionTurn[]; nextCursor: number | null }
+    expect(firstPage.items.map(({ id }) => id)).toEqual([first.id])
+    expect(firstPage.nextCursor).toBe(1)
+    const secondPage = (await (
+      await harness.request(`/sessions/${created.id}/turns?after=${firstPage.nextCursor}&limit=1`)
+    ).json()) as { items: SessionTurn[]; nextCursor: number | null }
+    expect(secondPage.items.map(({ id }) => id)).toEqual([queued.id])
+    expect(secondPage.nextCursor).toBeNull()
+    const direct = (await (
+      await harness.request(`/sessions/${created.id}/turns/${queued.id}`)
+    ).json()) as { turn: SessionTurn }
+    expect(direct.turn.id).toBe(queued.id)
 
     await closeSession(harness, created.id)
   })
@@ -316,6 +362,14 @@ async function waitForSession(
     await Bun.sleep(20)
   }
   throw new Error(`Session did not reach ${status}`)
+}
+
+async function getSession(
+  application: ApplicationHarness,
+  sessionId: string,
+): Promise<AgentSession> {
+  const response = await application.request(`/sessions/${sessionId}`)
+  return ((await response.json()) as { session: AgentSession }).session
 }
 
 async function waitForTurn(

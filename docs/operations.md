@@ -34,6 +34,8 @@ Bun loads local `.env` files for development. Production should inject environme
 | `MEANWHILE_RUNNER_PATH` | Yes outside source development | Fixed standalone runner executable |
 | `MEANWHILE_AGENT_CATALOG` | No | Agent catalog path; defaults to `config/agents.json` |
 | `MEANWHILE_DEFAULT_PROVIDER` | No | Registry name used when a request omits an allowed provider |
+| `MEANWHILE_RUN_CONCURRENCY` | No | Maximum concurrently admitted one-shot executions; defaults to `2` |
+| `MEANWHILE_SESSION_CONCURRENCY` | No | Maximum concurrently admitted new session leases and session cleanup operations; defaults to `2`; already-live sessions are always reattached during recovery |
 | `MEANWHILE_LOCAL_PROVIDER` | No | `auto`, `enabled`, or `disabled`; `auto` admits new local runs only for a loopback API host while the internal adapter remains available for cleanup/reconciliation |
 | `MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER` | Only for explicit non-loopback local execution | Acknowledges that authenticated tenants can execute as the control-plane OS user |
 | `MEANWHILE_SECRET_ENV_ALLOWLIST` | For local-bootstrap `env://` sources | Comma-separated validated names available only to the bootstrap owner; source and target must match, reserved names are forbidden, and empty denies all |
@@ -216,7 +218,7 @@ Never manually delete database runtime rows to silence the backlog. Diagnose pro
 
 ## Cloudflare bridge operations
 
-The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and real-agent adapter are pinned as one compatibility unit. The custom image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the proven Claude ACP toolchain requirement.
+The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and real-agent toolchains are pinned as one compatibility unit. The reference image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the proven coding-agent process set. A production deployment may derive smaller agent-profile images while preserving the same adapter and provenance contract.
 
 The pinned SDK has no ongoing process-stdin primitive. Durable sessions therefore use a bridge-owned sequential mailbox: Durable Object state binds each `(process, sequence)` to one command fingerprint before sandbox publication. Treat mailbox support as a versioned provider capability, not generic shell input or remote ACP.
 
@@ -239,7 +241,7 @@ Before enabling it in the control plane:
 6. run `doctor` and the mock-bridge integration tests;
 7. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
 8. run `bun run proof:release:cloudflare` to prove the deterministic ACP/provider compatibility path with complete configured provenance;
-9. run `bun run proof:release:cloudflare:claude` to require real Claude generation, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, restart, backup/restore, and second boot;
+9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require real generation, two-turn continuity across control-plane restart, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, backup/restore, and second boot for every bundled toolchain;
 10. inspect Cloudflare for leaked test resources.
 
 The configured runner digest and matching custom-image reference/digest are operator/platform assertions used to pin execution identity. A base-image tag is never paired with a custom-image digest. These values are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.

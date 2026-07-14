@@ -212,7 +212,7 @@ Audit is append-only application evidence, not a cryptographic transparency log.
 | SSE amplification | Auth, owner scoping, cursor bounds, connection/backpressure limits | Authorized clients can still consume allocated resources |
 | Provider-test billing abuse | Health is bounded and non-provisioning by default; explicit lifecycle proof is gated | Authorized users may consume quota through legitimate runs |
 | High-cardinality telemetry attack | Bounded labels; IDs stay in logs/traces; payload fields bounded | Log volume still requires retention and owner/global quotas |
-| Storage/queue denial | Explicit input/log/artifact limits, deadlines, cleanup monitoring | Full multi-tenant quotas and admission control are production evolution work |
+| Storage/queue denial | Explicit input/log/artifact limits, deadlines, bounded process admission, cleanup monitoring | Per-owner/global quotas and request rate limits remain production evolution work |
 
 ## Local provider warning
 

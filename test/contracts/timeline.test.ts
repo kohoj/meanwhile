@@ -75,7 +75,7 @@ test("session timeline is a deterministic projection over durable cross-turn evi
     turnStatuses: { [API_TURN_ID]: "succeeded" },
     messages: [
       {
-        id: `${API_TURN_ID}:answer`,
+        id: `${API_TURN_ID}:agent:answer`,
         turnId: API_TURN_ID,
         role: "agent",
         text: "hello world",
@@ -101,6 +101,40 @@ test("session timeline is a deterministic projection over durable cross-turn evi
   expect(() => reduceSessionTimeline(emptySessionTimeline(), events[1] as SessionEvent)).toThrow(
     "Session event sequence is not contiguous",
   )
+})
+
+test("keeps thought and final message separate when an ACP agent reuses message identity", () => {
+  const timeline = sessionTimelineFromEvents([
+    statusEvent(1, "session.status", null, {
+      fromStatus: null,
+      toStatus: "running",
+      statusVersion: 1,
+      reason: "running",
+    }),
+    updateEvent(2, {
+      sessionUpdate: "agent_thought_chunk",
+      messageId: "shared",
+      content: { type: "text", text: "private reasoning" },
+    }),
+    updateEvent(3, {
+      sessionUpdate: "agent_message_chunk",
+      messageId: "shared",
+      content: { type: "text", text: "public answer" },
+    }),
+  ])
+
+  expect(timeline.messages).toEqual([
+    expect.objectContaining({
+      id: `${API_TURN_ID}:thought:shared`,
+      role: "thought",
+      text: "private reasoning",
+    }),
+    expect.objectContaining({
+      id: `${API_TURN_ID}:agent:shared`,
+      role: "agent",
+      text: "public answer",
+    }),
+  ])
 })
 
 function statusEvent(

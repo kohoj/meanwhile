@@ -14,22 +14,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Provider-neutral ordered/idempotent process input plus complete local mailbox execution and a versioned Cloudflare bridge mailbox backed by durable sequence/fingerprint reservation.
 - Restart reconciliation for live interactive sessions, including provider/runner replay, exact evidence deduplication, undispatched command recovery, and explicit `continuity_lost` semantics.
 - Session telemetry for durable queue/active/runtime/cleanup state and bounded turn outcomes, plus owner-isolation, secret-redaction, timeout, replay, cleanup, and restart tests.
+- Exact Codex, Claude Code, and Pi ACP/runtime pairs in the Cloudflare compatibility image, with real-agent local and remote release-proof commands.
 
 ### Changed
 
 - Runner protocol v3 now supports both one-shot `RunnerSpec` and prompt-free `SessionRunnerSpec` modes with versioned turn, interrupt, and close commands.
 - Cloudflare bridge protocol v4 adds capability-gated process input without exposing SDK types or remote ACP to the control-plane core.
 - Data-root quiescence and operational telemetry now include durable sessions and their independent runtime-lease cleanup lifecycle.
+- Run and session admission are independently configurable; restart reconciliation always supervises already-live sessions, while session cleanup retains a separate bounded lane.
+- Session and turn history use keyset/cursor pagination, turns have a direct read route, and the SDK provides direct turn waits, explicit session-status waits, and replay-safe retry across temporary API unavailability.
+- API-key usage timestamps coalesce repeated authenticated reads into at most one durable write per minute.
 
 ### Fixed
 
 - Local runtime destruction now waits for observed process exit publication before removing runtime state, eliminating a cleanup race with final exit metadata.
 - Session command sequences are filename and persistence identities, preventing one sequence from being rebound to a different command ID.
+- Timeline message identity now includes ACP role as well as turn and message ID, so an agent reusing one ID for thought and final output cannot collapse them.
+- Cloudflare process output now carries explicit stdout/stderr closure markers; the bridge fails retryably instead of publishing an exit cursor before both eventually consistent log tails are complete.
+- The Cloudflare Codex wrapper retains its process-private authentication home through adapter exit and invokes the native pinned Codex executable directly.
 
 ### Security
 
 - Session prompts and resolved credentials stay out of process argv, runner specs, provider handles, telemetry, and durable evidence; known values are redacted before session output is accepted.
 - Cloudflare reserves each process-input sequence against a secret-safe fingerprint before sandbox delivery; exact retries are harmless and conflicting reuse fails closed.
+- Structured Codex login material is split into individually redacted secret values and reconstructed only inside the short-lived wrapper process instead of crossing the runner boundary as one opaque JSON credential.
 
 ## [0.1.1] - 2026-07-14
 

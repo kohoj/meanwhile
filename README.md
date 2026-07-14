@@ -259,7 +259,7 @@ All failures use one safe envelope:
 | Runs | `POST /runs`, `GET /runs`, `GET /runs/:id`, `POST /runs/:id/cancel` |
 | Run evidence | `GET /runs/:id/events`, `GET /runs/:id/logs`, `GET /runs/:id/artifacts` |
 | Sessions | `POST /sessions`, `GET /sessions`, `GET /sessions/:id` |
-| Session turns | `POST /sessions/:id/turns`, `GET /sessions/:id/turns` |
+| Session turns | `POST /sessions/:id/turns`, `GET /sessions/:id/turns`, `GET /sessions/:id/turns/:turnId` |
 | Session evidence/commands | `GET /sessions/:id/events`, `POST /sessions/:id/interrupt`, `POST /sessions/:id/close` |
 | Artifacts | `GET /artifacts/:id`, `GET /artifacts/:id/content` |
 | Deployments | `POST /deployments`, `GET /deployments`, `GET /deployments/:id`, `GET /deployments/:id/logs` |
@@ -301,9 +301,12 @@ Authenticated local proofs are available when the corresponding local credential
 bun run demo:codex
 bun run demo:claude
 bun run demo:pi
+bun run proof:release:local:codex
+bun run proof:release:local:claude
+bun run proof:release:local:pi
 ```
 
-Each command installs an exact adapter/runtime pair into a disposable directory, references existing local authentication only for the agent process, sends a real ACP task, verifies the agent-written artifact, deploys it through the API, and fetches the immutable preview. The Pi proof uses its pinned headless RPC runtime through `pi-acp`; on this bootstrap path it accepts an allowlisted Amazon Bedrock token and region without persisting either value.
+The demo commands keep the path concise. The release-proof commands additionally exercise a two-turn durable session across a control-plane restart, telemetry, cleanup, backup, and restore. Every command installs an exact adapter/runtime pair into a disposable directory, references existing local authentication only for the agent process, verifies the agent-written artifact, deploys it through the API, and fetches the immutable preview. The Pi proof uses its pinned headless RPC runtime through `pi-acp`; on this bootstrap path it accepts an allowlisted Amazon Bedrock token and region without persisting either value.
 
 ## Runtime providers
 
@@ -334,7 +337,7 @@ interface RuntimeProvider {
 }
 ```
 
-`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, image, standalone Bun runner, and bundled Claude ACP adapter are pinned as one compatibility unit; Cloudflare types remain inside the provider package. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor and waits for terminal accumulated logs to become quiescent before publishing exit, so transient or eventually consistent provider reads cannot silently lose, duplicate, or skip accepted evidence.
+`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, image, standalone Bun runner, and bundled ACP toolchains are pinned as one compatibility unit; Cloudflare types remain inside the provider package. The reference image proves Codex, Claude Code, and Pi through exact adapter/runtime pairs. Production operators can derive smaller agent-profile images from the same contract without changing the control plane. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor. The bridge appends an internal closure marker to both process streams and withholds the irreversible exit cursor until both markers are visible, so an eventually consistent terminal log read cannot silently discard a delayed tail.
 
 The pinned Sandbox SDK does not expose ongoing stdin after process creation. Meanwhile therefore does not claim generic interactive process I/O: the bridge durably binds each `(process, sequence)` to one secret-safe command fingerprint, then publishes a validated command to a provider-private mailbox. Exact retries are harmless; conflicting reuse fails closed. This is a capability-gated runner command transport, not remote ACP, a PTY, or a second control plane.
 
@@ -357,7 +360,9 @@ Then verify it explicitly—remote mutation is never triggered merely because cr
 bun run cloudflare:check
 bun run test:live:cloudflare
 bun run proof:release:cloudflare          # deterministic ACP compatibility proof
-bun run proof:release:cloudflare:claude   # real Claude generation → SDK download → deploy → URL
+bun run proof:release:cloudflare:codex    # real Codex generation → SDK download → deploy → URL
+bun run proof:release:cloudflare:claude   # same proof through Claude Code
+bun run proof:release:cloudflare:pi       # same proof through Pi
 ```
 
 To add Daytona, Fly Machines, Modal, or another backend, implement `RuntimeProvider`, declare truthful capabilities, and pass the shared provider contract plus a real-account lifecycle proof. The run executor contains no provider-name branches. See [Provider contract](docs/provider-contract.md).
@@ -420,6 +425,7 @@ queued → provisioning → running → succeeded
 | Cancellation | Intent commits before signalling; one compare-and-swap transition claims `cancelled`; cleanup follows separately |
 | Restart recovery | Persisted runtime/process handles and cursors reconnect and deduplicate replay where provider capabilities permit |
 | Cleanup | Terminal runtimes enter durable bounded-retry destruction; a runtime for a running run is never eligible |
+| Admission | One-shot runs and new session leases have independent configurable concurrency; already-live sessions are always reattached after restart, and cleanup has its own bounded lane |
 | Timezones | Durable timestamps are UTC instants accepted by the control plane; agent processes receive `TZ=UTC`; local rendering belongs to clients |
 
 Session and turn creation use the same owner-scoped idempotency rule independently. Session events bind runner evidence, control-plane transitions, and turn identity to one contiguous durable sequence. A session runtime is never cleanup-eligible while its session is operational; a timed-out or interrupted turn does not destroy continuity.
@@ -468,26 +474,28 @@ bun run proof:release               # semantic round trip, telemetry, restart, b
 bun run cloudflare:check            # bridge package and protocol contract
 bun run test:live:cloudflare        # explicit real-account lifecycle
 bun run proof:release:cloudflare    # deterministic remote compatibility proof
-bun run proof:release:cloudflare:claude # real model, SDK artifact/deploy, URL, telemetry, recovery
+bun run proof:release:cloudflare:codex  # real Codex, durable session, artifact/deploy
+bun run proof:release:cloudflare:claude # real Claude Code, same complete evidence
+bun run proof:release:cloudflare:pi     # real Pi, same complete evidence
 ```
 
 The release proof sends a revision-bound token through ACP, structurally verifies the durable response, downloads immutable agent output through the public SDK, deploys those bytes through the SDK, and fetches the returned URL. It also validates OTLP trace and metric semantics, correlated structured logs, byte-scans the live data root and backup for exact private values, verifies exact status and replay evidence, destroys the runtime, restarts, restores into an empty data root, and boots again successfully.
 
-`proof:release:cloudflare` isolates provider/control-plane compatibility with the deterministic ACP fixture. `proof:release:cloudflare:claude` is the acceptance proof for real agent work: Claude receives the task inside Cloudflare Sandbox, creates `site/index.html`, and only the public SDK is used to retrieve and promote the captured artifact. A health response, skipped account test, or deterministic response is never described as real-model proof.
+`proof:release:cloudflare` isolates provider/control-plane compatibility with the deterministic ACP fixture. The agent-specific commands are acceptance proofs for real work: each agent receives the task inside Cloudflare Sandbox, creates `site/index.html`, preserves one ACP identity across two turns and a control-plane restart, and exposes the captured output only through immutable storage and the public SDK. A health response, skipped account test, lifecycle-only check, or deterministic response is never described as real-model proof.
 
 The deterministic suite separately covers owner isolation, lifecycle transitions, run/session replay, cross-turn ACP continuity, conflict policy, interrupt, timeout, artifacts, cancellation, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence.
 
 ## Production status
 
-Meanwhile `v0.1.1` is the current public compatibility baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox Claude path are implemented and release-proven through artifact download and deployment. A compatibility baseline is not a blanket production-support promise.
+Meanwhile `v0.1.1` is the current public compatibility baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox Codex, Claude Code, and Pi paths are implemented and release-proven through durable multi-turn continuity, immutable artifact download, and deployment. A compatibility baseline is not a blanket production-support promise.
 
-Durable sessions on this branch are proven end to end with the real local process adapter, including one ACP identity across turns, interrupt, timeout, event replay, cleanup, and control-plane restart. The Cloudflare bridge and client path are contract-tested against protocol v4; they are not called live-remote session proof until the credential-gated session lifecycle runs against the exact deployed bridge and image revision.
+Durable sessions on this branch are proven end to end through both runtime adapters, including one ACP identity across turns, interrupt, timeout, event replay, cleanup, and control-plane restart. Cloudflare evidence is bound to bridge protocol v4, an exact runner digest, and the deployed image reference/digest; these are operator/platform provenance assertions rather than remote attestation.
 
 Before broad multi-tenant production use, the project still needs:
 
 - signed release attestations and automated package publication;
 - continuous real-account verification for every released remote-provider revision;
-- quotas, rate limits, and admission control;
+- owner quotas and request rate limits beyond the implemented process-level admission bounds;
 - a lease-capable shared database for horizontal control-plane writers;
 - object-backed retention for logs beyond provider replay limits;
 - a tenant secret manager or host-scoped credential broker for private repository checkout;

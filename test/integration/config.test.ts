@@ -4,6 +4,15 @@ import { loadConfig } from "../../src/config"
 import { initializeInstrumentation } from "../../src/instrumentation"
 
 describe("operational configuration", () => {
+  test("makes run and session admission capacity explicit and bounded", () => {
+    expect(loadConfig({})).toMatchObject({ runConcurrency: 2, sessionConcurrency: 2 })
+    expect(
+      loadConfig({ MEANWHILE_RUN_CONCURRENCY: "7", MEANWHILE_SESSION_CONCURRENCY: "11" }),
+    ).toMatchObject({ runConcurrency: 7, sessionConcurrency: 11 })
+    expect(() => loadConfig({ MEANWHILE_RUN_CONCURRENCY: "0" })).toThrow()
+    expect(() => loadConfig({ MEANWHILE_SESSION_CONCURRENCY: "101" })).toThrow()
+  })
+
   test("keeps host execution behind an explicit local-provider policy", () => {
     expect(loadConfig({}).localProvider).toEqual({
       enabled: true,

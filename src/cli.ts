@@ -404,6 +404,9 @@ async function sessionsCommand(args: readonly string[], context: CliContext): Pr
     case "turns":
       await listSessionTurns(rest, context)
       return
+    case "turn":
+      await getSessionTurn(rest, context)
+      return
     case "watch":
       await watchSession(rest, context)
       return
@@ -456,12 +459,14 @@ async function createSession(args: readonly string[], context: CliContext): Prom
 }
 
 async function listSessions(args: readonly string[], context: CliContext): Promise<void> {
-  const parsed = parseArguments(args, { values: ["limit"] })
+  const parsed = parseArguments(args, { values: ["limit", "before"] })
   parsed.requireNoPositionals()
+  const before = parsed.one("before")
   await printJson(
     context,
     await apiClient(context).sessions.list({
       limit: parseInteger(parsed.one("limit") ?? "50", "--limit", 1, 100),
+      ...(before === undefined ? {} : { before }),
       signal: context.signal,
     }),
   )
@@ -509,11 +514,24 @@ async function sendSessionTurn(args: readonly string[], context: CliContext): Pr
 }
 
 async function listSessionTurns(args: readonly string[], context: CliContext): Promise<void> {
-  const parsed = parseArguments(args)
+  const parsed = parseArguments(args, { values: ["after", "limit"] })
   await printJson(
     context,
-    await apiClient(context).sessions.turns(parsed.onlyPositional(), { signal: context.signal }),
+    await apiClient(context).sessions.turns(parsed.onlyPositional(), {
+      after: parseInteger(parsed.one("after") ?? "0", "--after", 0, Number.MAX_SAFE_INTEGER),
+      limit: parseInteger(parsed.one("limit") ?? "100", "--limit", 1, 1_000),
+      signal: context.signal,
+    }),
   )
+}
+
+async function getSessionTurn(args: readonly string[], context: CliContext): Promise<void> {
+  const [sessionId, turnId] = parseArguments(args).requirePositionals(2)
+  await printJson(context, {
+    turn: await apiClient(context).sessions.getTurn(sessionId as string, turnId as string, {
+      signal: context.signal,
+    }),
+  })
 }
 
 async function watchSession(args: readonly string[], context: CliContext): Promise<void> {
@@ -677,7 +695,16 @@ async function auditCommand(args: readonly string[], context: CliContext): Promi
   parsed.requireNoPositionals()
   const before = parsed.one("before")
   const resourceType = parsed.one("resource-type")
-  const allowed = ["owner", "api_key", "run", "runtime", "artifact", "deployment"] as const
+  const allowed = [
+    "owner",
+    "api_key",
+    "run",
+    "session",
+    "turn",
+    "runtime",
+    "artifact",
+    "deployment",
+  ] as const
   if (resourceType !== undefined && !allowed.includes(resourceType as (typeof allowed)[number])) {
     throw argumentError("--resource-type is invalid", { resourceType })
   }

@@ -172,6 +172,7 @@ export const createApplication = async (
       secrets,
       logger: instrumentation.telemetry.logger,
       telemetry: instrumentation.telemetry,
+      concurrency: config.runConcurrency,
     })
     const runService = new RunService({
       store,
@@ -191,6 +192,7 @@ export const createApplication = async (
       secrets,
       logger: instrumentation.telemetry.logger,
       telemetry: instrumentation.telemetry,
+      concurrency: config.sessionConcurrency,
     })
     const sessionService = new SessionService({
       store,

@@ -179,6 +179,8 @@ function configuration(root: string, apiKey: string, previewPort: number): AppCo
     runnerPath: resolve("dist/meanwhile-runner"),
     agentCatalogPath: resolve("config/agents.json"),
     defaultProvider: "local",
+    runConcurrency: 2,
+    sessionConcurrency: 2,
     localProvider: { enabled: true, unsafeHostExecution: false },
     secretSourceCatalog: [],
     logLevel: "error",

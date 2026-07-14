@@ -66,6 +66,7 @@ const DEFAULT_SSE_RETRY_MS = 1_000
 const MIN_SSE_RETRY_MS = 100
 const MAX_SSE_RETRY_MS = 10_000
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"])
+const TERMINAL_SESSION_STATUSES = new Set(["closed", "failed", "continuity_lost"])
 const TERMINAL_DEPLOYMENT_STATUSES = new Set(["succeeded", "failed"])
 const TERMINAL_TURN_STATUSES = new Set(["succeeded", "failed", "interrupted", "timed_out"])
 
@@ -97,23 +98,21 @@ export interface CreateRunOptions extends RequestOptions {
   readonly idempotencyKey?: string
 }
 
-export interface ListRunsOptions extends RequestOptions {
-  readonly limit?: number
-  readonly before?: string
-}
-
 export interface ListCreatedOptions extends RequestOptions {
   readonly limit?: number
   readonly before?: string
 }
 
-export interface ListLogsOptions extends RequestOptions {
+export interface ListRunsOptions extends ListCreatedOptions {}
+
+export interface ListSequenceOptions extends RequestOptions {
   readonly after?: number
   readonly limit?: number
 }
 
+export interface ListLogsOptions extends ListSequenceOptions {}
 export interface FollowLogsOptions extends ListLogsOptions {}
-export interface FollowEventsOptions extends ListLogsOptions {}
+export interface FollowEventsOptions extends ListSequenceOptions {}
 
 export interface WaitOptions extends RequestOptions {
   readonly timeoutMs?: number
@@ -132,27 +131,30 @@ export interface RunsClient {
   cancel(id: string, options?: RequestOptions): Promise<Run>
   logs(id: string, options?: ListLogsOptions): Promise<RunLogPage>
   followLogs(id: string, options?: FollowLogsOptions): AsyncIterable<RunLog>
-  events(id: string, options?: ListLogsOptions): Promise<RunEventPage>
+  events(id: string, options?: ListSequenceOptions): Promise<RunEventPage>
   followEvents(id: string, options?: FollowEventsOptions): AsyncIterable<RunEvent>
   wait(id: string, options?: WaitOptions): Promise<Run>
 }
 
 export interface SessionsClient {
   create(input: CreateSessionRequest, options?: CreateRunOptions): Promise<AgentSession>
-  list(options?: {
-    readonly limit?: number
-    readonly signal?: AbortSignal
-  }): Promise<AgentSessionPage>
+  list(options?: ListCreatedOptions): Promise<AgentSessionPage>
   get(id: string, options?: RequestOptions): Promise<AgentSession>
+  waitForStatus(
+    id: string,
+    status: AgentSession["status"],
+    options?: WaitOptions,
+  ): Promise<AgentSession>
   send(id: string, prompt: string, options?: SendSessionTurnOptions): Promise<SessionTurn>
   send(
     id: string,
     input: CreateSessionTurnRequest,
     options?: CreateRunOptions,
   ): Promise<SessionTurn>
-  turns(id: string, options?: RequestOptions): Promise<SessionTurnPage>
+  turns(id: string, options?: ListSequenceOptions): Promise<SessionTurnPage>
+  getTurn(id: string, turnId: string, options?: RequestOptions): Promise<SessionTurn>
   waitForTurn(id: string, turnId: string, options?: WaitOptions): Promise<SessionTurn>
-  events(id: string, options?: ListLogsOptions): Promise<SessionEventPage>
+  events(id: string, options?: ListSequenceOptions): Promise<SessionEventPage>
   followEvents(id: string, options?: FollowEventsOptions): AsyncIterable<SessionEvent>
   interrupt(id: string, options?: RequestOptions): Promise<AgentSession>
   close(id: string, options?: RequestOptions): Promise<AgentSession>
@@ -323,7 +325,7 @@ class Runs implements RunsClient {
     )
   }
 
-  events(id: string, options: ListLogsOptions = {}): Promise<RunEventPage> {
+  events(id: string, options: ListSequenceOptions = {}): Promise<RunEventPage> {
     return this.transport.json(
       eventPath(id, options),
       RunEventPageSchema,
@@ -370,15 +372,10 @@ class Sessions implements SessionsClient {
     return result.session
   }
 
-  list(
-    options: { readonly limit?: number; readonly signal?: AbortSignal } = {},
-  ): Promise<AgentSessionPage> {
-    const limit = boundedInteger(options.limit ?? 50, 1, 100, "limit")
-    return this.transport.json(
-      `sessions?${new URLSearchParams({ limit: String(limit) })}`,
-      AgentSessionPageSchema,
-      signalInput(options.signal),
-    )
+  list(options: ListCreatedOptions = {}): Promise<AgentSessionPage> {
+    return this.transport.json(`sessions?${createdPageQuery(options)}`, AgentSessionPageSchema, {
+      ...signalInput(options.signal),
+    })
   }
 
   async get(id: string, options: RequestOptions = {}): Promise<AgentSession> {
@@ -388,6 +385,32 @@ class Sessions implements SessionsClient {
       signalInput(options.signal),
     )
     return result.session
+  }
+
+  waitForStatus(
+    id: string,
+    status: AgentSession["status"],
+    options: WaitOptions = {},
+  ): Promise<AgentSession> {
+    return waitForTerminal(
+      "session",
+      validId(id),
+      () => this.get(id, signalInput(options.signal)),
+      (session) => {
+        if (session.status === status) return true
+        if (TERMINAL_SESSION_STATUSES.has(session.status)) {
+          throw new MeanwhileError({
+            code: "SESSION_TERMINAL",
+            message: "The session became terminal before reaching the requested status",
+            details: { sessionId: session.id, requestedStatus: status, status: session.status },
+          })
+        }
+        return false
+      },
+      this.transport,
+      options,
+      `status ${status}`,
+    )
   }
 
   send(id: string, prompt: string, options?: SendSessionTurnOptions): Promise<SessionTurn>
@@ -424,12 +447,21 @@ class Sessions implements SessionsClient {
     return result.turn
   }
 
-  turns(id: string, options: RequestOptions = {}): Promise<SessionTurnPage> {
+  turns(id: string, options: ListSequenceOptions = {}): Promise<SessionTurnPage> {
     return this.transport.json(
-      `${sessionPath(id)}/turns`,
+      `${sessionPath(id)}/turns?${cursorQuery(options)}`,
       SessionTurnPageSchema,
       signalInput(options.signal),
     )
+  }
+
+  async getTurn(id: string, turnId: string, options: RequestOptions = {}): Promise<SessionTurn> {
+    const result = await this.transport.json(
+      `${sessionPath(id)}/turns/${encodeURIComponent(validId(turnId))}`,
+      SessionTurnResponseSchema,
+      signalInput(options.signal),
+    )
+    return result.turn
   }
 
   async waitForTurn(id: string, turnId: string, options: WaitOptions = {}): Promise<SessionTurn> {
@@ -437,19 +469,15 @@ class Sessions implements SessionsClient {
     const turn = await waitForTerminal(
       "turn",
       validTurnId,
-      async () =>
-        (await this.turns(id, signalInput(options.signal))).items.find(
-          (candidate) => candidate.id === validTurnId,
-        ) ?? null,
-      (candidate) => candidate !== null && TERMINAL_TURN_STATUSES.has(candidate.status),
+      () => this.getTurn(id, validTurnId, signalInput(options.signal)),
+      (candidate) => TERMINAL_TURN_STATUSES.has(candidate.status),
       this.transport,
       options,
     )
-    if (turn === null) throw protocolError("A terminal turn disappeared from its session")
     return turn
   }
 
-  events(id: string, options: ListLogsOptions = {}): Promise<SessionEventPage> {
+  events(id: string, options: ListSequenceOptions = {}): Promise<SessionEventPage> {
     return this.transport.json(
       `${sessionPath(id)}/events?${cursorQuery(options)}`,
       SessionEventPageSchema,
@@ -495,7 +523,7 @@ async function* followEventStream<Value extends { readonly sequence: number }>(
   eventType: "log" | "event",
   schema: z.ZodType<Value>,
   invalidEventMessage: string,
-  options: FollowLogsOptions,
+  options: ListSequenceOptions,
 ): AsyncIterable<Value> {
   const signal = options.signal ?? new AbortController().signal
   const after = boundedInteger(options.after ?? 0, 0, Number.MAX_SAFE_INTEGER, "after")
@@ -519,6 +547,15 @@ async function* followEventStream<Value extends { readonly sequence: number }>(
       })
     } catch (error) {
       if (signal.aborted) return
+      if (error instanceof MeanwhileError && error.code === "API_UNREACHABLE") {
+        consecutiveEmptyConnections += 1
+        const delay = Math.min(
+          retryMilliseconds * 2 ** Math.min(consecutiveEmptyConnections - 1, 10),
+          MAX_SSE_RETRY_MS,
+        )
+        await transport.delay(delay, signal)
+        continue
+      }
       throw error
     }
     if (!isEventStreamResponse(response)) {
@@ -848,12 +885,13 @@ class Transport {
 }
 
 async function waitForTerminal<Value>(
-  resource: "run" | "deployment" | "turn",
+  resource: "run" | "session" | "deployment" | "turn",
   id: string,
   read: () => Promise<Value>,
   terminal: (value: Value) => boolean,
   transport: Transport,
   options: WaitOptions,
+  condition = "terminal",
 ): Promise<Value> {
   const timeoutMs = boundedInteger(
     options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS,
@@ -868,17 +906,17 @@ async function waitForTerminal<Value>(
     "pollIntervalMs",
   )
   const signal = options.signal ?? new AbortController().signal
-  const deadline = Date.now() + timeoutMs
+  const deadline = performance.now() + timeoutMs
   for (;;) {
     if (signal.aborted) throw abortedError()
     const value = await read()
     if (terminal(value)) return value
-    const remaining = deadline - Date.now()
+    const remaining = deadline - performance.now()
     if (remaining <= 0) {
       throw new MeanwhileError({
         code: "CLIENT_WAIT_TIMEOUT",
-        message: `The ${resource} did not become terminal before the client deadline`,
-        details: { resource, id, timeoutMs },
+        message: `The ${resource} did not reach ${condition} before the client deadline`,
+        details: { resource, id, timeoutMs, condition },
       })
     }
     await transport.delay(Math.min(pollIntervalMs, remaining), signal)
@@ -997,11 +1035,11 @@ function logPath(id: string, options: ListLogsOptions): string {
   return `${runPath(id)}/logs?${cursorQuery(options)}`
 }
 
-function eventPath(id: string, options: ListLogsOptions): string {
+function eventPath(id: string, options: ListSequenceOptions): string {
   return `${runPath(id)}/events?${cursorQuery(options)}`
 }
 
-function cursorQuery(options: ListLogsOptions): URLSearchParams {
+function cursorQuery(options: ListSequenceOptions): URLSearchParams {
   return new URLSearchParams({
     after: String(boundedInteger(options.after ?? 0, 0, Number.MAX_SAFE_INTEGER, "after")),
     limit: String(boundedInteger(options.limit ?? 100, 1, 1_000, "limit")),

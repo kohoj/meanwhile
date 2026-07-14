@@ -366,8 +366,11 @@ export const migrations: readonly Migration[] = [
         error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json)),
         UNIQUE(owner_id, id)
       ) STRICT;
-      CREATE INDEX agent_sessions_owner_created_idx ON agent_sessions(owner_id, created_at DESC, id);
+      CREATE INDEX agent_sessions_owner_created_idx
+        ON agent_sessions(owner_id, created_at DESC, id DESC);
       CREATE INDEX agent_sessions_status_idx ON agent_sessions(status, updated_at);
+      CREATE INDEX agent_sessions_status_created_idx
+        ON agent_sessions(status, created_at, id);
 
       CREATE TABLE session_idempotency_keys (
         owner_id TEXT NOT NULL,

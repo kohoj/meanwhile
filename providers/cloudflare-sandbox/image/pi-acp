@@ -1,0 +1,7 @@
+#!/usr/bin/env bun
+
+process.env["PI_ACP_PI_COMMAND"] ??=
+  "/opt/meanwhile/bin/pi-runtime"
+process.env["PI_CODING_AGENT_DIR"] ??= "/opt/meanwhile/pi"
+
+await import("/opt/meanwhile/agents/node_modules/pi-acp/dist/index.js")

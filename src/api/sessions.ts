@@ -8,11 +8,14 @@ import {
   AgentSessionResponseSchema,
   AgentSessionSchema,
   type ApiEnv,
+  CreatedPageQuerySchema,
   CreateSessionRequestSchema,
   CreateSessionTurnRequestSchema,
+  CursorQuerySchema,
   createApiRouter,
   errorResponses,
   IdempotencyHeaderSchema,
+  IdentifierSchema,
   IdParamSchema,
   jsonResponse,
   LogQuerySchema,
@@ -49,7 +52,7 @@ const listSessionsRoute = createRoute({
   operationId: "listSessions",
   tags: ["Sessions"],
   summary: "List sessions owned by the caller",
-  request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) }) },
+  request: { query: CreatedPageQuerySchema },
   responses: {
     200: jsonResponse(AgentSessionPageSchema, "Owner-scoped sessions"),
     ...errorResponses,
@@ -91,8 +94,20 @@ const listTurnsRoute = createRoute({
   path: "/sessions/{id}/turns",
   operationId: "listSessionTurns",
   tags: ["Sessions"],
-  request: { params: IdParamSchema },
+  request: { params: IdParamSchema, query: CursorQuerySchema },
   responses: { 200: jsonResponse(SessionTurnPageSchema, "Session turns"), ...errorResponses },
+})
+
+const getTurnRoute = createRoute({
+  method: "get",
+  path: "/sessions/{id}/turns/{turnId}",
+  operationId: "getSessionTurn",
+  tags: ["Sessions"],
+  summary: "Get one turn without scanning session history",
+  request: {
+    params: z.object({ id: IdentifierSchema, turnId: IdentifierSchema }).strict(),
+  },
+  responses: { 200: jsonResponse(SessionTurnResponseSchema, "Session turn"), ...errorResponses },
 })
 
 const sessionCommandRoute = (
@@ -187,11 +202,15 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
 
   routes.openapi(listSessionsRoute, (context) => {
     const { ownerId } = context.get("requestContext")
+    const query = context.req.valid("query")
+    const page = service.list(ownerId, {
+      limit: query.limit,
+      ...(query.before === undefined ? {} : { before: query.before }),
+    })
     return context.json(
       {
-        items: service
-          .list(ownerId, context.req.valid("query").limit)
-          .map((item) => AgentSessionSchema.parse(item)),
+        items: page.items.map((item) => AgentSessionSchema.parse(item)),
+        nextCursor: page.nextCursor,
       },
       200,
     )
@@ -220,8 +239,22 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
   routes.openapi(listTurnsRoute, (context) => {
     const { ownerId } = context.get("requestContext")
     const id = context.req.valid("param").id
+    const query = context.req.valid("query")
+    const page = service.turns(ownerId, id, query)
     return context.json(
-      { items: service.turns(ownerId, id).map((turn) => SessionTurnSchema.parse(turn)) },
+      {
+        items: page.items.map((turn) => SessionTurnSchema.parse(turn)),
+        nextCursor: page.nextCursor,
+      },
+      200,
+    )
+  })
+
+  routes.openapi(getTurnRoute, (context) => {
+    const { ownerId } = context.get("requestContext")
+    const { id, turnId } = context.req.valid("param")
+    return context.json(
+      { turn: SessionTurnSchema.parse(service.getTurn(ownerId, id, turnId)) },
       200,
     )
   })

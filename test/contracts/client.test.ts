@@ -9,6 +9,7 @@ import {
   apiRun,
   apiRunEvent,
   apiRunLog,
+  apiSession,
   apiSessionEvent,
   apiTurn,
 } from "../fixtures/api"
@@ -114,6 +115,34 @@ describe("Meanwhile client contract", () => {
     expect(delays).toEqual([100])
   })
 
+  test("retries an unreachable follow transport from the same durable cursor", async () => {
+    const lastEventIds: (string | null)[] = []
+    const delays: number[] = []
+    let attempts = 0
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async (_input, init) => {
+        lastEventIds.push(new Headers(init?.headers).get("Last-Event-ID"))
+        attempts += 1
+        if (attempts === 1) throw new TypeError("transient network failure")
+        return eventStream(
+          `event: log\nid: 1\ndata: ${JSON.stringify(apiRunLog(1, "recovered"))}\n\n` +
+            "event: end\ndata: {}\n\n",
+        )
+      },
+      wait: async (milliseconds) => {
+        delays.push(milliseconds)
+      },
+    })
+
+    expect(await Array.fromAsync(client.runs.followLogs(API_RUN_ID))).toEqual([
+      apiRunLog(1, "recovered"),
+    ])
+    expect(lastEventIds).toEqual(["0", "0"])
+    expect(delays).toEqual([1_000])
+  })
+
   test("follows the durable run timeline through the same replay-safe transport", async () => {
     const event = apiRunEvent(1)
     const client = new Meanwhile({
@@ -169,8 +198,8 @@ describe("Meanwhile client contract", () => {
           requestIdempotency.push(new Headers(init.headers).get("Idempotency-Key"))
           return Response.json({ turn: apiTurn() }, { status: 201 })
         }
-        expect(path).toBe(`/sessions/${API_SESSION_ID}/turns`)
-        return Response.json({ items: [statuses.shift() ?? apiTurn("succeeded")] })
+        expect(path).toBe(`/sessions/${API_SESSION_ID}/turns/${API_TURN_ID}`)
+        return Response.json({ turn: statuses.shift() ?? apiTurn("succeeded") })
       },
       wait: async () => {},
     })
@@ -193,6 +222,36 @@ describe("Meanwhile client contract", () => {
     expect(requestIdempotency).toEqual(["turn-once"])
     expect(created.id).toBe(API_TURN_ID)
     expect(terminal.status).toBe("succeeded")
+  })
+
+  test("waits for session readiness and fails fast on another terminal state", async () => {
+    const statuses = [apiSession("queued"), apiSession("provisioning"), apiSession("idle")]
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async () => Response.json({ session: statuses.shift() ?? apiSession("idle") }),
+      wait: async () => {},
+    })
+
+    expect(
+      await client.sessions.waitForStatus(API_SESSION_ID, "idle", {
+        timeoutMs: 1_000,
+        pollIntervalMs: 1,
+      }),
+    ).toMatchObject({ status: "idle" })
+
+    const failed = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async () => Response.json({ session: apiSession("continuity_lost") }),
+    })
+    const error = await failed.sessions
+      .waitForStatus(API_SESSION_ID, "idle", { timeoutMs: 1_000 })
+      .catch((value: unknown) => value)
+    expect(error).toMatchObject({
+      code: "SESSION_TERMINAL",
+      details: { requestedStatus: "idle", status: "continuity_lost" },
+    })
   })
 
   test("follows the durable cross-turn session stream from its cursor", async () => {

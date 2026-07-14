@@ -89,7 +89,7 @@ liveTest(
       })
       expect(
         (await Array.fromAsync(provider.events(modeProbe, null))).map(({ data }) => data).join(""),
-      ).toBe("mode-preserved\n")
+      ).toBe("mode-preserved")
       expect(await provider.wait(modeProbe)).toMatchObject({ exitCode: 0, reason: "exited" })
 
       const process = await provider.spawn(runtime, {
@@ -127,9 +127,15 @@ liveTest(
         timeoutMs: 60_000,
         terminationGraceMs: 5_000,
       })
-      const runnerFrames = parseRunnerFrames(
-        await Array.fromAsync(provider.events(runnerProcess, null)),
-      )
+      const runnerEvents = await Array.fromAsync(provider.events(runnerProcess, null))
+      const runnerFrames = parseRunnerFrames(runnerEvents)
+      if (runnerFrames.length === 0) {
+        throw new Error(
+          `Remote runner emitted no protocol frames: ${JSON.stringify(
+            runnerEvents.map(({ stream, data }) => ({ stream, data: data.slice(0, 1_000) })),
+          )}`,
+        )
+      }
       expect(runnerFrames).toContainEqual(
         expect.objectContaining({
           type: "session.started",

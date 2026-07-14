@@ -25,6 +25,11 @@ import type { WorkspacePreparer } from "./workspace-preparer"
 const DEFAULT_POLL_MS = 250
 const PROVISION_TIMEOUT_MS = 10 * 60_000
 const PROCESS_TERMINATION_GRACE_MS = 5_000
+const TERMINAL_SESSION_STATUSES = new Set<AgentSession["status"]>([
+  "closed",
+  "failed",
+  "continuity_lost",
+])
 
 export interface SessionExecutorOptions {
   readonly store: Store
@@ -34,6 +39,7 @@ export interface SessionExecutorOptions {
   readonly secrets: EnvironmentSecretResolver
   readonly logger: StructuredLogger
   readonly telemetry?: Telemetry
+  readonly concurrency?: number
   readonly pollMs?: number
   readonly clock?: () => Date
 }
@@ -48,12 +54,15 @@ export class SessionExecutor implements ManagedComponent {
   readonly #secrets: EnvironmentSecretResolver
   readonly #logger: StructuredLogger
   readonly #telemetry: Telemetry | undefined
+  readonly #concurrency: number
   readonly #pollMs: number
   readonly #clock: () => Date
   readonly #pending = new Set<string>()
   readonly #active = new Map<string, Promise<void>>()
+  readonly #cleanupActive = new Set<string>()
   #interval: ReturnType<typeof setInterval> | null = null
   #observation: AbortController | null = null
+  #stopping: Promise<void> | null = null
   #running = false
   #lastFailure: string | null = null
 
@@ -65,15 +74,23 @@ export class SessionExecutor implements ManagedComponent {
     this.#secrets = options.secrets
     this.#logger = options.logger
     this.#telemetry = options.telemetry
+    this.#concurrency = options.concurrency ?? 2
     this.#pollMs = options.pollMs ?? DEFAULT_POLL_MS
     this.#clock = options.clock ?? (() => new Date())
+    if (!Number.isSafeInteger(this.#concurrency) || this.#concurrency < 1) {
+      throw new TypeError("Session executor concurrency must be a positive integer")
+    }
   }
 
   async start(): Promise<void> {
+    if (this.#stopping !== null) await this.#stopping
     if (this.#running) return
     this.#running = true
     this.#observation = new AbortController()
-    for (const session of this.#store.listOperationalAgentSessions()) this.#pending.add(session.id)
+    for (const session of this.#store.listRecoverableAgentSessions()) this.#pending.add(session.id)
+    for (const session of this.#store.listClaimableAgentSessions(this.#concurrency * 2)) {
+      this.#pending.add(session.id)
+    }
     for (const sessionId of this.#store.listSessionCleanupCandidates(this.#now())) {
       this.#pending.add(sessionId)
     }
@@ -82,6 +99,17 @@ export class SessionExecutor implements ManagedComponent {
   }
 
   async stop(): Promise<void> {
+    if (this.#stopping !== null) return this.#stopping
+    const stopping = this.#stopInternal()
+    this.#stopping = stopping
+    try {
+      await stopping
+    } finally {
+      if (this.#stopping === stopping) this.#stopping = null
+    }
+  }
+
+  async #stopInternal(): Promise<void> {
     if (!this.#running) return
     this.#running = false
     if (this.#interval) clearInterval(this.#interval)
@@ -89,6 +117,7 @@ export class SessionExecutor implements ManagedComponent {
     this.#observation?.abort(new Error("control_plane_stopping"))
     await Promise.allSettled(this.#active.values())
     this.#active.clear()
+    this.#cleanupActive.clear()
     this.#pending.clear()
     this.#observation = null
   }
@@ -107,7 +136,10 @@ export class SessionExecutor implements ManagedComponent {
 
   #scan(): void {
     if (!this.#running) return
-    for (const session of this.#store.listOperationalAgentSessions()) {
+    for (const session of this.#store.listRecoverableAgentSessions()) {
+      if (!this.#active.has(session.id)) this.#pending.add(session.id)
+    }
+    for (const session of this.#store.listClaimableAgentSessions(this.#concurrency * 2)) {
       if (!this.#active.has(session.id)) this.#pending.add(session.id)
     }
     for (const sessionId of this.#store.listSessionCleanupCandidates(this.#now())) {
@@ -120,11 +152,22 @@ export class SessionExecutor implements ManagedComponent {
     if (!this.#running) return
     for (const sessionId of this.#pending) {
       if (this.#active.has(sessionId)) continue
+      const session = this.#store.getAgentSessionInternal(sessionId)
+      if (session === null) {
+        this.#pending.delete(sessionId)
+        continue
+      }
+      const cleanup = TERMINAL_SESSION_STATUSES.has(session.status)
+      const operationalActive = this.#active.size - this.#cleanupActive.size
+      if (session.status === "queued" && operationalActive >= this.#concurrency) continue
+      if (cleanup && this.#cleanupActive.size >= this.#concurrency) continue
       this.#pending.delete(sessionId)
+      if (cleanup) this.#cleanupActive.add(sessionId)
       const task = this.#execute(sessionId)
         .catch((error) => this.#handleFailure(sessionId, error))
         .finally(() => {
           this.#active.delete(sessionId)
+          this.#cleanupActive.delete(sessionId)
           if (this.#running) this.#pump()
         })
       this.#active.set(sessionId, task)
@@ -172,7 +215,7 @@ export class SessionExecutor implements ManagedComponent {
         : observeRuntimeProvider(rawProvider, scope, {
             ...(session.runtimeId === null ? {} : { runtimeId: session.runtimeId }),
           })
-    if (["closed", "failed", "continuity_lost"].includes(session.status)) {
+    if (TERMINAL_SESSION_STATUSES.has(session.status)) {
       await this.#cleanup(session.id, provider)
       return
     }
@@ -292,7 +335,7 @@ export class SessionExecutor implements ManagedComponent {
     if (!this.#running || observationSignal.aborted) return
 
     const current = this.#store.getAgentSessionInternal(session.id)
-    if (current && !["closed", "failed", "continuity_lost"].includes(current.status)) {
+    if (current && !TERMINAL_SESSION_STATUSES.has(current.status)) {
       this.#store.loseAgentSession(session.id, continuityLost("agent_process_exit"), this.#now())
     }
     await this.#cleanup(session.id, provider)

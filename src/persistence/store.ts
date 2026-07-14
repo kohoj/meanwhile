@@ -248,7 +248,7 @@ const encodeCreatedCursor = (resource: {
 
 const decodeCreatedCursor = (
   cursor: string,
-  resource: "Run" | "Deployment" | "Audit",
+  resource: "Run" | "Agent session" | "Deployment" | "Audit",
 ): { createdAt: string; id: string } => {
   try {
     const value: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"))
@@ -1159,7 +1159,15 @@ export class Store {
   }
 
   touchApiKey(id: string, at: string): void {
-    this.database.query("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(at, id)
+    const timestamp = Date.parse(at)
+    if (!Number.isFinite(timestamp)) throw new TypeError("API key usage timestamp must be valid")
+    const threshold = new Date(timestamp - 60_000).toISOString()
+    this.database
+      .query(`
+        UPDATE api_keys SET last_used_at=?
+        WHERE id=? AND (last_used_at IS NULL OR last_used_at<=?)
+      `)
+      .run(at, id, threshold)
   }
 
   revokeApiKey(ownerId: string, id: string, at: string): boolean {
@@ -2781,23 +2789,53 @@ export class Store {
     return row ? { requestHash: row.request_hash, session: agentSessionFromRow(row) } : null
   }
 
-  listAgentSessions(ownerId: string, limit = 50): readonly AgentSession[] {
-    return this.database
-      .query<AgentSessionRow, [string, number]>(`
-        SELECT * FROM agent_sessions WHERE owner_id = ? ORDER BY created_at DESC, id DESC LIMIT ?
-      `)
-      .all(ownerId, Math.min(Math.max(limit, 1), 100))
-      .map(agentSessionFromRow)
+  listAgentSessions(
+    ownerId: string,
+    options: { readonly limit: number; readonly before?: string },
+  ): Page<AgentSession> {
+    const limit = Math.min(Math.max(options.limit, 1), 100)
+    const cursor =
+      options.before === undefined ? null : decodeCreatedCursor(options.before, "Agent session")
+    const rows =
+      cursor === null
+        ? this.database
+            .query<AgentSessionRow, [string, number]>(`
+              SELECT * FROM agent_sessions
+              WHERE owner_id=? ORDER BY created_at DESC,id DESC LIMIT ?
+            `)
+            .all(ownerId, limit + 1)
+        : this.database
+            .query<AgentSessionRow, [string, string, string, string, number]>(`
+              SELECT * FROM agent_sessions WHERE owner_id=?
+                AND (created_at<? OR (created_at=? AND id<?))
+              ORDER BY created_at DESC,id DESC LIMIT ?
+            `)
+            .all(ownerId, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
+    const items = rows.slice(0, limit).map(agentSessionFromRow)
+    const last = items.at(-1)
+    return {
+      items,
+      nextCursor: rows.length > limit && last !== undefined ? encodeCreatedCursor(last) : null,
+    }
   }
 
-  listOperationalAgentSessions(): readonly AgentSession[] {
+  listRecoverableAgentSessions(): readonly AgentSession[] {
     return this.database
       .query<AgentSessionRow, []>(`
         SELECT * FROM agent_sessions
-        WHERE status IN ('queued','provisioning','idle','running','closing')
-        ORDER BY created_at, id
+        WHERE status IN ('provisioning','idle','running','closing')
+        ORDER BY updated_at, id
       `)
       .all()
+      .map(agentSessionFromRow)
+  }
+
+  listClaimableAgentSessions(limit: number): readonly AgentSession[] {
+    return this.database
+      .query<AgentSessionRow, [number]>(`
+        SELECT * FROM agent_sessions WHERE status='queued' ORDER BY created_at, id LIMIT ?
+      `)
+      .all(Math.min(Math.max(limit, 1), 100))
       .map(agentSessionFromRow)
   }
 
@@ -3063,13 +3101,26 @@ export class Store {
     return row ? sessionTurnFromRow(row) : null
   }
 
-  listSessionTurns(ownerId: string, sessionId: string): readonly SessionTurn[] {
-    return this.database
-      .query<SessionTurnRow, [string, string]>(`
-        SELECT * FROM session_turns WHERE owner_id=? AND session_id=? ORDER BY sequence
+  listSessionTurns(
+    ownerId: string,
+    sessionId: string,
+    after: number,
+    limit: number,
+  ): { readonly items: readonly SessionTurn[]; readonly nextCursor: number | null } {
+    const boundedLimit = Math.min(Math.max(limit, 1), 1_000)
+    const rows = this.database
+      .query<SessionTurnRow, [string, string, number, number]>(`
+        SELECT * FROM session_turns
+        WHERE owner_id=? AND session_id=? AND sequence>?
+        ORDER BY sequence LIMIT ?
       `)
-      .all(ownerId, sessionId)
-      .map(sessionTurnFromRow)
+      .all(ownerId, sessionId, after, boundedLimit + 1)
+    const items = rows.slice(0, boundedLimit).map(sessionTurnFromRow)
+    return {
+      items,
+      nextCursor:
+        rows.length > boundedLimit && items.length > 0 ? (items.at(-1)?.sequence ?? null) : null,
+    }
   }
 
   listSessionEvents(

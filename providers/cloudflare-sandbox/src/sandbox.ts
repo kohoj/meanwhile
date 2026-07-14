@@ -30,9 +30,10 @@ const STAGING_ROOT = "/tmp/meanwhile-bridge"
 const WORKSPACE_PATH_PROBE_TIMEOUT_MS = 5_000
 const WORKSPACE_FILE_MODE_TIMEOUT_MS = 5_000
 const PROCESS_LOG_REFRESH_INTERVAL_MS = 250
-const TERMINAL_LOG_SETTLE_INTERVAL_MS = 100
-const TERMINAL_LOG_QUIET_READS = 5
-const TERMINAL_LOG_MAX_READS = 20
+const TERMINAL_LOG_SETTLE_INTERVAL_MS = 250
+const TERMINAL_LOG_QUIET_READS = 8
+const TERMINAL_LOG_MAX_READS = 40
+const PROCESS_COMPLETION_PREFIX = "__MEANWHILE_PROCESS_COMPLETE_"
 const WORKSPACE_PATH_PROBE_COMMAND = shellJoin([
   "/bin/sh",
   "-c",
@@ -222,7 +223,7 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
       request.stdin === undefined ? undefined : `${STAGING_ROOT}/${crypto.randomUUID()}.stdin`
     const mailboxPath =
       request.input === "mailbox" ? `${STAGING_ROOT}/${processId}.inbox` : undefined
-    const command = buildProcessCommand(request.argv, stdinPath)
+    const command = buildProcessCommand(request.argv, stdinPath, processCompletionMarker(processId))
     try {
       if (stdinPath) {
         await this.#sandbox.mkdir(STAGING_ROOT, { recursive: true })
@@ -492,10 +493,12 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
       return cached
     }
 
-    const logs =
-      terminal && cached !== undefined && !cached.terminal
-        ? await this.#settledTerminalLogs(processId)
-        : await this.#sandbox.getProcessLogs(processId)
+    const logs = terminal
+      ? await this.#settledTerminalLogs(processId, status)
+      : stripCompletionMarkers(
+          await this.#sandbox.getProcessLogs(processId),
+          processCompletionMarker(processId),
+        ).logs
     if (utf8Length(logs.stdout) + utf8Length(logs.stderr) > MAX_PROCESS_OUTPUT_BYTES) {
       throw new BridgeError(
         "PROCESS_OUTPUT_LIMIT_EXCEEDED",
@@ -529,21 +532,37 @@ export class CloudflareBridgeRuntime implements BridgeRuntime {
     return observed
   }
 
-  async #settledTerminalLogs(processId: string) {
+  async #settledTerminalLogs(processId: string, status: ProviderProcessStatus) {
+    const marker = processCompletionMarker(processId)
     let current = await this.#sandbox.getProcessLogs(processId)
     let quietReads = 0
     for (let read = 1; read < TERMINAL_LOG_MAX_READS; read += 1) {
+      const stripped = stripCompletionMarkers(current, marker)
+      if (stripped.complete) return stripped.logs
       await this.#sleep(TERMINAL_LOG_SETTLE_INTERVAL_MS)
       const next = await this.#sandbox.getProcessLogs(processId)
       if (next.stdout === current.stdout && next.stderr === current.stderr) {
         quietReads += 1
-        if (quietReads >= TERMINAL_LOG_QUIET_READS) return next
+        if (status === "killed" && quietReads >= TERMINAL_LOG_QUIET_READS) {
+          return stripCompletionMarkers(next, marker).logs
+        }
       } else {
         quietReads = 0
       }
       current = next
     }
-    return current
+    const stripped = stripCompletionMarkers(current, marker)
+    if (stripped.complete || status === "killed") return stripped.logs
+    throw new BridgeError(
+      "PROCESS_OUTPUT_INCOMPLETE",
+      "The provider has not published the complete terminal process output.",
+      503,
+      {
+        retryable: true,
+        stdout: completionObservation(current.stdout, marker),
+        stderr: completionObservation(current.stderr, marker),
+      },
+    )
   }
 
   async #requireProcess(processId: string): Promise<Process> {
@@ -668,9 +687,80 @@ function shellQuote(argument: string): string {
   return `'${argument.replaceAll("'", `'"'"'`)}'`
 }
 
-function buildProcessCommand(argv: readonly string[], stdinPath: string | undefined): string {
+function buildProcessCommand(
+  argv: readonly string[],
+  stdinPath: string | undefined,
+  completionMarker: string,
+): string {
   const command = shellJoin(argv)
-  return stdinPath ? `${command} < ${shellQuote(stdinPath)}` : command
+  const invocation = stdinPath ? `${command} < ${shellQuote(stdinPath)}` : command
+  const marker = shellQuote(completionMarker)
+  return `{ ${invocation}; meanwhile_status=$?; /usr/bin/printf '\n%s\n' ${marker}; /usr/bin/printf '\n%s\n' ${marker} >&2; (exit "$meanwhile_status"); }`
+}
+
+export function processCompletionMarker(processId: string): string {
+  return `${PROCESS_COMPLETION_PREFIX}${processId}__`
+}
+
+function stripCompletionMarkers(
+  logs: { readonly stdout: string; readonly stderr: string; readonly processId: string },
+  marker: string,
+): {
+  readonly complete: boolean
+  readonly logs: { readonly stdout: string; readonly stderr: string; readonly processId: string }
+} {
+  const stdout = stripCompletionMarker(logs.stdout, marker)
+  const stderr = stripCompletionMarker(logs.stderr, marker)
+  return {
+    complete: stdout.complete && stderr.complete,
+    logs: {
+      ...logs,
+      stdout: stdout.value,
+      stderr: stderr.value,
+    },
+  }
+}
+
+function stripCompletionMarker(
+  value: string,
+  marker: string,
+): { readonly complete: boolean; readonly value: string } {
+  const boundary = `\n${marker}`
+  const markerIndex = value.lastIndexOf(boundary)
+  if (markerIndex < 0 || !/^[\r\n]*$/.test(value.slice(markerIndex + boundary.length))) {
+    return { complete: false, value }
+  }
+  return { complete: true, value: value.slice(0, markerIndex) }
+}
+
+function completionObservation(
+  value: string,
+  marker: string,
+): {
+  readonly bytes: number
+  readonly markerSeen: boolean
+  readonly precededByLineBreak: boolean
+  readonly suffixCodeUnits: number | null
+  readonly suffixContainsOnlyLineBreaks: boolean | null
+} {
+  const markerIndex = value.lastIndexOf(marker)
+  if (markerIndex < 0) {
+    return {
+      bytes: utf8Length(value),
+      markerSeen: false,
+      precededByLineBreak: false,
+      suffixCodeUnits: null,
+      suffixContainsOnlyLineBreaks: null,
+    }
+  }
+  const suffix = value.slice(markerIndex + marker.length)
+  return {
+    bytes: utf8Length(value),
+    markerSeen: true,
+    precededByLineBreak: value[markerIndex - 1] === "\n",
+    suffixCodeUnits: suffix.length,
+    suffixContainsOnlyLineBreaks: /^[\r\n]*$/.test(suffix),
+  }
 }
 
 function toWorkspacePath(relativePath: string): string {
