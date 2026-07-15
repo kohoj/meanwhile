@@ -12,22 +12,7 @@ Meanwhile gives agent work a portable identity. A `Run` carries one task to immu
 
 Use a run for a fix, repository change, evaluation, or release. Use a session when a person or upstream agent needs to inspect, redirect, interrupt, and continue the same agent context. Promote only immutable run output.
 
-```text
-                                  immutable Artifact ──► Deployment
-                                 /
-SDK / HTTP / CLI ──► one-shot Run
-                 \
-                  └──► durable Session ──► Turn 1 ──► Turn 2 ──► …
-                               │
-                         Runtime lease
-                               │ lifecycle · replay · ordered input
-                 RuntimeProvider (local · Cloudflare · …)
-                               │
-                       meanwhile-runner
-                               │ local ACP over stdio
-                               ▼
-                         any ACP agent
-```
+![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
 ## Durable intent is the product
 
