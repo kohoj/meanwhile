@@ -6,9 +6,12 @@
   "scripts": {
     "check": "bun run typecheck && bun test",
     "deploy": "bun run runner:stage && wrangler deploy",
+    "deploy:staged": "wrangler deploy",
     "dev": "bun run runner:stage && wrangler dev",
-    "image:check": "bun run runner:stage && wrangler deploy --dry-run && docker run --rm --entrypoint sh meanwhile-cloudflare-sandbox-bridge-sandbox:worker -c 'test -r /opt/meanwhile/licenses/LICENSE && test -r /opt/meanwhile/licenses/THIRD_PARTY_NOTICES && test \"$(claude-agent-acp --version)\" = 0.58.1 && codex-acp --version | grep -F 1.1.2 >/dev/null && test \"$(/opt/meanwhile/agents/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex --version)\" = \"codex-cli 0.144.3\" && test \"$(pi-runtime --version)\" = 0.80.6'",
-    "runner:stage": "rm -rf .runner && mkdir -p .runner && bun build ../../runner/main.ts --compile --target=bun-linux-x64-baseline --minify --outfile .runner/meanwhile-runner && bun build ../../test/fixtures/acp-agent.ts --compile --target=bun-linux-x64-baseline --minify --outfile .runner/meanwhile-demo-agent && cp ../../LICENSE ../../THIRD_PARTY_NOTICES .runner/",
+    "dev:staged": "wrangler dev",
+    "image:check": "bun run runner:stage && bun run image:check:staged",
+    "image:check:staged": "wrangler deploy --dry-run && docker run --rm --entrypoint sh meanwhile-cloudflare-sandbox-bridge-sandbox:worker -c 'test -r /opt/meanwhile/licenses/LICENSE && test -r /opt/meanwhile/licenses/THIRD_PARTY_NOTICES && test \"$(BUN_BE_BUN=1 meanwhile-runner --version)\" = \"$(cat /opt/meanwhile/metadata/BUN_VERSION)\" && test \"$(BUN_BE_BUN=1 meanwhile-demo-agent --version)\" = \"$(cat /opt/meanwhile/metadata/BUN_VERSION)\" && test \"$(claude-agent-acp --version)\" = 0.58.1 && codex-acp --version | grep -F 1.1.2 >/dev/null && test \"$(/opt/meanwhile/agents/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex --version)\" = \"codex-cli 0.144.3\" && test \"$(pi-runtime --version)\" = 0.80.6'",
+    "runner:stage": "bun ../../scripts/stage-cloudflare-runner.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

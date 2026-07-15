@@ -135,6 +135,34 @@ CREATE INDEX runtime_instances_owner_run_idx ON runtime_instances(owner_id, run_
 
 CREATE INDEX runtime_instances_cleanup_idx ON runtime_instances(cleanup_status, cleanup_next_attempt_at, updated_at);
 
+CREATE TABLE credential_leases (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL REFERENCES owners(id),
+        resource_type TEXT NOT NULL CHECK(resource_type IN ('run','session')),
+        resource_id TEXT NOT NULL,
+        runtime_id TEXT NOT NULL,
+        runtime_handle_json TEXT NOT NULL CHECK(json_valid(runtime_handle_json)),
+        provider TEXT NOT NULL,
+        policy_digest TEXT NOT NULL CHECK(
+          length(policy_digest) = 64
+          AND policy_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        handle_json TEXT CHECK(handle_json IS NULL OR json_valid(handle_json)),
+        status TEXT NOT NULL CHECK(
+          status IN ('attaching','active','revoke_pending','revoking','revoked','failed')
+        ),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+        last_error_json TEXT CHECK(last_error_json IS NULL OR json_valid(last_error_json)),
+        next_attempt_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revoked_at TEXT,
+        UNIQUE(owner_id, resource_type, resource_id)
+      ) STRICT;
+
+CREATE INDEX credential_leases_revoke_idx
+        ON credential_leases(status, next_attempt_at, updated_at);
+
 CREATE TABLE runner_sessions (
         run_id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,

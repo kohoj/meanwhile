@@ -46,7 +46,8 @@ export function apiRun(status: Run["status"] = "queued"): Run {
       capabilities: { filesystem: true, terminal: false },
       permissionPolicy: { mode: "allow-once", toolKinds: ["read", "edit"] },
       envNames: [],
-      secretEnvNames: [],
+      networkPolicy: { allowedHosts: [] },
+      credentials: [],
     },
     agentCatalogDigest: "c".repeat(64),
     executionProvenance: {

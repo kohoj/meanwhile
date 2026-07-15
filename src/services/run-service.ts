@@ -40,6 +40,7 @@ export interface RunAgentIntentResolver {
 
 export interface RunProviderNames {
   has(name: string): boolean
+  supportsCredentialMediation(name: string): boolean
 }
 
 export interface RunExecutionProvenance {
@@ -188,6 +189,17 @@ export class RunService {
         code: "INVALID_REQUEST",
         message: "Runtime provider is not configured",
         details: { provider },
+      })
+    }
+    if (
+      Object.keys(input.secretRefs).length > 0 &&
+      !this.#providerNames.supportsCredentialMediation(provider)
+    ) {
+      throw new AppError({
+        code: "PROVIDER_CAPABILITY_UNAVAILABLE",
+        status: 422,
+        message: "Runtime provider cannot keep agent credentials outside the runtime",
+        details: { provider, capability: "credentialMediation" },
       })
     }
     const executionProvenance = this.#executionProvenance.capture({

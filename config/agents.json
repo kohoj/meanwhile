@@ -17,7 +17,16 @@
         "FIXTURE_OVERSIZED_BYTES",
         "FIXTURE_OUTPUT_PATH"
       ],
-      "secretEnvNames": ["TEST_RUNNER_SECRET"]
+      "networkPolicy": {
+        "allowedHosts": []
+      },
+      "credentials": [
+        {
+          "environmentVariable": "TEST_RUNNER_SECRET",
+          "host": "example.com",
+          "methods": ["POST"]
+        }
+      ]
     }
   }
 }

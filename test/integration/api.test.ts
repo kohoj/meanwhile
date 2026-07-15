@@ -20,7 +20,7 @@ test("run HTTP contract covers create, idempotency, isolation, evidence, and SSE
       agentType: "codex",
       prompt: "Ship it",
       env: { CI: "true" },
-      secretRefs: { OPENAI_API_KEY: "env://OPENAI_API_KEY" },
+      secretRefs: {},
       artifactPaths: ["dist"],
       timeoutMs: 60_000,
     }
@@ -383,6 +383,22 @@ test("provider diagnostics never expose adapter error messages", async () => {
   )
   expect(unsafeCode.details).toMatchObject({ providerCode: "PROVIDER_ERROR" })
   expect(JSON.stringify(unsafeCode.toStructuredError())).not.toContain("provider-code-secret")
+
+  const runtimeLost = normalizeError(
+    new RuntimeProviderError({
+      provider: "cloudflare",
+      operation: "writeFiles",
+      code: "RUNTIME_LOST",
+      message: "provider-private placement details",
+    }),
+  )
+  expect(runtimeLost.toStructuredError()).toEqual({
+    code: "RUNTIME_LOST",
+    message: "Runtime execution state could not be recovered",
+    retryable: false,
+    details: { provider: "cloudflare", operation: "writeFiles" },
+  })
+  expect(JSON.stringify(runtimeLost.toStructuredError())).not.toContain("placement")
 })
 
 test("malformed JSON uses the safe invalid-request envelope", async () => {

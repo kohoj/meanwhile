@@ -35,6 +35,7 @@ export interface SessionCommandSink {
 
 export interface SessionProviderCapabilities {
   supportsProcessInput(name: string): boolean
+  supportsCredentialMediation(name: string): boolean
 }
 
 export interface SessionServiceOptions {
@@ -102,6 +103,17 @@ export class SessionService {
         status: 422,
         message: "Runtime provider does not support durable agent sessions",
         details: { capability: "processInput" },
+      })
+    }
+    if (
+      Object.keys(input.secretRefs).length > 0 &&
+      !this.#providerCapabilities.supportsCredentialMediation(provider)
+    ) {
+      throw new AppError({
+        code: "PROVIDER_CAPABILITY_UNAVAILABLE",
+        status: 422,
+        message: "Runtime provider cannot keep agent credentials outside the runtime",
+        details: { provider, capability: "credentialMediation" },
       })
     }
     const executionProvenance = this.#executionProvenance.capture({

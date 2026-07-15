@@ -1,4 +1,13 @@
 import {
+  type AttachCredentialLeaseInput,
+  type AttachedCredentialLease,
+  CredentialBrokerError,
+  type CredentialLeaseHandle,
+  credentialLeaseHandle,
+  type RuntimeCredentialBroker,
+} from "../../src/credentials"
+import { hashCanonical } from "../../src/idempotency"
+import {
   assertRuntimeId,
   type CreateRuntimeInput,
   type EventCursor,
@@ -50,7 +59,7 @@ export interface MockProviderOperation {
 }
 
 /** Deterministic behavioral fake. Tests drive output and completion explicitly. */
-export class MockRuntimeProvider implements RuntimeProvider {
+export class MockRuntimeProvider implements RuntimeProvider, RuntimeCredentialBroker {
   readonly name: string
   readonly provenance = Object.freeze({
     adapterVersion: "test",
@@ -65,14 +74,76 @@ export class MockRuntimeProvider implements RuntimeProvider {
     eventReplay: true,
     processInput: false,
     portExposure: true,
+    networkPolicy: true,
+    credentialMediation: "http" as const,
     processSignals: Object.freeze(["SIGINT", "SIGTERM", "SIGKILL"] as const),
   })
   readonly operations: MockProviderOperation[] = []
 
   readonly #runtimes = new Map<string, MockRuntime>()
   readonly #processes = new Map<string, MockProcess>()
+  readonly #credentialLeases = new Map<
+    string,
+    { readonly fingerprint: string; readonly attached: AttachedCredentialLease; revoked: boolean }
+  >()
   constructor(name = "mock") {
     this.name = name
+  }
+
+  get credentialProvider(): string {
+    return this.name
+  }
+
+  async attach(input: AttachCredentialLeaseInput): Promise<AttachedCredentialLease> {
+    const [runtimeId] = this.#runtime(input.runtime, "credentialAttach")
+    const key = `${runtimeId}:${input.leaseId}`
+    const fingerprint = hashCanonical(input)
+    const existing = this.#credentialLeases.get(key)
+    if (existing !== undefined) {
+      if (existing.revoked || existing.fingerprint !== fingerprint) {
+        throw new CredentialBrokerError({
+          provider: this.name,
+          operation: "attach",
+          code: existing.revoked ? "CREDENTIAL_LEASE_REVOKED" : "CREDENTIAL_LEASE_CONFLICT",
+          message: "The credential lease cannot be reused",
+        })
+      }
+      this.#record("credentialAttach", runtimeId)
+      return existing.attached
+    }
+    const environment = Object.fromEntries(
+      [...new Set(input.credentials.map(({ environmentVariable }) => environmentVariable))].map(
+        (name) => [name, `mwcap_test_${input.leaseId}_${name}`],
+      ),
+    )
+    this.#record("credentialAttach", runtimeId)
+    const attached = {
+      handle: credentialLeaseHandle(this.name, `${runtimeId}:${input.leaseId}`),
+      environment,
+    }
+    this.#credentialLeases.set(key, { fingerprint, attached, revoked: false })
+    return attached
+  }
+
+  async revoke(input: {
+    readonly leaseId: string
+    readonly runtime: RuntimeHandle
+    readonly handle: CredentialLeaseHandle | null
+  }): Promise<void> {
+    const [runtimeId] = this.#runtime(input.runtime, "credentialRevoke")
+    const key = `${runtimeId}:${input.leaseId}`
+    const lease = this.#credentialLeases.get(key)
+    if (lease === undefined || lease.revoked) return
+    if (input.handle !== null && input.handle.opaque !== lease.attached.handle.opaque) {
+      throw new CredentialBrokerError({
+        provider: this.name,
+        operation: "revoke",
+        code: "CREDENTIAL_LEASE_CONFLICT",
+        message: "The credential lease handle is invalid",
+      })
+    }
+    lease.revoked = true
+    this.#record("credentialRevoke", runtimeId)
   }
 
   async create(input: CreateRuntimeInput): Promise<RuntimeHandle> {

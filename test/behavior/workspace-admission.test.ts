@@ -197,7 +197,10 @@ const createFixture = async () => {
     secretReferences: new EnvironmentSecretResolver({
       allowedOwnerIds: [OWNER_A, OWNER_B],
     }),
-    providerNames: { has: (name) => name === "local" },
+    providerNames: {
+      has: (name) => name === "local",
+      supportsCredentialMediation: () => false,
+    },
     executionProvenance: testExecutionProvenance,
     defaultProvider: "local",
     clock: clock.now,

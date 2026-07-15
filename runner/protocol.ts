@@ -109,7 +109,7 @@ export const runnerSpecSchema = z
       environmentNameSchema,
       withoutNullBytes(z.string().max(MAX_ENVIRONMENT_VALUE_LENGTH)),
     ),
-    secretEnvironmentNames: z.array(environmentNameSchema).max(128),
+    credentialEnvironmentNames: z.array(environmentNameSchema).max(128),
   })
   .strict()
   .superRefine((spec, context) => {
@@ -121,17 +121,17 @@ export const runnerSpecSchema = z
       })
     }
 
-    const secretNames = new Set(spec.secretEnvironmentNames)
-    if (secretNames.size !== spec.secretEnvironmentNames.length) {
+    const credentialNames = new Set(spec.credentialEnvironmentNames)
+    if (credentialNames.size !== spec.credentialEnvironmentNames.length) {
       context.addIssue({
         code: "custom",
-        path: ["secretEnvironmentNames"],
+        path: ["credentialEnvironmentNames"],
         message: "Secret environment names must be unique",
       })
     }
 
     for (const name of Object.keys(spec.environment)) {
-      if (secretNames.has(name)) {
+      if (credentialNames.has(name)) {
         context.addIssue({
           code: "custom",
           path: ["environment", name],
@@ -164,7 +164,7 @@ export const sessionRunnerSpecSchema = z
       environmentNameSchema,
       withoutNullBytes(z.string().max(MAX_ENVIRONMENT_VALUE_LENGTH)),
     ),
-    secretEnvironmentNames: z.array(environmentNameSchema).max(128),
+    credentialEnvironmentNames: z.array(environmentNameSchema).max(128),
     idleTimeoutMs: z.number().int().positive().max(MAX_TIMEOUT_BUDGET_MS),
   })
   .strict()
@@ -264,7 +264,7 @@ export const runnerTerminalPayloadSchema = z
           "ACP_PROTOCOL_UNSUPPORTED",
           "ACP_SESSION_FAILED",
           "AGENT_EXITED",
-          "MISSING_SECRET_ENVIRONMENT",
+          "MISSING_CREDENTIAL_ENVIRONMENT",
           "WORKSPACE_INVALID",
           "RUNNER_INTERNAL_ERROR",
         ]),

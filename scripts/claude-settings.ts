@@ -8,12 +8,12 @@ export const CLAUDE_SDK_VERSION = "0.3.205"
 const secretNames = new Set([
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
   "AWS_BEARER_TOKEN_BEDROCK",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "GOOGLE_APPLICATION_CREDENTIALS",
 ])
 const safeNames = new Set([
+  "ANTHROPIC_BASE_URL",
   "ANTHROPIC_VERTEX_PROJECT_ID",
   "AWS_REGION",
   "CLAUDE_CODE_ATTRIBUTION_HEADER",
@@ -70,6 +70,7 @@ export async function readClaudeSettingsEnvironment(): Promise<Readonly<Record<s
       if (typeof value !== "string" || value.length === 0) {
         throw new TypeError("Claude settings contain an invalid environment value")
       }
+      if (name === "ANTHROPIC_BASE_URL") assertCredentialFreeHttpsUrl(value)
       if (secretNames.has(name) || safeNames.has(name)) result[name] = value
     }
     return result
@@ -79,6 +80,19 @@ export async function readClaudeSettingsEnvironment(): Promise<Readonly<Record<s
       "CLAUDE_CONFIG_INVALID",
       "Claude Code settings could not be read safely",
     )
+  }
+}
+
+function assertCredentialFreeHttpsUrl(value: string): void {
+  const url = new URL(value)
+  if (
+    url.protocol !== "https:" ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
+    throw new TypeError("Claude base URL must be a credential-free HTTPS URL")
   }
 }
 

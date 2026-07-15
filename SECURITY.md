@@ -69,8 +69,8 @@ Underlying Cloudflare, Bun, ACP SDK, model provider, deployment platform, or ope
 ## Usually out of scope
 
 - local-provider workload escape: local execution is explicitly not a sandbox;
-- a credential being visible to the agent process that was intentionally given that credential;
-- deliberate transformed exfiltration by an agent that legitimately received a credential, absent a promised egress boundary;
+- workspace-data exfiltration to a destination explicitly authorized by the accepted agent policy;
+- credential disclosure by, or compromise of, an explicitly authorized upstream destination;
 - denial of service requiring unlimited authorized workload where no quota is documented;
 - social engineering, physical access, or compromise of a trusted host administrator;
 - scanner-only reports without a reproducible impact;

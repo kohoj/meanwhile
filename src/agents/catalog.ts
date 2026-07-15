@@ -1,10 +1,31 @@
 import { isAbsolute, resolve } from "node:path"
 import { z } from "zod"
-import type { AgentLaunchSnapshot, AgentPermissionPolicy, AgentToolKind } from "../domain"
+import type {
+  AgentCredentialHttpMethod,
+  AgentLaunchSnapshot,
+  AgentPermissionPolicy,
+  AgentToolKind,
+} from "../domain"
 import { AGENT_LAUNCH_SNAPSHOT_VERSION } from "../domain"
 import { AppError } from "../errors"
 
 const environmentNameSchema = z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
+const exactHostSchema = z
+  .string()
+  .min(1)
+  .max(253)
+  .regex(
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/,
+    "Host must be an exact lowercase DNS name",
+  )
+const credentialMethodSchema = z.enum(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"])
+const credentialPolicySchema = z
+  .object({
+    environmentVariable: environmentNameSchema,
+    host: exactHostSchema,
+    methods: z.array(credentialMethodSchema).min(1).max(7),
+  })
+  .strict()
 const portableExecutableSchema = z
   .string()
   .min(1)
@@ -34,32 +55,55 @@ const agentDefinitionSchema = z
     workingDirectory: z.literal("workspace"),
     capabilities: agentCapabilitiesSchema,
     envNames: z.array(environmentNameSchema).max(64),
-    secretEnvNames: z.array(environmentNameSchema).max(64),
+    networkPolicy: z.object({ allowedHosts: z.array(exactHostSchema).max(64) }).strict(),
+    credentials: z.array(credentialPolicySchema).max(64),
   })
   .strict()
   .superRefine((definition, context) => {
     for (const [field, names] of [
       ["envNames", definition.envNames],
-      ["secretEnvNames", definition.secretEnvNames],
+      ["networkPolicy.allowedHosts", definition.networkPolicy.allowedHosts],
     ] as const) {
       if (new Set(names).size !== names.length) {
         context.addIssue({
           code: "custom",
-          path: [field],
+          path: field.split("."),
           message: `${field} must not contain duplicates`,
         })
       }
     }
 
+    const credentialNames = definition.credentials.map(
+      ({ environmentVariable }) => environmentVariable,
+    )
     const persistedNames = new Set(definition.envNames)
-    const overlap = definition.secretEnvNames.filter((name) => persistedNames.has(name))
+    const overlap = credentialNames.filter((name) => persistedNames.has(name))
     if (overlap.length > 0) {
       context.addIssue({
         code: "custom",
-        path: ["secretEnvNames"],
-        message: "Persisted and secret environment names must not overlap",
+        path: ["credentials"],
+        message: "Persisted and credential environment names must not overlap",
       })
     }
+    const bindings = new Set<string>()
+    definition.credentials.forEach((credential, index) => {
+      const key = `${credential.environmentVariable}\0${credential.host}`
+      if (bindings.has(key)) {
+        context.addIssue({
+          code: "custom",
+          path: ["credentials", index],
+          message: "Credential environment and host bindings must be unique",
+        })
+      }
+      bindings.add(key)
+      if (new Set(credential.methods).size !== credential.methods.length) {
+        context.addIssue({
+          code: "custom",
+          path: ["credentials", index, "methods"],
+          message: "Credential methods must not contain duplicates",
+        })
+      }
+    })
   })
 
 const catalogSchema = z
@@ -72,11 +116,19 @@ const catalogSchema = z
 type ParsedAgentDefinition = z.infer<typeof agentDefinitionSchema>
 
 export type AgentDefinition = Readonly<
-  Omit<ParsedAgentDefinition, "args" | "capabilities" | "envNames" | "secretEnvNames"> & {
+  Omit<
+    ParsedAgentDefinition,
+    "args" | "capabilities" | "envNames" | "networkPolicy" | "credentials"
+  > & {
     readonly args: readonly string[]
     readonly capabilities: Readonly<ParsedAgentDefinition["capabilities"]>
     readonly envNames: readonly string[]
-    readonly secretEnvNames: readonly string[]
+    readonly networkPolicy: { readonly allowedHosts: readonly string[] }
+    readonly credentials: readonly {
+      readonly environmentVariable: string
+      readonly host: string
+      readonly methods: readonly AgentCredentialHttpMethod[]
+    }[]
   }
 >
 
@@ -169,8 +221,8 @@ export class AgentCatalog {
     assertAllowedNames(Object.keys(environment), definition.envNames, "non-secret environment")
     assertAllowedNames(
       Object.keys(secretReferences),
-      definition.secretEnvNames,
-      "secret environment",
+      [...new Set(definition.credentials.map(({ environmentVariable }) => environmentVariable))],
+      "credential environment",
     )
 
     const permissionPolicy = permissionPolicyFor(definition.capabilities)
@@ -186,7 +238,12 @@ export class AgentCatalog {
         capabilities: { ...definition.capabilities },
         permissionPolicy,
         envNames: [...definition.envNames],
-        secretEnvNames: [...definition.secretEnvNames],
+        networkPolicy: { allowedHosts: [...definition.networkPolicy.allowedHosts] },
+        credentials: definition.credentials.map((credential) => ({
+          environmentVariable: credential.environmentVariable,
+          host: credential.host,
+          methods: [...credential.methods],
+        })),
       },
     }
   }
@@ -198,7 +255,14 @@ const freezeDefinition = (definition: ParsedAgentDefinition): AgentDefinition =>
     args: Object.freeze([...definition.args]),
     capabilities: Object.freeze({ ...definition.capabilities }),
     envNames: Object.freeze([...definition.envNames]),
-    secretEnvNames: Object.freeze([...definition.secretEnvNames]),
+    networkPolicy: Object.freeze({
+      allowedHosts: Object.freeze([...definition.networkPolicy.allowedHosts]),
+    }),
+    credentials: Object.freeze(
+      definition.credentials.map((credential) =>
+        Object.freeze({ ...credential, methods: Object.freeze([...credential.methods]) }),
+      ),
+    ),
   })
 
 const permissionPolicyFor = (

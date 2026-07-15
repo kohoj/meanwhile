@@ -8,23 +8,6 @@ import type { AppConfig } from "../src/config"
 import { initializeInstrumentation } from "../src/instrumentation"
 import { SERVICE_VERSION } from "../src/version"
 import { captureWorkspace, type UploadedWorkspaceFile } from "../src/workspace"
-import {
-  AgentToolchainError,
-  agentCatalog as createAgentCatalog,
-  type PreparedAgentToolchain,
-  prepareAgentToolchain,
-} from "./agent-toolchains"
-
-export type DemoAgentType = "demo" | "codex" | "claude-code" | "pi"
-
-export interface LiveAgentProof {
-  readonly type: Exclude<DemoAgentType, "demo">
-  readonly adapter: string
-  readonly loginVerifiedBy: string
-  readonly runtimeVersion: string
-  readonly environment: Readonly<Record<string, string>>
-  readonly secretReferences: Readonly<Record<string, string>>
-}
 
 export interface DemoEnvironment {
   readonly clientOptions: {
@@ -32,7 +15,6 @@ export interface DemoEnvironment {
     readonly apiKey: string
   }
   readonly workspaceFiles: readonly UploadedWorkspaceFile[]
-  readonly agent: LiveAgentProof | null
   close(): Promise<void>
 }
 
@@ -47,14 +29,13 @@ export class DemoError extends Error {
   }
 }
 
-export async function createDemoEnvironment(agentType: DemoAgentType): Promise<DemoEnvironment> {
+export async function createDemoEnvironment(): Promise<DemoEnvironment> {
   const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)))
   const temporary = await mkdtemp(join(tmpdir(), "meanwhile-demo-"))
   const dataDir = join(temporary, "data")
   const workspace = join(temporary, "workspace")
   const runnerPath = join(temporary, "meanwhile-runner")
   const catalogPath = join(temporary, "agents.json")
-  let preparedAgent: PreparedAgentToolchain | null = null
   let server: ReturnType<typeof Bun.serve> | null = null
   let application: Awaited<ReturnType<typeof createApplication>> | null = null
   let closed = false
@@ -64,48 +45,29 @@ export async function createDemoEnvironment(agentType: DemoAgentType): Promise<D
     closed = true
     if (server !== null) await server.stop(true).catch(() => {})
     if (application !== null) await application.close().catch(() => {})
-    preparedAgent?.restore()
     await rm(temporary, { recursive: true, force: true })
   }
 
   try {
-    preparedAgent =
-      agentType === "demo"
-        ? null
-        : await prepareAgentToolchain(agentType, "local", join(temporary, "agent-tools"))
-    const agent: LiveAgentProof | null =
-      preparedAgent === null
-        ? null
-        : {
-            type: preparedAgent.type,
-            adapter: preparedAgent.adapter,
-            loginVerifiedBy: preparedAgent.authenticationEvidence,
-            runtimeVersion: preparedAgent.runtime,
-            environment: preparedAgent.environment,
-            secretReferences: preparedAgent.secretReferences,
-          }
     await ensureRunner(repositoryRoot, runnerPath)
-    await createDemoWorkspace(workspace, agentType)
+    await createDemoWorkspace(workspace)
     await Bun.write(
       catalogPath,
-      JSON.stringify(
-        preparedAgent === null
-          ? {
-              version: 1,
-              agents: {
-                demo: {
-                  transport: "stdio",
-                  executable: "bun",
-                  args: ["demo-agent.ts"],
-                  workingDirectory: "workspace",
-                  capabilities: { filesystem: true, terminal: false },
-                  envNames: [],
-                  secretEnvNames: [],
-                },
-              },
-            }
-          : createAgentCatalog(preparedAgent),
-      ),
+      JSON.stringify({
+        version: 1,
+        agents: {
+          demo: {
+            transport: "stdio",
+            executable: "bun",
+            args: ["demo-agent.ts"],
+            workingDirectory: "workspace",
+            capabilities: { filesystem: true, terminal: false },
+            envNames: [],
+            networkPolicy: { allowedHosts: [] },
+            credentials: [],
+          },
+        },
+      }),
     )
 
     const instrumentation = await initializeInstrumentation({
@@ -132,7 +94,7 @@ export async function createDemoEnvironment(agentType: DemoAgentType): Promise<D
       runConcurrency: 2,
       sessionConcurrency: 2,
       localProvider: { enabled: true, unsafeHostExecution: false },
-      secretSourceCatalog: Object.keys(agent?.secretReferences ?? {}),
+      secretSourceCatalog: [],
       logLevel: "error",
       telemetry: { enabled: false },
     }
@@ -143,14 +105,10 @@ export async function createDemoEnvironment(agentType: DemoAgentType): Promise<D
     return {
       clientOptions: { baseUrl: server.url.origin, apiKey: issued.key },
       workspaceFiles: await captureWorkspace(workspace),
-      agent,
       close,
     }
   } catch (error) {
     await close()
-    if (error instanceof AgentToolchainError) {
-      throw new DemoError(error.code, error.message)
-    }
     throw error
   }
 }
@@ -167,16 +125,8 @@ async function ensureRunner(root: string, runnerPath: string): Promise<void> {
   }
 }
 
-async function createDemoWorkspace(workspace: string, agentType: DemoAgentType): Promise<void> {
+async function createDemoWorkspace(workspace: string): Promise<void> {
   await mkdir(join(workspace, "site"), { recursive: true })
-  if (agentType !== "demo") {
-    await Bun.write(
-      join(workspace, "README.md"),
-      `This workspace is an isolated Meanwhile local-provider proof for ${agentType} over ACP.\n`,
-    )
-    await Bun.write(join(workspace, "site", "placeholder.txt"), "Replace with index.html.\n")
-    return
-  }
   await Bun.write(join(workspace, "demo-agent.ts"), demoAgentSource())
   await Bun.write(
     join(workspace, "site", "index.html"),

@@ -23,7 +23,7 @@ describe("runner protocol", () => {
       executable: "codex-acp",
       args: ["--quiet"],
     })
-    expect(decoded.secretEnvironmentNames).toEqual(["OPENAI_API_KEY"])
+    expect(decoded.credentialEnvironmentNames).toEqual(["OPENAI_API_KEY"])
   })
 
   test("rejects path traversal and absolute artifact paths", () => {
@@ -134,7 +134,7 @@ describe("runner protocol", () => {
       agent: { executable: "codex-acp", args: [] },
       permissionPolicy: { mode: "deny-all" },
       environment: {},
-      secretEnvironmentNames: ["OPENAI_API_KEY"],
+      credentialEnvironmentNames: ["OPENAI_API_KEY"],
       idleTimeoutMs: 60_000,
     })
     expect(parsed).toMatchObject({ mode: "session", sessionId: "session-1" })
@@ -175,6 +175,6 @@ function validSpec(): RunnerSpec {
     artifactPaths: ["dist"],
     timeoutBudgetMs: 60_000,
     environment: { CI: "1" },
-    secretEnvironmentNames: ["OPENAI_API_KEY"],
+    credentialEnvironmentNames: ["OPENAI_API_KEY"],
   }
 }

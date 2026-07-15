@@ -106,7 +106,8 @@ test("the OpenAPI document represents durable run intent, nullable errors, deplo
       "capabilities",
       "permissionPolicy",
       "envNames",
-      "secretEnvNames",
+      "networkPolicy",
+      "credentials",
     ]),
   )
 

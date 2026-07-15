@@ -1,3 +1,4 @@
+import { runtimeCredentialBroker } from "../credentials"
 import {
   type RuntimeCapabilities,
   type RuntimeProvider,
@@ -47,6 +48,11 @@ export class RuntimeProviderRegistry {
 
   has(name: string): boolean {
     return this.#providers.has(name)
+  }
+
+  supportsCredentialMediation(name: string): boolean {
+    const provider = this.#providers.get(name)
+    return provider !== undefined && runtimeCredentialBroker(provider) !== null
   }
 
   list(): RuntimeProviderDescriptor[] {

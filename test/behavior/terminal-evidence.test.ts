@@ -66,13 +66,15 @@ afterEach(async () => {
 })
 
 describe("durable runner terminal evidence", () => {
-  test("releases only local secret material when supervision detaches from a live run", async () => {
+  test("releases control-plane material while the brokered lease survives supervision detach", async () => {
     const provider = new MockRuntimeProvider()
     const ready = deferred()
-    const externalGrant = { active: true }
-    const environment: Record<string, string> = { [AGENT_SECRET]: "resource-bound-value" }
-    const redactor = new SecretRedactor(["resource-bound-value"])
+    const sourceValue = "resource-bound-value"
+    const environment: Record<string, string> = { [AGENT_SECRET]: sourceValue }
+    const redactor = new SecretRedactor([sourceValue])
     const scopes: Array<Parameters<SecretResolver["resolve"]>[1]> = []
+    const runnerEnvironments: Readonly<Record<string, string>>[] = []
+    let placeholder = ""
     let releases = 0
     const secrets: SecretResolver = {
       validate() {},
@@ -95,6 +97,8 @@ describe("durable runner terminal evidence", () => {
     }
     const runner: RunnerSessionController = {
       async start(input) {
+        runnerEnvironments.push({ ...input.credentialEnvironment })
+        placeholder = input.credentialEnvironment[AGENT_SECRET] ?? ""
         return processHandle(input.provider.name, `${input.runtime.opaque}.${input.processId}`)
       },
       async consume(input) {
@@ -107,6 +111,8 @@ describe("durable runner terminal evidence", () => {
           "1",
         )
         await input.onCursor("1")
+        input.onDiagnostic({ cursor: "2", timestamp: now(), data: `capability=${placeholder}` })
+        await input.onCursor("2")
         ready.resolve()
         return new Promise<RunnerConsumptionResult>((_resolve, reject) => {
           const aborted = () => reject(signal.reason)
@@ -139,7 +145,14 @@ describe("durable runner terminal evidence", () => {
     expect(releases).toBe(1)
     expect(environment).toEqual({})
     expect(redactor.active).toBeFalse()
-    expect(externalGrant.active).toBeTrue()
+    expect(runnerEnvironments).toHaveLength(1)
+    expect(runnerEnvironments[0]?.[AGENT_SECRET]).toMatch(/^mwcap_test_/)
+    expect(runnerEnvironments[0]?.[AGENT_SECRET]).not.toBe(sourceValue)
+    expect(fixture.store.getCredentialLeaseInternal("run", run.id)?.status).toBe("active")
+    expect(provider.operations.some(({ operation }) => operation === "credentialAttach")).toBeTrue()
+    const durableLogs = JSON.stringify(fixture.store.listRunLogs(OWNER_ID, run.id, 0, 100))
+    expect(durableLogs).toContain("capability=[REDACTED]")
+    expect(durableLogs).not.toContain(placeholder)
   })
 
   test("uses control-plane acceptance time instead of a sandbox wall clock", async () => {
@@ -575,7 +588,11 @@ function createRun(
 ): Run {
   const createdAt = now()
   const agentSpec = testAgentSpec({
-    secretEnvNames: Object.keys(options.secretRefs ?? {}),
+    credentials: Object.keys(options.secretRefs ?? {}).map((environmentVariable) => ({
+      environmentVariable,
+      host: "example.com",
+      methods: ["POST"],
+    })),
   })
   const run = store.createRun({
     id: crypto.randomUUID(),

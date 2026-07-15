@@ -89,7 +89,7 @@ Use the smallest current primitive that owns each responsibility completely.
 | Formatting and linting | Biome | One fast quality tool instead of ESLint plus Prettier |
 | Tests | `bun:test` | Same runtime as production; Cloudflare package may use official Worker tooling where required |
 
-Production dependencies must earn their place in this table. Pin exact Cloudflare Sandbox package and container-image versions together. Keep provider-only SDKs inside their provider package.
+Production dependencies must earn their place in this table. Pin the exact Cloudflare Sandbox package, base-image digest, standalone runner Bun version, and agent toolchains as one compatibility unit. The root `packageManager` is the single Bun-version source. Keep provider-only SDKs inside their provider package.
 
 Do not use `@hono/node-server`, Express, Fastify, `better-sqlite3`, `dotenv`, `tsx`, a root Vitest setup, Pino, a DI framework, OTel `NodeSDK`, or the OTel auto-instrumentation metapackage. The OTel JavaScript SDK declares Node support rather than Bun support, so exporters are enabled only after `test/contracts/telemetry.test.ts` proves the exact pinned packages under Bun; exporter failure degrades telemetry health, never run correctness.
 
@@ -196,19 +196,21 @@ Rules:
 - errors preserve provider, operation, safe provider code, and retryability before normalization;
 - providers never receive a database handle.
 
+Agent credentials use a sibling `RuntimeCredentialBroker` contract rather than expanding compute ownership. The control plane durably records an exact lease intent before attachment. A broker receives real values plus exact host/method grants, returns only opaque environment placeholders, makes agent-phase egress default-deny, substitutes values only inside its trusted outbound boundary, scrubs exact source values from the response stream, and revokes idempotently by stable lease identity. Runtime destruction is ineligible until durable revocation succeeds. Providers without this contract reject secret-bearing run/session admission; local execution is not granted an exception.
+
 ### 5.2 Runner protocol
 
 `runner/protocol.ts` is the versioned control-plane-to-runner data contract.
 
-`RunnerSpec` is the one-shot contract: run identity, validated agent argv and logical working-directory policy, prompt, permission policy, artifact declarations, a remaining relative timeout budget, non-secret environment, and secret environment names. `SessionRunnerSpec` launches the same runner in multi-turn mode without a prompt. Subsequent `turn.start`, `turn.interrupt`, and `session.close` commands are versioned, positively sequenced, durably bound to one identity, and delivered only through a provider that declares `processInput`.
+`RunnerSpec` is the one-shot contract: run identity, validated agent argv and logical working-directory policy, prompt, permission policy, artifact declarations, a remaining relative timeout budget, non-secret environment, and credential-placeholder environment names. `SessionRunnerSpec` launches the same runner in multi-turn mode without a prompt. Subsequent `turn.start`, `turn.interrupt`, and `session.close` commands are versioned, positively sequenced, durably bound to one identity, and delivered only through a provider that declares `processInput`.
 
-The control plane remains the owner of persisted absolute deadlines; immediately before spawn or turn dispatch it converts remaining policy time into a bounded duration. The runner enforces that duration with `performance.now()`, so sandbox clock skew cannot extend or prematurely terminate work. The provider sets the physical workspace as process cwd; no provider-private absolute path crosses the protocol. Resolved secret values travel only in the process environment, never in either serialized spec or command.
+The control plane remains the owner of persisted absolute deadlines; immediately before spawn or turn dispatch it converts remaining policy time into a bounded duration. The runner enforces that duration with `performance.now()`, so sandbox clock skew cannot extend or prematurely terminate work. The provider sets the physical workspace as process cwd; no provider-private absolute path crosses the protocol. Real agent credential values never cross into the runner or runtime; only broker-issued placeholders travel in the process environment, never in either serialized spec or command.
 
 Before one-shot spawn, the control plane persists a run-process launch intent containing only runtime/process identity and the accepted relative timeout budget. This freezes the otherwise time-varying process spec across the spawn-before-handle-persistence crash window without persisting secret values. Exact provider spawn retry then reacquires the same process; handle, public process identity, and audit materialize atomically.
 
 Runner stdout is NDJSON protocol only. Every frame includes protocol version, run or session identity, monotonic runner sequence, timestamp, type, and a bounded validated payload. Session turn frames also carry turn identity. Runner diagnostics use stderr. The control plane validates and deduplicates by runner sequence, verifies exact replays, then durably stores accepted evidence.
 
-Runner-side redaction is defense in depth, not a trust boundary. The control plane resolves the operation's known secret values before spawn or reconnect, retains its own redactor for the entire output-observation lifetime, and redacts agent-controlled fields again before SQLite accepts a frame. Protocol identities, terminal outcomes, and other control fields are never rewritten by a coincidental secret-value match.
+Runner-side redaction is defense in depth, not a trust boundary. The control plane retains both resolved values and issued placeholders in its redactor for the entire output-observation lifetime and redacts agent-controlled fields again before SQLite accepts a frame. Protocol identities, terminal outcomes, and other control fields are never rewritten by a coincidental match.
 
 The provider event stream is the live path and provider-owned replay buffer. The database is the durable authority. Do not invent a “protected runner journal” inside the same sandbox: sandbox processes share a security context, so it is not a trustworthy boundary. A provider may spool output outside agent-writable storage, but correctness cannot depend on pretending the agent cannot observe or tamper with same-sandbox resources.
 
@@ -218,7 +220,7 @@ Agent processes run with `TZ=UTC`. Public and durable timestamps are UTC ISO 860
 
 ### 5.3 Agent catalog
 
-`config/agents.json` is the only source of agent launch configuration. Each entry declares ACP transport, executable, argv, working-directory policy, expected capabilities, and allowed non-secret environment names. Validate once at startup and fail fast. No hidden commands or agent conditionals belong in routes or the executor.
+`config/agents.json` is the only source of agent launch configuration. Each entry declares ACP transport, executable, argv, working-directory policy, expected capabilities, allowed non-secret environment names, exact non-credential egress hosts, and exact credential environment/host/method grants. Validate once at startup and fail fast. No hidden commands or agent conditionals belong in routes or the executor.
 
 Executables are bare portable PATH names, never control-plane host paths. At run creation, snapshot the selected non-secret launch definition, capability-derived permission policy, definition digest, and catalog digest into durable run intent and include that snapshot in idempotency. Execution and recovery use the snapshot rather than re-reading mutable catalog configuration. The shipped catalog lists only bundled runnable agents; examples for external ACP adapters live in documentation, and remote executable availability is proved by the provider image and live test.
 
@@ -308,7 +310,7 @@ Recovery strength is an explicit `RuntimeCapabilities` value, not a fabricated u
 
 ### 6.5 Cleanup
 
-Runtime provisioning intents durably cover the create side effect before a provider call. Runtime instances then carry cleanup state: pending/running/succeeded/failed, attempts, last safe error, and next eligible attempt. The reaper reacquires exact runtime identities for interrupted create claims and destroys only terminal or abandoned runtimes, never a runtime for a running run. Reconciliation and destruction are idempotent, audited, observable, and retried only through explicit bounded backoff. A terminal runtime without a cleanup schedule is an invariant violation, not state to auto-repair. Cleanup never deletes run history, logs, artifacts, deployments, or audit records.
+Runtime provisioning intents durably cover the create side effect before a provider call. Runtime instances then carry cleanup state: pending/running/succeeded/failed, attempts, last safe error, and next eligible attempt. Agent credential leases have their own durable attach/active/revoke lifecycle. Terminalization schedules revocation atomically; a runtime is not destruction-eligible until its lease is `revoked`. The reapers reacquire exact identities for interrupted claims and destroy only terminal or abandoned runtimes, never a runtime for running work. Reconciliation, revocation, and destruction are idempotent, audited, observable, and retried only through explicit bounded backoff. A terminal runtime without a cleanup schedule is an invariant violation, not state to auto-repair. Cleanup never deletes run history, logs, artifacts, deployments, or audit records.
 
 ### 6.6 Durable run events
 
@@ -453,22 +455,22 @@ Tenant isolation is structural:
 - previews do not expose authenticated control-plane routes;
 - audit queries are owner-scoped until an explicit operator role exists.
 
-Public run input has `env` for persistable non-secret values and `secretRefs` such as `env://OPENAI_API_KEY`. Resolve a secret only immediately before injection or adapter use, retain the control-plane copy only for its active attachment, and never persist it. A runtime process necessarily retains its injected environment until that process exits; local material release does not alter it.
+Public run input has `env` for persistable non-secret values and `secretRefs` such as `env://OPENAI_API_KEY`. Resolve a secret only immediately before a trusted operation or credential-lease attachment, retain the control-plane copy only for that attachment, and never persist it. Secret-bearing agent work is admitted only when the runtime exposes real credential mediation.
 
-Executors depend on one `SecretResolver` contract that binds resolution to the durable run, session, or deployment identity and returns local sensitive material, its matching redactor, and an awaited release boundary. Release only zeroizes control-plane copies; it never revokes or rotates a credential already injected into compute that may survive a control-plane restart. Reacquiring a recoverable resource must redact every credential value previously injected into that still-existing resource, and live artifact scanning uses the exact values injected into the process rather than resolving again. The built-in process-environment resolver is a local-bootstrap boundary, not a shared tenant namespace: it is deny-all without an explicit catalog, grants only the bootstrap owner, requires agent/deployment source names to match their trusted targets, and permanently reserves control-plane/provider variable names. It does not authorize repository credentials because checkout requires a grant bound to both owner and destination host. Short-lived issuance, renewal, and revocation require a separate resource-lifecycle credential broker; do not impersonate that boundary through resolver material cleanup.
+Executors depend on one `SecretResolver` contract that binds resolution to the durable run, session, or deployment identity and returns local sensitive material, its matching redactor, and an awaited release boundary. Release zeroizes only control-plane copies. Agent executors hand that material to `RuntimeCredentialBroker`, which owns a separately persisted, recoverable, revocable lease; setup and deployment credentials remain scoped to their distinct trusted operations. Live artifact scanning covers both real values and capability placeholders. The built-in process-environment resolver is a local-bootstrap source, not a shared tenant namespace: it is deny-all without an explicit catalog, grants only the bootstrap owner, requires source names to match trusted targets, and permanently reserves control-plane/provider variable names. It does not authorize repository credentials because checkout requires a grant bound to both owner and destination host.
 
 Use the narrowest exposure:
 
 - control-plane, provider, and deployment credentials never enter the agent runtime;
 - repository credentials enter only the checkout operation when unavoidable;
-- model/agent credentials enter only the agent process environment;
-- prefer short-lived, per-run credentials or a credential-brokering proxy for integrations that support it.
+- model/agent credentials remain in the trusted broker; the agent process receives only revocable opaque placeholders;
+- prefer short-lived, per-run source credentials even behind the broker.
 
-Cloudflare Sandbox processes share filesystem, process, and network access inside one sandbox. Therefore any secret injected there must be considered accessible to sandbox code. Process placement is not a secret boundary; least privilege and short lifetime are.
+Cloudflare Sandbox processes share filesystem and process access inside one sandbox, so process placement is not a secret boundary. Meanwhile closes agent-phase egress to an exact host allowlist and keeps source credential values in the Worker/Durable Object boundary rather than injecting them into that shared sandbox.
 
 Construct the redactor before consuming any output. The same boundary covers run logs, structured logs and span attributes, provider errors, audit metadata, artifacts, and deployment logs. Candidate artifacts containing exact known secret bytes are rejected or quarantined before persistence.
 
-Redaction prevents accidental known-value leakage. It cannot stop a malicious agent from transforming or exfiltrating a credential it legitimately received; document this honestly.
+Redaction prevents accidental known-value and placeholder leakage. Credential mediation prevents direct source-credential access; it cannot make an explicitly authorized destination trustworthy or prevent workspace-data exfiltration to that destination.
 
 ## 11. Audit and observability
 
@@ -480,7 +482,7 @@ Keep three evidence planes distinct:
 
 Every critical event carries applicable request, trace/span, owner, run, runtime, process/session, deployment, provider/operation, status, and version identifiers. High-cardinality IDs belong in logs and traces, not metric labels.
 
-Audit at minimum API-key lifecycle, run/session/turn creation, runtime create/start/stop/destroy, agent start, interrupt/cancellation request and result, timeout, session close/continuity loss, policy-driven artifact rejection, and deployment create/start/success/failure. When audit describes a state change, write it in the same transaction.
+Audit at minimum API-key lifecycle, run/session/turn creation, credential attach/revoke, runtime create/start/stop/destroy, agent start, interrupt/cancellation request and result, timeout, session close/continuity loss, policy-driven artifact rejection, and deployment create/start/success/failure. When audit describes a state change, write it in the same transaction.
 
 Create manual spans at ownership boundaries only: HTTP request, run claim/transition, provider operation, runner launch/reconnect and ACP handshake/turn, artifact collection, deployment, and cleanup. Never attach prompts, URLs with credentials, file contents, process output, or secrets.
 
@@ -498,7 +500,7 @@ It is not a security sandbox. README and provider diagnostics must say so. Never
 
 ### 12.2 Cloudflare Sandbox
 
-`src/providers/cloudflare-provider.ts` talks to the independently deployable bridge in `providers/cloudflare-sandbox/`. The bridge uses the official Sandbox SDK and current RPC transport to translate the internal versioned protocol into Sandbox/Container/Durable Object primitives.
+`src/providers/cloudflare-provider.ts` talks to the independently deployable bridge in `providers/cloudflare-sandbox/`. The bridge uses authenticated versioned HTTP between the control plane and Worker, then the official Sandbox SDK's HTTP container transport to translate requests into Sandbox/Container/Durable Object primitives.
 
 The bridge:
 
@@ -508,14 +510,16 @@ The bridge:
 - starts the fixed runner as a background process and delivers one validated runner spec as bounded stdin data; the pinned SDK lacks direct initial-stdin support, so the current bridge uses a random provider-private staging file, quoted redirection, and unconditional deletion without placing prompt data in argv;
 - supports multi-turn sessions through a capability-gated provider-private mailbox because the pinned SDK has no ongoing stdin primitive; a Durable Object first binds each process sequence to one secret-safe command fingerprint, exact retries are idempotent, conflicting reuse fails closed, and only then is the validated command published to the sandbox;
 - exposes cursor-bearing live/replayed stdout frames and separate safe diagnostics;
-- wraps each process with provider-private stdout/stderr closure markers and withholds the irreversible exit cursor until both markers are visible; a missing terminal marker is a retryable provider-evidence failure, never an excuse to publish a guessed tail;
+- durably reserves process identity before spawn and records immutable terminal process evidence in the registry outside the sandbox;
+- wraps each process with matching provider-private stdout/stderr exit-code closure frames, recovers an execution from retained logs after the SDK removes its process row, and withholds the irreversible exit cursor until both frames are visible; a missing terminal frame is a retryable provider-evidence failure, never an excuse to publish a guessed tail or launch the process again;
 - retries only retryable transport failures with bounded, abortable backoff while preserving operation identity and, for events, the same durable cursor;
 - advertises only the hard termination primitive the pinned SDK actually implements; control-plane cancellation then stops remaining sandbox processes through the runtime lifecycle;
 - makes stop/destroy idempotent and explicitly destroys rather than confusing sleep with cleanup;
 - exposes health without credentials;
 - pins Sandbox npm, the custom image, standalone Bun runner, and bundled real-agent toolchains together;
 - uses `standard-1` because the proven coding-agent toolchains exceed `lite` memory; the reference compatibility image may bundle multiple agents, while production profile images remain an adapter-level packaging choice;
-- materializes structured Codex authentication from individually redacted secret values into a process-private home and removes it on process exit;
+- installs a deny-all outbound handler before container startup so SDK-managed HTTPS interception and its ephemeral CA are active even with no credential lease; exact-host/method lease handlers are the only overrides;
+- stores lease values encrypted in trusted Durable Object state, substitutes opaque placeholders only inside the Worker outbound handler, and stream-redacts exact values from upstream responses;
 - passes the shared provider contract, a gated real-account lifecycle test, and real Codex, Claude Code, and Pi generation/session/download/deployment proofs.
 
 Do not import Cloudflare SDK types into core contracts. Do not use a PTY, repeated process launches, or remote ACP to emulate a session. Do not claim same-sandbox runner files, mailbox files, or environment variables are protected from the agent.
@@ -546,6 +550,7 @@ src/domain.ts                     small shared domain vocabulary
 src/errors.ts                     structured error taxonomy
 src/auth.ts                       identity boundary
 src/secrets.ts                    resolution and redaction boundary
+src/credentials.ts                brokered agent credential and lease contract
 src/telemetry.ts                  logs, metrics, traces, correlation
 src/provenance.ts                 immutable execution identity and drift check
 src/data-root.ts                  lease, backup, verify, restore, garbage collection
@@ -557,6 +562,8 @@ src/services/run-executor.ts      only run-state owner
 src/services/run-service.ts       owner-scoped run use cases
 src/services/session-executor.ts  only session/turn execution owner
 src/services/session-service.ts   owner-scoped interactive use cases
+src/services/credential-lease-attacher.ts trusted attach and placeholder boundary
+src/services/credential-lease-reaper.ts durable revocation before compute cleanup
 src/services/workspace-preparer.ts immutable input to provider workspace
 src/services/artifact-collector.ts
 src/services/artifact-service.ts  owner-scoped immutable artifact reads
@@ -621,7 +628,9 @@ Tests must prove:
 - accepted execution provenance persists, participates in idempotency, and rejects adapter/capability drift before compute;
 - deployment admission is owner-scoped and idempotent, and atomically writes one record, immutable-source reference, and create audit;
 - an ambiguous deployment success remains `running` and converges through exact-id reconciliation instead of becoming falsely failed;
-- exact secrets never persist in any log plane, audit metadata, or artifact;
+- exact secrets and capability placeholders never persist in any log plane, audit metadata, or artifact;
+- secret-bearing agent admission rejects providers without credential mediation;
+- credential leases expose placeholders only, bind exact host/method grants, fail closed on conflicting retry, and revoke before runtime destruction;
 - cleanup never destroys a running runtime, is idempotent, and survives restart;
 - provider allocation followed by a crash before handle persistence reacquires the same runtime identity and enters cleanup for terminal run/session work;
 - history survives reopening SQLite;
@@ -664,16 +673,8 @@ bun run typecheck
 bun test
 bun run check
 bun run demo
-bun run demo:codex
-bun run demo:codex:serve
-bun run demo:claude
-bun run demo:claude:serve
-bun run demo:pi
-bun run demo:pi:serve
+bun run demo:serve
 bun run proof:release
-bun run proof:release:local:codex
-bun run proof:release:local:claude
-bun run proof:release:local:pi
 bun run proof:release:cloudflare
 bun run proof:release:cloudflare:codex
 bun run proof:release:cloudflare:claude
@@ -734,7 +735,7 @@ Honest current limits:
 - local execution is not isolation;
 - SQLite supports one active control-plane writer;
 - in-flight recovery is only as strong as provider process identity and replay;
-- redaction does not stop deliberate secret transformation or network exfiltration;
+- mediated credentials do not make an allowed destination trustworthy or prevent workspace-data exfiltration to it;
 - Cloudflare requires a configured account and deployed bridge;
 - local-static is the only no-account deploy target required;
 - idle session timeout closes continuity; provider-neutral suspend/resume is not implemented;
@@ -758,7 +759,7 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 - Durable sessions keep one ACP identity across ordered turns, explicit conflict policies, interrupt and per-turn timeout, process replay, control-plane restart, exact evidence deduplication, and independent runtime-lease cleanup. Local and Cloudflare paths are proven against the same public SDK and runner contracts.
 - The no-account demo proves create → ACP run → durable logs/status → SDK artifact download → SDK deployment → isolated preview. The release proof binds exact agent output to the revision, verifies the immutable downloaded bytes and deployed URL, validates telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
-- Authenticated local compatibility proofs run Codex, Claude Code, and Pi through pinned ACP adapters, require agent-written output, and complete artifact promotion plus preview verification without persisting local credentials.
+- The local proof is deliberately credential-free and deterministic. Credential-bearing Codex, Claude Code, and Pi proofs run only through the Cloudflare mediation boundary; local execution has no exception path.
 - The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. Each credential-gated acceptance proof requires real remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup.
 - Version `0.1.1` is the current tagged release baseline, not a blanket production-support promise. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
 

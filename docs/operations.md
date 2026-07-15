@@ -49,7 +49,7 @@ Bun loads local `.env` files for development. Production should inject environme
 
 The complete safe template is [.env.example](../.env.example). Invalid recognized values, ports, catalog entries, default-provider selection, and endpoints fail validation rather than falling back silently. An explicit unknown provider on run creation is rejected before input or run persistence.
 
-Any variable referenced through `env://NAME` is a process secret, not ordinary configuration. It must not be emitted by `doctor`, health, logs, telemetry, audit, or error output. The environment catalog is deliberately single-owner; provisioned tenants need a tenant-scoped secret-manager adapter. Checkout credentials additionally require repository-host binding and are therefore unsupported by this environment source.
+Any variable referenced through `env://NAME` is secret source material, not ordinary configuration. It must not be emitted by `doctor`, health, logs, telemetry, audit, or error output. For agent runs/sessions, a mediating provider keeps the source value outside compute and exposes only a revocable placeholder; a provider without that boundary rejects admission. The environment catalog is deliberately single-owner; provisioned tenants need a tenant-scoped secret-manager adapter. Checkout credentials additionally require repository-host binding and are therefore unsupported by this environment source.
 
 ## Durable data
 
@@ -242,6 +242,8 @@ Before enabling it in the control plane:
 8. run `bun run proof:release:cloudflare` to prove the deterministic ACP/provider compatibility path with complete configured provenance;
 9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require real generation, two-turn continuity across control-plane restart, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, backup/restore, and second boot for every bundled toolchain;
 10. inspect Cloudflare for leaked test resources.
+
+The live provider test also proves the native security path: source credential absent from process environment, exact allowed-host substitution, durable revocation, and default-deny egress after revocation. Real-agent proofs accept only credential shapes that remain opaque to the client. Codex therefore requires an API key; ChatGPT session tokens, Claude file credentials, and metadata-service authority are rejected instead of being injected into the sandbox.
 
 Wrangler upload completion is not bridge readiness. The live test and release proofs use the same authenticated Bun `RuntimeProvider.health()` transport as production and wait within a fixed budget before beginning lifecycle assertions. Health proves bridge protocol availability, not compute materialization: a newly bound container application may still return a provider-classified transient error on its first Sandbox start. The Cloudflare adapter retries that idempotent mutation with bounded backoff under the run's provisioning deadline. A different client or an arbitrary delay is not accepted as readiness evidence.
 

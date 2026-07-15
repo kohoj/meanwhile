@@ -30,7 +30,7 @@ SDK / CLI / upstream agent
         ┌───────┴────────┐          └── local-static
         │                │
  local processes   Cloudflare bridge
-        │                │ RPC
+        │                │ authenticated HTTP
         └──── isolated runtime ─────┘
                     │
              meanwhile-runner
@@ -48,7 +48,7 @@ durable AgentSession ─► Turn 1 ─► Turn 2 ─► …
              └────────► RuntimeLease ─► ordered runner commands
 ```
 
-The Cloudflare bridge is independently deployable because it runs in a different platform runtime and owns provider translation. It is not a second control plane and stores no owner, run, artifact, or deployment policy.
+The Cloudflare bridge is independently deployable because it runs in a different platform runtime and owns provider translation. It is not a second control plane and stores no owner, run, artifact, or deployment policy. Its narrow Durable Object registry owns only provider-side lifecycle evidence: exact runtime/process admission, immutable terminal process snapshots, input sequence bindings, and encrypted credential leases. This lets an exited SDK process be recovered through matching exit-code closure frames in retained logs without promoting provider state to run authority or re-running the agent.
 
 ## Four durable concepts
 
@@ -75,11 +75,12 @@ Interactive work adds `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent`
 | Session executor | Session/turn claims, deadlines, command dispatch, replay, continuity, cleanup | Public request parsing, provider-name branches |
 | Store | SQL, transactions, ordering, uniqueness, owner predicates | Provider calls, secret values, artifact bodies |
 | Runtime provider | Compute, process, event, ordered input, file, expose, health primitives | Owners, run/session status, audit policy, deployment |
+| Credential broker | Exact agent egress policy, opaque placeholders, trusted substitution, revocation | Compute, owner authorization, run/session status |
 | Runner session | Runner launch/reconnect and validated event ingestion | ACP implementation details |
 | Runtime-local runner | ACP session, child process group, relative timeout budget, protocol frames | Durable status, auth, storage, deployment |
 | Artifact collector/store | Safe capture and immutable bytes | Run outcome decisions |
 | Deployment executor/adapter | Deployment state and target execution | Mutable runtime access, run mutation |
-| Reaper | Eligible runtime destruction and cleanup evidence | Deleting durable product history |
+| Credential/runtime reapers | Credential revocation, eligible runtime destruction, cleanup evidence | Deleting durable product history |
 
 The most important negative rule is simple: neither executor branches on a provider name. Provider choice is resolved by a registry; capability decisions use explicit provider-neutral facts.
 
@@ -112,11 +113,13 @@ One executor calls the store's dedicated `claimRunProvisioning` compare-and-swap
 
 Before compute, the executor verifies that current provider/runner provenance still matches the accepted snapshot. A mismatch fails closed without a provider operation. It then atomically records a stable runtime identity in a durable provisioning intent before calling the provider. `RuntimeProvider.create` is idempotent for that identity: if allocation succeeds but the process dies before the returned handle is persisted, restart reconciliation reacquires the same logical runtime, materializes its opaque handle, and either resumes active work or destroys it for terminal work. The provider then starts compute and receives safe workspace input. Core code never inspects provider-private handle fields.
 
+After trusted workspace setup and before any agent process exists, the executor resolves referenced agent credentials in the control plane and attaches one durable `RuntimeCredentialBroker` lease. The snapshotted agent catalog supplies exact host/method grants. A mediating provider closes agent-phase egress to that allowlist, stores the source values outside the sandbox, returns only opaque placeholders, and stream-redacts exact values from authorized upstream responses. Providers without this boundary reject secret-bearing agent admission. Setup credentials and deployment credentials remain separate operations and never inherit the agent lease.
+
 Immediately before one-shot runner spawn, the executor persists a run-process launch intent containing stable runtime/process identities and the accepted remaining timeout budget, but no secret values. This freezes the full process specification across a control-plane crash: an exact `spawn` retry reacquires the same provider process instead of recomputing a different relative timeout and conflicting with it. Process handle, public run process identity, and start audit then materialize in one transaction.
 
 ### 3. Establish ACP
 
-The control plane sends one validated `RunnerSpec` to the runner through initial stdin. It converts the remaining persisted deadline into a relative timeout budget immediately before spawn; no control-plane or sandbox wall-clock instant crosses the runner protocol. Resolved secret values are process environment only and are absent from the serialized specification.
+The control plane sends one validated `RunnerSpec` to the runner through initial stdin. It converts the remaining persisted deadline into a relative timeout budget immediately before spawn; no control-plane or sandbox wall-clock instant crosses the runner protocol. Real agent credential values never enter the runner or sandbox; the process environment contains only revocable broker placeholders, and even their names remain outside the serialized specification.
 
 The runner launches the snapshotted bare PATH executable and argv directly with `TZ=UTC`, initializes ACP, negotiates capabilities, creates a session, and begins the prompt turn. It enforces the relative budget with a monotonic clock. The provider runtime or image, not the control-plane host, owns executable availability. Only atomic acceptance of the validated `session.started` frame transitions the run to `running`; no restart-time log scan can synthesize that transition.
 
@@ -142,13 +145,13 @@ The store also appends one contiguous `RunEvent` journal across status changes, 
 
 Atomic acceptance of a validated runner terminal frame first reserves that exact runner result together with its immutable log. This is the runner side of outcome arbitration: once reserved, cancellation, timeout, and control-plane failure cannot replace it. If another terminal status already committed, the frame is stored as `terminal.late` and reserves nothing. No recovery path derives a reservation from log text.
 
-The executor then captures declared artifacts while the disposable runtime is still available. Capture uses abortable provider observations, remains bounded by the run's original absolute deadline, enforces bounds and path safety, scans for known secret values, hashes deterministic bytes, and stores them atomically. Recovery never restarts a non-running runtime solely to capture output. Deadline expiry records `ARTIFACT_CAPTURE_TIMED_OUT` and finalizes the reserved runner result without artifacts. A failed agent can still produce useful artifacts. Capture failure is separate evidence unless an explicit product policy says otherwise.
+The executor then captures declared artifacts while the disposable runtime is still available. Capture uses abortable provider observations, remains bounded by the run's original absolute deadline, enforces bounds and path safety, scans for both resolved values and capability placeholders, hashes deterministic bytes, and stores them atomically. Recovery never restarts a non-running runtime solely to capture output. Deadline expiry records `ARTIFACT_CAPTURE_TIMED_OUT` and finalizes the reserved runner result without artifacts. A failed agent can still produce useful artifacts. Capture failure is separate evidence unless an explicit product policy says otherwise.
 
 After the capture attempt, `claimRunOutcome` is the single public terminal-status commit. Its transaction verifies the exact reservation and commits status/version, status event, audit, terminal system log, and runtime cleanup eligibility together. Restart recovery resumes this finalization from the reservation. A terminal run never transitions again.
 
 ### 6. Clean up
 
-Terminalization makes the associated runtime eligible for durable cleanup in the same transaction. The reaper first reconciles interrupted provisioning intents, including the crash window where remote allocation succeeded before handle persistence, then claims cleanup work, calls idempotent `destroy`, records safe failure evidence and bounded backoff when necessary, and audits each attempt.
+Terminalization atomically schedules both credential revocation and eventual runtime cleanup. The credential reaper reacquires the exact lease identity, clears outbound policy, removes encrypted value material, and records bounded retry/audit evidence. Runtime destruction remains ineligible until that lease is durably `revoked`. The runtime reaper then reconciles interrupted provisioning intents, including the crash window where remote allocation succeeded before handle persistence, claims cleanup work, calls idempotent `destroy`, records safe failure evidence and bounded backoff when necessary, and audits each attempt.
 
 Cleanup never deletes the run, logs, status events, artifacts, deployments, or audit records. A runtime for a `running` run is never eligible. A terminal runtime lacking its cleanup schedule is rejected as corrupt state rather than silently repaired.
 

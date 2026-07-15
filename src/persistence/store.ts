@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import type { CredentialLease, CredentialLeaseStatus } from "../credentials"
 import {
   type AgentLaunchSnapshot,
   type AgentSession,
@@ -48,6 +49,7 @@ type Bind = string | number | bigint | boolean | null | Uint8Array
 const MAX_SESSION_CLEANUP_ATTEMPTS = 5
 const SESSION_CLEANUP_BASE_DELAY_MS = 1_000
 const SESSION_CLEANUP_MAX_DELAY_MS = 60_000
+const MAX_CREDENTIAL_REVOKE_ATTEMPTS = 5
 
 interface RunRow extends Record<string, Bind> {
   id: string
@@ -91,6 +93,25 @@ interface RuntimeRow extends Record<string, Bind> {
   created_at: string
   updated_at: string
   destroyed_at: string | null
+}
+
+interface CredentialLeaseRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  resource_type: CredentialLease["resourceType"]
+  resource_id: string
+  runtime_id: string
+  runtime_handle_json: string
+  provider: string
+  policy_digest: string
+  handle_json: string | null
+  status: CredentialLeaseStatus
+  attempts: number
+  last_error_json: string | null
+  next_attempt_at: string | null
+  created_at: string
+  updated_at: string
+  revoked_at: string | null
 }
 
 interface RuntimeProvisioningIntentRow extends Record<string, Bind> {
@@ -443,6 +464,25 @@ const runtimeFromRow = (row: RuntimeRow): RuntimeInstance => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   destroyedAt: row.destroyed_at,
+})
+
+const credentialLeaseFromRow = (row: CredentialLeaseRow): CredentialLease => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  resourceType: row.resource_type,
+  resourceId: row.resource_id,
+  runtimeId: row.runtime_id,
+  runtimeHandle: parse<JsonObject>(row.runtime_handle_json),
+  provider: row.provider,
+  policyDigest: row.policy_digest,
+  handle: row.handle_json === null ? null : parse<JsonObject>(row.handle_json),
+  status: row.status,
+  attempts: row.attempts,
+  lastError: row.last_error_json === null ? null : parse<StructuredError>(row.last_error_json),
+  nextAttemptAt: row.next_attempt_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  revokedAt: row.revoked_at,
 })
 
 const runtimeProvisioningIntentFromRow = (
@@ -1662,6 +1702,7 @@ export class Store {
         createdAt: input.at,
       })
       if (log === null) throw new AppError({ code: "INTERNAL", message: "Run log claim was lost" })
+      this.scheduleCredentialRevocation("run", run.id, input.at)
       this.scheduleRuntimeCleanupForRun(run.id, input.at)
       return { outcome: "claimed", run: claimed }
     })
@@ -2492,6 +2533,235 @@ export class Store {
     return row === null ? null : runtimeFromRow(row)
   }
 
+  ensureCredentialLease(input: {
+    readonly ownerId: string
+    readonly resourceType: CredentialLease["resourceType"]
+    readonly resourceId: string
+    readonly runtimeId: string
+    readonly runtimeHandle: JsonObject
+    readonly provider: string
+    readonly policyDigest: string
+    readonly at: string
+  }): CredentialLease | null {
+    return this.database
+      .transaction(() => {
+        const existing = this.database
+          .query<CredentialLeaseRow, [string, string, string]>(
+            "SELECT * FROM credential_leases WHERE owner_id=? AND resource_type=? AND resource_id=?",
+          )
+          .get(input.ownerId, input.resourceType, input.resourceId)
+        const encodedRuntimeHandle = stringify(input.runtimeHandle)
+        if (existing !== null) {
+          if (
+            existing.runtime_id !== input.runtimeId ||
+            existing.runtime_handle_json !== encodedRuntimeHandle ||
+            existing.provider !== input.provider ||
+            existing.policy_digest !== input.policyDigest
+          ) {
+            throw new AppError({
+              code: "DATABASE_INTEGRITY_FAILED",
+              message: "Credential lease conflicts with durable execution intent",
+            })
+          }
+          return credentialLeaseFromRow(existing)
+        }
+
+        const eligible =
+          input.resourceType === "run"
+            ? this.database
+                .query<{ eligible: number }, [string, string, string, string]>(`
+                  SELECT EXISTS(
+                    SELECT 1 FROM runs run
+                    JOIN runtime_instances runtime
+                      ON runtime.owner_id=run.owner_id AND runtime.run_id=run.id
+                    WHERE run.owner_id=? AND run.id=? AND runtime.id=? AND runtime.provider=?
+                      AND run.status IN ('provisioning','running')
+                  ) AS eligible
+                `)
+                .get(input.ownerId, input.resourceId, input.runtimeId, input.provider)?.eligible ===
+              1
+            : this.database
+                .query<{ eligible: number }, [string, string, string, string]>(`
+                  SELECT EXISTS(
+                    SELECT 1 FROM agent_sessions session
+                    JOIN session_runtime_leases runtime
+                      ON runtime.owner_id=session.owner_id AND runtime.session_id=session.id
+                    WHERE session.owner_id=? AND session.id=? AND session.runtime_id=?
+                      AND runtime.provider=?
+                      AND session.status IN ('provisioning','idle','running','closing')
+                  ) AS eligible
+                `)
+                .get(input.ownerId, input.resourceId, input.runtimeId, input.provider)?.eligible ===
+              1
+        if (!eligible) return null
+
+        this.database
+          .query(`
+            INSERT INTO credential_leases(
+              id,owner_id,resource_type,resource_id,runtime_id,runtime_handle_json,provider,
+              policy_digest,handle_json,status,attempts,last_error_json,next_attempt_at,
+              created_at,updated_at,revoked_at
+            ) VALUES (?,?,?,?,?,?,?,?,NULL,'attaching',0,NULL,NULL,?,?,NULL)
+          `)
+          .run(
+            crypto.randomUUID(),
+            input.ownerId,
+            input.resourceType,
+            input.resourceId,
+            input.runtimeId,
+            encodedRuntimeHandle,
+            input.provider,
+            input.policyDigest,
+            input.at,
+            input.at,
+          )
+        return this.getCredentialLeaseInternal(input.resourceType, input.resourceId)
+      })
+      .immediate()
+  }
+
+  getCredentialLeaseInternal(
+    resourceType: CredentialLease["resourceType"],
+    resourceId: string,
+  ): CredentialLease | null {
+    const row = this.database
+      .query<CredentialLeaseRow, [string, string]>(
+        "SELECT * FROM credential_leases WHERE resource_type=? AND resource_id=?",
+      )
+      .get(resourceType, resourceId)
+    return row === null ? null : credentialLeaseFromRow(row)
+  }
+
+  materializeCredentialLease(input: {
+    readonly leaseId: string
+    readonly handle: JsonObject
+    readonly at: string
+    readonly audit: AuditRecord
+  }): CredentialLease {
+    return this.database
+      .transaction(() => {
+        const row = this.database
+          .query<CredentialLeaseRow, [string]>("SELECT * FROM credential_leases WHERE id=?")
+          .get(input.leaseId)
+        if (row === null) {
+          throw new AppError({ code: "INTERNAL", message: "Credential lease intent is missing" })
+        }
+        const encodedHandle = stringify(input.handle)
+        if (row.handle_json !== null && row.handle_json !== encodedHandle) {
+          throw new AppError({
+            code: "DATABASE_INTEGRITY_FAILED",
+            message: "Credential lease handle conflicts with the durable identity",
+          })
+        }
+        if (row.status === "revoked") return credentialLeaseFromRow(row)
+        if (row.handle_json === null) {
+          const status = row.status === "attaching" ? "active" : row.status
+          this.database
+            .query(
+              "UPDATE credential_leases SET handle_json=?,status=?,updated_at=? WHERE id=? AND handle_json IS NULL",
+            )
+            .run(encodedHandle, status, input.at, input.leaseId)
+          this.insertAudit(input.audit)
+        }
+        const materialized = this.database
+          .query<CredentialLeaseRow, [string]>("SELECT * FROM credential_leases WHERE id=?")
+          .get(input.leaseId)
+        if (materialized === null) throw new Error("Materialized credential lease is missing")
+        return credentialLeaseFromRow(materialized)
+      })
+      .immediate()
+  }
+
+  recoverInterruptedCredentialRevocations(at: string): number {
+    const error: StructuredError = {
+      code: "CREDENTIAL_REVOCATION_INTERRUPTED",
+      message: "Credential revocation was interrupted and will be reconciled",
+      retryable: true,
+    }
+    return this.database
+      .query(`
+        UPDATE credential_leases SET status='failed',last_error_json=?,next_attempt_at=?,updated_at=?
+        WHERE status='revoking'
+      `)
+      .run(stringify(error), at, at).changes
+  }
+
+  listCredentialRevocationCandidates(at: string, limit = 100): readonly CredentialLease[] {
+    return this.database
+      .query<CredentialLeaseRow, [number, string, number]>(`
+        SELECT * FROM credential_leases
+        WHERE status IN ('revoke_pending','failed') AND attempts<?
+          AND next_attempt_at IS NOT NULL AND next_attempt_at<=?
+        ORDER BY next_attempt_at,id LIMIT ?
+      `)
+      .all(MAX_CREDENTIAL_REVOKE_ATTEMPTS, at, Math.min(Math.max(limit, 1), 100))
+      .map(credentialLeaseFromRow)
+  }
+
+  claimCredentialRevocation(leaseId: string, at: string): CredentialLease | null {
+    return this.database.transaction(() => {
+      const changed = this.database
+        .query(`
+          UPDATE credential_leases SET status='revoking',attempts=attempts+1,
+            next_attempt_at=NULL,updated_at=?
+          WHERE id=? AND status IN ('revoke_pending','failed')
+            AND next_attempt_at IS NOT NULL AND next_attempt_at<=? AND attempts<?
+        `)
+        .run(at, leaseId, at, MAX_CREDENTIAL_REVOKE_ATTEMPTS)
+      if (changed.changes !== 1) return null
+      const row = this.database
+        .query<CredentialLeaseRow, [string]>("SELECT * FROM credential_leases WHERE id=?")
+        .get(leaseId)
+      return row === null ? null : credentialLeaseFromRow(row)
+    })()
+  }
+
+  finishCredentialRevocation(input: {
+    readonly leaseId: string
+    readonly at: string
+    readonly error: StructuredError | null
+    readonly nextAttemptAt: string | null
+    readonly audit: AuditRecord
+  }): void {
+    this.database.transaction(() => {
+      const row = this.database
+        .query<CredentialLeaseRow, [string]>("SELECT * FROM credential_leases WHERE id=?")
+        .get(input.leaseId)
+      if (row?.status !== "revoking") return
+      const exhausted = input.error !== null && row.attempts >= MAX_CREDENTIAL_REVOKE_ATTEMPTS
+      const nextAttemptAt = input.error === null || exhausted ? null : input.nextAttemptAt
+      const error =
+        input.error === null ? null : { ...input.error, retryable: nextAttemptAt !== null }
+      this.database
+        .query(`
+          UPDATE credential_leases SET status=?,last_error_json=?,next_attempt_at=?,
+            revoked_at=?,updated_at=? WHERE id=? AND status='revoking'
+        `)
+        .run(
+          input.error === null ? "revoked" : "failed",
+          error === null ? null : stringify(error),
+          nextAttemptAt,
+          input.error === null ? input.at : null,
+          input.at,
+          input.leaseId,
+        )
+      this.insertAudit(input.audit)
+    })()
+  }
+
+  private scheduleCredentialRevocation(
+    resourceType: CredentialLease["resourceType"],
+    resourceId: string,
+    at: string,
+  ): void {
+    this.database
+      .query(`
+        UPDATE credential_leases SET status='revoke_pending',next_attempt_at=?,updated_at=?
+        WHERE resource_type=? AND resource_id=? AND status IN ('attaching','active','failed')
+      `)
+      .run(at, at, resourceType, resourceId)
+  }
+
   ensureRunProcessLaunchIntent(input: {
     readonly runId: string
     readonly ownerId: string
@@ -2670,6 +2940,11 @@ export class Store {
         SELECT ri.* FROM runtime_instances ri
         JOIN runs r ON r.owner_id = ri.owner_id AND r.id = ri.run_id
         WHERE r.status IN ('succeeded','failed','cancelled','timed_out')
+          AND NOT EXISTS (
+            SELECT 1 FROM credential_leases credential
+            WHERE credential.resource_type='run' AND credential.resource_id=r.id
+              AND credential.status!='revoked'
+          )
           AND ri.cleanup_status IN ('pending','failed')
           AND ri.cleanup_attempts < ?
           AND ri.cleanup_next_attempt_at IS NOT NULL AND ri.cleanup_next_attempt_at <= ?
@@ -4450,6 +4725,7 @@ export class Store {
             )
             .run(status, input.createdAt, input.createdAt, input.sessionId)
           this.#insertSessionStatus(sessionRow, status, `runner_${String(reason)}`, input.createdAt)
+          this.scheduleCredentialRevocation("session", input.sessionId, input.createdAt)
           this.#scheduleSessionCleanup(input.sessionId, input.createdAt)
         }
       }
@@ -4475,6 +4751,7 @@ export class Store {
         )
         .run(stringify(error), at, at, sessionId)
       this.#insertSessionStatus(row, "failed", error.code, at)
+      this.scheduleCredentialRevocation("session", sessionId, at)
       this.#scheduleSessionCleanup(sessionId, at)
     })()
   }
@@ -4492,6 +4769,7 @@ export class Store {
         )
         .run(stringify(error), at, at, sessionId)
       this.#insertSessionStatus(row, "continuity_lost", error.code, at)
+      this.scheduleCredentialRevocation("session", sessionId, at)
       this.#scheduleSessionCleanup(sessionId, at)
     })()
   }
@@ -4510,6 +4788,7 @@ export class Store {
         )
         .run(at, at, sessionId)
       this.#insertSessionStatus(row, "closed", reason, at)
+      this.scheduleCredentialRevocation("session", sessionId, at)
       this.#scheduleSessionCleanup(sessionId, at)
     })()
   }
@@ -4543,6 +4822,11 @@ export class Store {
         JOIN agent_sessions session
           ON session.owner_id=lease.owner_id AND session.id=lease.session_id
         WHERE session.status IN ('closed','failed','continuity_lost')
+          AND NOT EXISTS (
+            SELECT 1 FROM credential_leases credential
+            WHERE credential.resource_type='session' AND credential.resource_id=session.id
+              AND credential.status!='revoked'
+          )
           AND lease.cleanup_status IN ('pending','failed')
           AND lease.cleanup_next_attempt_at IS NOT NULL
           AND lease.cleanup_next_attempt_at<=?
@@ -4583,6 +4867,12 @@ export class Store {
               SELECT 1 FROM agent_sessions session
               WHERE session.id=session_runtime_leases.session_id
                 AND session.status IN ('closed','failed','continuity_lost')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM credential_leases credential
+              WHERE credential.resource_type='session'
+                AND credential.resource_id=session_runtime_leases.session_id
+                AND credential.status!='revoked'
             )
         `)
         .run(at, sessionId, at, MAX_SESSION_CLEANUP_ATTEMPTS)

@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception"
+import { CredentialBrokerError } from "./credentials"
 import type { JsonObject, StructuredError } from "./domain"
 import { RuntimeProviderError } from "./providers/runtime-provider"
 import { SecretResolutionError } from "./secrets"
@@ -108,9 +109,26 @@ export const normalizeError = (error: unknown): AppError => {
     })
   }
   if (error instanceof RuntimeProviderError) {
+    if (error.code === "RUNTIME_LOST") {
+      return new AppError({
+        code: "RUNTIME_LOST",
+        message: "Runtime execution state could not be recovered",
+        retryable: false,
+        details: { provider: error.provider, operation: error.operation },
+        cause: error,
+      })
+    }
     return new ProviderError({
       provider: error.provider,
       operation: error.operation,
+      providerCode: error.code,
+      retryable: error.retryable,
+    })
+  }
+  if (error instanceof CredentialBrokerError) {
+    return new ProviderError({
+      provider: error.provider,
+      operation: `credential.${error.operation}`,
       providerCode: error.code,
       retryable: error.retryable,
     })

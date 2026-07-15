@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - Owner-scoped request idempotency for deployment admission across HTTP/OpenAPI, SDK, CLI, service, and SQLite, with canonical immutable-intent hashing and atomic create audit evidence.
 - A common resource-bound `SecretResolver` material contract with awaited local zeroization, without coupling executors to the bootstrap environment resolver or conflating observation cleanup with credential revocation.
+- A provider-neutral `RuntimeCredentialBroker` boundary with durable per-run/session leases, opaque agent placeholders, exact host/method policy, restart-safe attachment, and bounded audited revocation before runtime destruction.
 - Cloudflare live and release proofs now wait on bounded production-transport provider readiness, while idempotent lifecycle mutations absorb provider-classified container rollout transients without wall-clock readiness assumptions.
 - Durable run/session runtime-provisioning intents and one-shot process-launch intents that close allocation/spawn-before-handle-persistence crash windows through exact-id provider reconciliation.
 - Durable `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent` resources across SQLite, HTTP/OpenAPI, the typed SDK, and CLI, preserving one ACP context across ordered prompts.
@@ -18,7 +19,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Provider-neutral ordered/idempotent process input plus complete local mailbox execution and a versioned Cloudflare bridge mailbox backed by durable sequence/fingerprint reservation.
 - Restart reconciliation for live interactive sessions, including provider/runner replay, exact evidence deduplication, undispatched command recovery, and explicit `continuity_lost` semantics.
 - Session telemetry for durable queue/active/runtime/cleanup state and bounded turn outcomes, plus owner-isolation, secret-redaction, timeout, replay, cleanup, and restart tests.
-- Exact Codex, Claude Code, and Pi ACP/runtime pairs in the Cloudflare compatibility image, with real-agent local and remote release-proof commands.
+- Exact Codex, Claude Code, and Pi ACP/runtime pairs in the Cloudflare compatibility image, with brokered remote release-proof commands.
 
 ### Changed
 
@@ -27,7 +28,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - SQLite now has one current schema initialized atomically on an empty database and bound to an exact source fingerprint. Every foreign, partial, or differently fingerprinted database is rejected without upgrade, backfill, repair, or dual reads.
 - Invalid provenance and deployment-log rows now fail as persisted-contract violations instead of entering alternate read fallbacks.
 - Runner protocol v3 now supports both one-shot `RunnerSpec` and prompt-free `SessionRunnerSpec` modes with versioned turn, interrupt, and close commands.
-- Cloudflare bridge protocol v4 adds capability-gated process input without exposing SDK types or remote ACP to the control-plane core.
+- Cloudflare bridge protocol v6 combines capability-gated process input with encrypted credential leases, native exact-host egress policy, Worker-side HTTP substitution, streaming response redaction, and idempotent revocation without exposing SDK types to the control-plane core.
+- Cloudflare runner staging now derives an explicit cross-compile Bun version from the root package manager, and the image gate verifies both embedded executables against it; the Sandbox base image is digest-pinned.
 - Data-root quiescence and operational telemetry now include durable sessions and their independent runtime-lease cleanup lifecycle.
 - Run and session admission are independently configurable; restart reconciliation always supervises already-live sessions, while session cleanup retains a separate bounded lane.
 - Session and turn history use keyset/cursor pagination, turns have a direct read route, and the SDK provides direct turn waits, explicit session-status waits, and replay-safe retry across temporary API unavailability.
@@ -48,12 +50,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Local runtime destruction now waits for observed process exit publication before removing runtime state, eliminating a cleanup race with final exit metadata.
 - Session command sequences are filename and persistence identities, preventing one sequence from being rebound to a different command ID.
 - Timeline message identity now includes ACP role as well as turn and message ID, so an agent reusing one ID for thought and final output cannot collapse them.
-- Cloudflare process output now carries explicit stdout/stderr closure markers; the bridge fails retryably instead of publishing an exit cursor before both eventually consistent log tails are complete.
+- Cloudflare process admission and immutable terminal results now persist in the bridge registry. Matching stdout/stderr exit-code closure frames recover the same execution through retained SDK logs after its active process row disappears, preventing duplicate spawn and premature or lost terminal evidence.
+- Cloudflare event replay drains once after terminal process observation, so a final log page published behind process state cannot be lost; stop snapshots no longer query a process API after the container is unavailable.
+- Session terminal outcomes now use a declared counter instrument, keeping the failure path inside the fixed telemetry contract.
 - The Cloudflare Codex wrapper retains its process-private authentication home through adapter exit and invokes the native pinned Codex executable directly.
 - Third-party notice verification now rebuilds clean dependency roots and confines resolution to each declared graph, so cached, hoisted, or ancestor packages cannot make the release manifest depend on CI host state.
 
 ### Security
 
+- Secret-bearing run/session admission now fails on providers without credential mediation. Cloudflare agent processes receive only revocable placeholders; real values remain encrypted in trusted bridge state and are substituted only for exact authorized destinations and methods under default-deny egress.
+- Cloudflare installs deny-all outbound interception before container startup, so SDK-managed HTTPS certificate material is present even before a credential lease and exact-host handlers remain the only egress overrides.
+- Local real-agent credential commands were removed because the local provider is not a credential boundary; the deterministic no-account local demo remains the complete local path.
 - Session prompts and resolved credentials stay out of process argv, runner specs, provider handles, telemetry, and durable evidence; the control plane retains an independent operation-scoped redactor through spawn/reconnect and redacts agent-controlled fields before SQLite accepts session output.
 - Cloudflare reserves each process-input sequence against a secret-safe fingerprint before sandbox delivery; exact retries are harmless and conflicting reuse fails closed.
 - Structured Codex login material is split into individually redacted secret values and reconstructed only inside the short-lived wrapper process instead of crossing the runner boundary as one opaque JSON credential.

@@ -3,6 +3,7 @@
 !.runner/meanwhile-demo-agent
 !.runner/LICENSE
 !.runner/THIRD_PARTY_NOTICES
+!.runner/BUN_VERSION
 !image/
 image/*
 !image/package.json

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { AgentSession, SessionTurn } from "../../src/api/contracts"
-import { issueApiKey } from "../../src/auth"
+import { issueApiKey, LOCAL_BOOTSTRAP_OWNER_ID } from "../../src/auth"
 import { type ApplicationHarness, createApplicationHarness } from "../application-harness"
 
 let harness: ApplicationHarness | null = null
@@ -242,7 +242,7 @@ describe("durable interactive agent sessions", () => {
     await closeSession(harness, created.id)
   })
 
-  test("redacts resolved agent credentials from the durable session journal", async () => {
+  test("rejects agent credentials on a runtime without trusted mediation", async () => {
     const source = "TEST_RUNNER_SECRET"
     const original = Bun.env[source]
     const secret = `session-secret-${crypto.randomUUID()}`
@@ -252,21 +252,14 @@ describe("durable interactive agent sessions", () => {
       const response = await createSessionResponse(harness, {}, "session-secret", {
         TEST_RUNNER_SECRET: `env://${source}`,
       })
-      expect(response.status).toBe(201)
-      const created = ((await response.json()) as { session: AgentSession }).session
-      await waitForSession(harness, created.id, "idle")
-      const turn = await sendTurn(harness, created.id, "secret proof", "reject", "secret-turn")
-      await waitForTurn(harness, created.id, turn.id, "succeeded")
-      const events = await (
-        await harness.request(`/sessions/${created.id}/events?after=0&limit=1000`)
-      ).text()
-      expect(events).not.toContain(secret)
-      expect(events).toContain("[REDACTED]")
+      expect(response.status).toBe(422)
+      expect(await response.json()).toMatchObject({
+        error: { code: "PROVIDER_CAPABILITY_UNAVAILABLE" },
+      })
+      expect(
+        harness.application.store.listAgentSessions(LOCAL_BOOTSTRAP_OWNER_ID, { limit: 100 }).items,
+      ).toEqual([])
       expect(harness.operationalLogs.join("\n")).not.toContain(secret)
-      expect(JSON.stringify(harness.application.store.listAudit(created.ownerId))).not.toContain(
-        secret,
-      )
-      await closeSession(harness, created.id)
     } finally {
       if (original === undefined) delete Bun.env[source]
       else Bun.env[source] = original

@@ -191,9 +191,12 @@ describe("meanwhile runner", () => {
 
   test("redacts secret values across ACP updates and agent stderr", async () => {
     const secret = "runner-secret-value"
-    const result = await executeRunner(spec({ secretEnvironmentNames: ["TEST_RUNNER_SECRET"] }), {
-      TEST_RUNNER_SECRET: secret,
-    })
+    const result = await executeRunner(
+      spec({ credentialEnvironmentNames: ["TEST_RUNNER_SECRET"] }),
+      {
+        TEST_RUNNER_SECRET: secret,
+      },
+    )
     const serializedFrames = JSON.stringify(result.frames)
 
     expect(result.exitCode).toBe(0)
@@ -217,7 +220,7 @@ describe("meanwhile runner", () => {
     const result = await executeRunner(
       spec({
         environment: { FIXTURE_MALFORMED_OUTPUT: "1" },
-        secretEnvironmentNames: ["TEST_RUNNER_SECRET"],
+        credentialEnvironmentNames: ["TEST_RUNNER_SECRET"],
       }),
       { TEST_RUNNER_SECRET: secret },
     )
@@ -389,7 +392,7 @@ function spec(overrides: Partial<RunnerSpec> = {}): RunnerSpec {
     artifactPaths: ["dist"],
     timeoutBudgetMs: 10_000,
     environment: {},
-    secretEnvironmentNames: [],
+    credentialEnvironmentNames: [],
     ...overrides,
   }
 }

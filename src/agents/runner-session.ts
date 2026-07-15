@@ -20,7 +20,7 @@ export interface StartRunnerInput {
   readonly runtime: RuntimeHandle
   readonly processId: string
   readonly spec: RunnerSpec
-  readonly secretEnvironment: Readonly<Record<string, string>>
+  readonly credentialEnvironment: Readonly<Record<string, string>>
   readonly timeoutMs: number
   readonly terminationGraceMs: number
 }
@@ -64,7 +64,7 @@ export class RunnerSessionController {
       processId: input.processId,
       argv: ["meanwhile-runner"],
       cwd: relativePath("."),
-      env: input.secretEnvironment,
+      env: input.credentialEnvironment,
       initialStdin: `${JSON.stringify(input.spec)}\n`,
       timeoutMs: input.timeoutMs,
       terminationGraceMs: input.terminationGraceMs,

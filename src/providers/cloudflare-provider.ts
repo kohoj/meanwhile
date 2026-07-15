@@ -2,6 +2,7 @@ import type { z } from "zod"
 import {
   BRIDGE_PROTOCOL_VERSION,
   bridgeErrorResponseSchema,
+  credentialLeaseSnapshotSchema,
   exposedEndpointSchema,
   INITIAL_EVENT_CURSOR,
   processEventsResponseSchema,
@@ -11,6 +12,14 @@ import {
   runtimeIdSchema,
   runtimeSnapshotSchema,
 } from "../../providers/cloudflare-sandbox/src/protocol"
+import {
+  type AttachCredentialLeaseInput,
+  type AttachedCredentialLease,
+  CredentialBrokerError,
+  type CredentialLeaseHandle,
+  credentialLeaseHandle,
+  type RuntimeCredentialBroker,
+} from "../credentials"
 import { SERVICE_VERSION } from "../version"
 import {
   assertProcessInput,
@@ -79,8 +88,9 @@ export interface CloudflareRuntimeProviderOptions {
  * Provider-neutral HTTP client for the independently deployed Cloudflare
  * bridge. Cloudflare SDK types and credentials never cross this module.
  */
-export class CloudflareRuntimeProvider implements RuntimeProvider {
+export class CloudflareRuntimeProvider implements RuntimeProvider, RuntimeCredentialBroker {
   readonly name = PROVIDER_NAME
+  readonly credentialProvider = PROVIDER_NAME
   readonly provenance: RuntimeProvider["provenance"]
   readonly capabilities = Object.freeze({
     isolation: "container" as const,
@@ -88,6 +98,8 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     eventReplay: true,
     processInput: true,
     portExposure: true,
+    networkPolicy: true,
+    credentialMediation: "http" as const,
     // Sandbox SDK 0.12.3 exposes hard termination only. Advertising fewer
     // semantics is safer than pretending its ignored signal argument is real.
     processSignals: Object.freeze(["SIGKILL"] as const),
@@ -245,6 +257,81 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     )
   }
 
+  async attach(input: AttachCredentialLeaseInput): Promise<AttachedCredentialLease> {
+    const runtimeId = this.#runtimeId(input.runtime, "credentialAttach")
+    try {
+      const payload = await this.#jsonRequest(
+        "credentialAttach",
+        "POST",
+        `v1/runtimes/${runtimeId}/credential-leases`,
+        {
+          leaseId: input.leaseId,
+          allowedHosts: [...input.allowedHosts],
+          credentials: input.credentials.map((credential) => ({
+            environmentVariable: credential.environmentVariable,
+            host: credential.host,
+            methods: [...credential.methods],
+            value: credential.value,
+          })),
+        },
+      )
+      const lease = selectAndParse(
+        payload,
+        "credentialLease",
+        credentialLeaseSnapshotSchema,
+        (cause) =>
+          this.#error(
+            "credentialAttach",
+            "BRIDGE_PROTOCOL_ERROR",
+            "Cloudflare bridge returned an invalid credential lease",
+            cause,
+          ),
+      )
+      if (lease.id !== input.leaseId || lease.runtimeId !== runtimeId) {
+        throw this.#error(
+          "credentialAttach",
+          "BRIDGE_PROTOCOL_ERROR",
+          "Cloudflare bridge returned a different credential lease identity",
+        )
+      }
+      return {
+        handle: credentialLeaseHandle(this.name, `${runtimeId}:${lease.id}`),
+        environment: lease.environment,
+      }
+    } catch (cause) {
+      throw credentialError("attach", cause)
+    }
+  }
+
+  async revoke(input: {
+    readonly leaseId: string
+    readonly runtime: RuntimeHandle
+    readonly handle: CredentialLeaseHandle | null
+  }): Promise<void> {
+    const runtimeId = this.#runtimeId(input.runtime, "credentialRevoke")
+    if (
+      input.handle !== null &&
+      (input.handle.provider !== this.name ||
+        input.handle.opaque !== `${runtimeId}:${input.leaseId}`)
+    ) {
+      throw new CredentialBrokerError({
+        provider: this.name,
+        operation: "revoke",
+        code: "INVALID_CREDENTIAL_LEASE_HANDLE",
+        message: "Credential lease handle is invalid",
+      })
+    }
+    try {
+      await this.#jsonRequest(
+        "credentialRevoke",
+        "DELETE",
+        `v1/runtimes/${runtimeId}/credential-leases/${input.leaseId}`,
+      )
+    } catch (cause) {
+      throw credentialError("revoke", cause)
+    }
+  }
+
   async spawn(runtime: RuntimeHandle, spec: ProcessSpec): Promise<ProcessHandle> {
     const runtimeId = this.#runtimeId(runtime, "spawn")
     validateProcessSpec(spec, (code, message, cause) => this.#error("spawn", code, message, cause))
@@ -308,6 +395,7 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
     throwIfAborted(signal)
     const identity = this.#processIdentity(process, "events")
     let position = cursor ?? INITIAL_EVENT_CURSOR
+    let terminalObserved = false
 
     while (true) {
       throwIfAborted(signal)
@@ -341,6 +429,13 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       }
       if (terminal) return
       if (response.events.length > 0) continue
+      // Process state and the provider-owned log buffer are independent
+      // observations. A process may become terminal immediately before its
+      // final output is visible to getProcessLogs(), so terminal state alone
+      // is not permission to stop replay. Drain the cursor once after the
+      // terminal observation; the exit event remains the authoritative end
+      // when it is present.
+      if (terminalObserved) return
 
       const snapshot = await this.#snapshotRequest(
         "events",
@@ -354,7 +449,8 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
         signal,
       )
       if (snapshot === null || (snapshot.status !== "starting" && snapshot.status !== "running")) {
-        return
+        terminalObserved = true
+        continue
       }
       await abortableDelay(this.#eventPollIntervalMs, signal)
     }
@@ -544,9 +640,21 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
         "Workspace file exceeds the provider read limit",
       )
     }
-    return readBoundedResponse(response, maxBytes, () =>
-      this.#error("readFile", "FILE_TOO_LARGE", "Workspace file exceeds the provider read limit"),
-    )
+    try {
+      return await readBoundedResponse(response, maxBytes, () =>
+        this.#error("readFile", "FILE_TOO_LARGE", "Workspace file exceeds the provider read limit"),
+      )
+    } catch (cause) {
+      if (cause instanceof RuntimeProviderError) throw cause
+      throwIfAborted(signal)
+      throw this.#error(
+        "readFile",
+        "BRIDGE_STREAM_FAILED",
+        "Cloudflare bridge file stream failed",
+        cause,
+        true,
+      )
+    }
   }
 
   async expose(runtime: RuntimeHandle, port: number): Promise<ExposedEndpoint> {
@@ -772,7 +880,9 @@ export class CloudflareRuntimeProvider implements RuntimeProvider {
       )
     }
     const bridgeError = parsed.data.error
-    const retryable = Reflect.get(bridgeError.details, "retryable") === true || retryableStatus
+    const declaredRetryability = Reflect.get(bridgeError.details, "retryable")
+    const retryable =
+      typeof declaredRetryability === "boolean" ? declaredRetryability : retryableStatus
     throw this.#error(operation, bridgeError.code, bridgeError.message, undefined, retryable)
   }
 
@@ -1040,6 +1150,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function requireValue<Output>(value: Output | null, error: () => RuntimeProviderError): Output {
   if (value === null) throw error()
   return value
+}
+
+function credentialError(operation: "attach" | "revoke", cause: unknown): CredentialBrokerError {
+  if (cause instanceof CredentialBrokerError) return cause
+  if (cause instanceof RuntimeProviderError) {
+    return new CredentialBrokerError({
+      provider: PROVIDER_NAME,
+      operation,
+      code: cause.code,
+      message: cause.message,
+      retryable: cause.retryable,
+      cause,
+    })
+  }
+  return new CredentialBrokerError({
+    provider: PROVIDER_NAME,
+    operation,
+    code: "CREDENTIAL_BROKER_FAILED",
+    message: "Cloudflare credential broker operation failed",
+    cause,
+  })
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

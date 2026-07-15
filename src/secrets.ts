@@ -39,10 +39,9 @@ export interface SecretResolutionScope extends SecretAccessScope {
 
 /**
  * Sensitive values held by one control-plane attachment to a durable resource.
- * Idempotent `release()` zeroizes only these local copies and the matching redactor. It
- * must never revoke or rotate a credential already injected into surviving
- * compute; external credential lifetime belongs to a separate resource-cleanup
- * contract.
+ * Idempotent `release()` zeroizes these local copies and the matching redactor.
+ * Agent credential lifetime is owned separately by RuntimeCredentialBroker;
+ * setup and deployment operations own their own trusted-use lifetime.
  */
 export interface ResolvedSecretMaterial {
   readonly environment: Record<string, string>
@@ -60,10 +59,9 @@ export interface SecretReferenceValidator {
 
 /**
  * Resolves local secret material for one attachment to a durable resource.
- * Reacquisition for the same still-existing resource must redact every value
- * previously injected into its compute. Resolution and local release do not
- * own external credential revocation because control-plane observation may end
- * while that compute intentionally survives for restart recovery.
+ * Reacquisition is resource-bound. Resolution and local release do not own
+ * external credential revocation; that lifecycle belongs to the consumer's
+ * explicit operation or RuntimeCredentialBroker lease.
  */
 export interface SecretResolver extends SecretReferenceValidator {
   resolve(

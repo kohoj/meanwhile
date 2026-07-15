@@ -1,8 +1,10 @@
 import { z } from "zod"
 
-export const BRIDGE_PROTOCOL_VERSION = 4 as const
+export const BRIDGE_PROTOCOL_VERSION = 6 as const
 export const CLOUDFLARE_SANDBOX_VERSION = "0.12.3" as const
-export const INITIAL_EVENT_CURSOR = "v2.0.0.0" as const
+const EMPTY_EVENT_PREFIX_DIGEST = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+export const INITIAL_EVENT_CURSOR =
+  `v3.0.0.0.${EMPTY_EVENT_PREFIX_DIGEST}.${EMPTY_EVENT_PREFIX_DIGEST}` as const
 export const MAX_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024
 
 const MAX_ARGV_BYTES = 64 * 1024
@@ -35,6 +37,72 @@ export const relativeDirectoryPathSchema = relativePath.or(z.literal("."))
 
 export const createRuntimeRequestSchema = z.strictObject({
   operationId: operationIdSchema,
+})
+
+const exactHostSchema = z
+  .string()
+  .min(1)
+  .max(253)
+  .regex(
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/,
+  )
+const credentialMethodSchema = z.enum(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"])
+export const credentialLeaseIdSchema = z.string().uuid()
+export const attachCredentialLeaseRequestSchema = z
+  .strictObject({
+    leaseId: credentialLeaseIdSchema,
+    allowedHosts: z.array(exactHostSchema).max(64),
+    credentials: z
+      .array(
+        z.strictObject({
+          environmentVariable: z.string().regex(/^[A-Z_][A-Z0-9_]*$/),
+          host: exactHostSchema,
+          methods: z.array(credentialMethodSchema).min(1).max(7),
+          value: z
+            .string()
+            .min(1)
+            .max(64 * 1024),
+        }),
+      )
+      .max(64),
+  })
+  .superRefine((request, context) => {
+    if (new Set(request.allowedHosts).size !== request.allowedHosts.length) {
+      context.addIssue({ code: "custom", path: ["allowedHosts"], message: "duplicate host" })
+    }
+    const bindings = new Set<string>()
+    request.credentials.forEach((credential, index) => {
+      if (!request.allowedHosts.includes(credential.host)) {
+        context.addIssue({
+          code: "custom",
+          path: ["credentials", index, "host"],
+          message: "credential host must be allowed",
+        })
+      }
+      const binding = `${credential.environmentVariable}\0${credential.host}`
+      if (bindings.has(binding)) {
+        context.addIssue({
+          code: "custom",
+          path: ["credentials", index],
+          message: "duplicate credential binding",
+        })
+      }
+      bindings.add(binding)
+      if (new Set(credential.methods).size !== credential.methods.length) {
+        context.addIssue({
+          code: "custom",
+          path: ["credentials", index, "methods"],
+          message: "duplicate method",
+        })
+      }
+    })
+  })
+
+export const credentialLeaseSnapshotSchema = z.strictObject({
+  version: z.literal(BRIDGE_PROTOCOL_VERSION),
+  id: credentialLeaseIdSchema,
+  runtimeId: runtimeIdSchema,
+  environment: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().min(1)),
 })
 
 export const processSignalSchema = z.enum(["SIGINT", "SIGTERM", "SIGKILL"])
@@ -293,6 +361,8 @@ export const bridgeErrorResponseSchema = z.strictObject({
 })
 
 export type CreateRuntimeRequest = z.infer<typeof createRuntimeRequestSchema>
+export type AttachCredentialLeaseRequest = z.infer<typeof attachCredentialLeaseRequestSchema>
+export type CredentialLeaseSnapshot = z.infer<typeof credentialLeaseSnapshotSchema>
 export type SpawnProcessRequest = z.infer<typeof spawnProcessRequestSchema>
 export type SignalProcessRequest = z.infer<typeof signalProcessRequestSchema>
 export type ProcessInputRequest = z.infer<typeof processInputRequestSchema>
@@ -312,6 +382,8 @@ export interface EventCursor {
   readonly stdoutOffset: number
   readonly stderrOffset: number
   readonly terminalSeen: boolean
+  readonly stdoutDigest: string
+  readonly stderrDigest: string
 }
 
 export class BridgeError extends Error {
@@ -377,11 +449,12 @@ export async function processInputFingerprint(request: ProcessInputRequest): Pro
 }
 
 export function encodeEventCursor(cursor: EventCursor): string {
-  return `v2.${cursor.stdoutOffset}.${cursor.stderrOffset}.${cursor.terminalSeen ? 1 : 0}`
+  return `v3.${cursor.stdoutOffset}.${cursor.stderrOffset}.${cursor.terminalSeen ? 1 : 0}.${cursor.stdoutDigest}.${cursor.stderrDigest}`
 }
 
 export function decodeEventCursor(value: string): EventCursor {
-  const match = /^v2\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.([01])$/.exec(value)
+  const match =
+    /^v3\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.([01])\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/.exec(value)
   if (!match) {
     throw new BridgeError("EVENT_CURSOR_INVALID", "The event cursor is invalid.", 400)
   }
@@ -392,7 +465,23 @@ export function decodeEventCursor(value: string): EventCursor {
     throw new BridgeError("EVENT_CURSOR_INVALID", "The event cursor is invalid.", 400)
   }
 
-  return { stdoutOffset, stderrOffset, terminalSeen: match[3] === "1" }
+  return {
+    stdoutOffset,
+    stderrOffset,
+    terminalSeen: match[3] === "1",
+    stdoutDigest: match[4] as string,
+    stderrDigest: match[5] as string,
+  }
+}
+
+export async function eventPrefixDigest(value: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
+  )
+  return btoa(String.fromCharCode(...digest))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "")
 }
 
 export function isSafeRelativePath(path: string): boolean {

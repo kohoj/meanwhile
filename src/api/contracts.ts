@@ -184,7 +184,23 @@ export const AgentLaunchSnapshotSchema = z
       .strict(),
     permissionPolicy: AgentPermissionPolicySchema,
     envNames: z.array(environmentName).max(64).readonly(),
-    secretEnvNames: z.array(environmentName).max(64).readonly(),
+    networkPolicy: z.object({ allowedHosts: z.array(z.string()).max(64).readonly() }).strict(),
+    credentials: z
+      .array(
+        z
+          .object({
+            environmentVariable: environmentName,
+            host: z.string(),
+            methods: z
+              .array(z.enum(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]))
+              .min(1)
+              .max(7)
+              .readonly(),
+          })
+          .strict(),
+      )
+      .max(64)
+      .readonly(),
   })
   .strict()
   .meta({ id: "AgentLaunchSnapshot" })
@@ -716,6 +732,7 @@ export const AuditRecordSchema = z
       "session",
       "turn",
       "runtime",
+      "credential_lease",
       "artifact",
       "deployment",
     ]),
@@ -730,7 +747,17 @@ export const AuditRecordSchema = z
 
 export const AuditQuerySchema = CreatedPageQuerySchema.extend({
   resourceType: z
-    .enum(["owner", "api_key", "run", "session", "turn", "runtime", "artifact", "deployment"])
+    .enum([
+      "owner",
+      "api_key",
+      "run",
+      "session",
+      "turn",
+      "runtime",
+      "credential_lease",
+      "artifact",
+      "deployment",
+    ])
     .optional(),
   resourceId: z.string().min(1).max(256).optional(),
   action: z.string().min(1).max(128).optional(),

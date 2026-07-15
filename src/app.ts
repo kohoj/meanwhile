@@ -26,6 +26,7 @@ import {
 import type { AppConfig } from "./config"
 import { assertLocalProviderPolicy, prepareDataDirectories } from "./config"
 import { ControlPlane } from "./control-plane"
+import { runtimeCredentialBroker } from "./credentials"
 import { DataRootLease } from "./data-root"
 import { LocalStaticAdapter } from "./deployments/local-static-adapter"
 import { LocalStaticServer } from "./deployments/local-static-server"
@@ -41,6 +42,7 @@ import { EnvironmentSecretResolver } from "./secrets"
 import { ApiKeyService } from "./services/api-key-service"
 import { ArtifactService } from "./services/artifact-service"
 import { AuditService } from "./services/audit-service"
+import { CredentialLeaseReaper } from "./services/credential-lease-reaper"
 import {
   DeploymentDispatcher,
   DeploymentExecutor,
@@ -113,6 +115,8 @@ export const createApplication = async (
             provider.name === name &&
             (provider.capabilities.isolation !== "none" || config.localProvider.enabled),
         ),
+    supportsCredentialMediation: (name: string) =>
+      providerRegistry.has(name) && runtimeCredentialBroker(providerRegistry.get(name)) !== null,
   }
   if (!providerAdmission.has(config.defaultProvider)) {
     throw new Error(`Default runtime provider '${config.defaultProvider}' is not configured`)
@@ -206,6 +210,8 @@ export const createApplication = async (
           const provider = providerRegistry.get(name)
           return provider.capabilities.processInput && provider.send !== undefined
         },
+        supportsCredentialMediation: (name) =>
+          runtimeCredentialBroker(providerRegistry.get(name)) !== null,
       },
       executionProvenance,
       defaultProvider: config.defaultProvider,
@@ -258,6 +264,7 @@ export const createApplication = async (
       },
     })
     const controlPlane = new ControlPlane([
+      new CredentialLeaseReaper(store, providerRegistry),
       new RuntimeReaperLoop(reaper),
       runExecutor,
       sessionExecutor,

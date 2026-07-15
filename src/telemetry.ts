@@ -464,6 +464,11 @@ const METRIC_DEFINITIONS = {
     unit: "1",
     description: "Terminal run outcomes.",
   },
+  "meanwhile.session.outcomes": {
+    kind: "counter",
+    unit: "1",
+    description: "Terminal agent-session outcomes.",
+  },
   "meanwhile.session.turn.outcomes": {
     kind: "counter",
     unit: "1",

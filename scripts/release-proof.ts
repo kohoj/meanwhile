@@ -10,7 +10,11 @@ import { initializeInstrumentation } from "../src/instrumentation"
 import type { TelemetryHealthSnapshot } from "../src/telemetry"
 import { sessionTimelineFromEvents } from "../src/timeline"
 import { SERVICE_VERSION } from "../src/version"
-import { AgentToolchainError, agentCatalog, prepareAgentToolchain } from "./agent-toolchains"
+import {
+  AgentToolchainError,
+  agentCatalog,
+  prepareCloudflareAgentToolchain,
+} from "./agent-toolchains"
 
 type ProofProvider = "local" | "cloudflare"
 type ProofAgent = "demo" | "codex" | "claude-code" | "pi"
@@ -1052,7 +1056,13 @@ async function prepareProofAgent(
     }
   }
 
-  const toolchain = await prepareAgentToolchain(type, provider, join(root, "agent-tools"))
+  if (provider !== "cloudflare") {
+    throw new ProofError(
+      "PROVIDER_CAPABILITY_UNAVAILABLE",
+      "Credential-bearing agent proofs require the Cloudflare mediation boundary",
+    )
+  }
+  const toolchain = await prepareCloudflareAgentToolchain(type)
   const catalogPath = join(root, "agents.json")
   await Bun.write(catalogPath, JSON.stringify(agentCatalog(toolchain)))
 

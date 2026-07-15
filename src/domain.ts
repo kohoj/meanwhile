@@ -81,8 +81,29 @@ export interface AgentLaunchSnapshot {
   }
   readonly permissionPolicy: AgentPermissionPolicy
   readonly envNames: readonly string[]
-  readonly secretEnvNames: readonly string[]
+  readonly networkPolicy: {
+    /** Exact DNS hosts reachable by the agent after workspace preparation. */
+    readonly allowedHosts: readonly string[]
+  }
+  readonly credentials: readonly AgentCredentialPolicy[]
 }
+
+export interface AgentCredentialPolicy {
+  /** Environment variable populated with an opaque, revocable placeholder. */
+  readonly environmentVariable: string
+  /** Exact destination host at which the placeholder may be redeemed. */
+  readonly host: string
+  readonly methods: readonly AgentCredentialHttpMethod[]
+}
+
+export type AgentCredentialHttpMethod =
+  | "DELETE"
+  | "GET"
+  | "HEAD"
+  | "OPTIONS"
+  | "PATCH"
+  | "POST"
+  | "PUT"
 
 export interface ExecutionProvenance {
   readonly version: typeof EXECUTION_PROVENANCE_VERSION
@@ -497,6 +518,7 @@ export interface AuditRecord {
     | "session"
     | "turn"
     | "runtime"
+    | "credential_lease"
     | "artifact"
     | "deployment"
   readonly resourceId: string

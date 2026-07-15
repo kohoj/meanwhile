@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { runtimeCredentialBroker } from "../../src/credentials"
 import { LocalRuntimeProvider } from "../../src/providers/local-provider"
 import { RuntimeProviderRegistry } from "../../src/providers/registry"
 import {
@@ -111,6 +112,40 @@ sharedProviderContract("local", async () => {
 })
 
 describe("RuntimeProvider contract", () => {
+  test("credential mediation is a separate exact-id revocable contract", async () => {
+    const provider = new MockRuntimeProvider()
+    const runtime = await provider.create({ runtimeId: "runtime-credentials" })
+    await provider.start(runtime)
+    const broker = runtimeCredentialBroker(provider)
+    if (broker === null) throw new Error("Mock credential broker is unavailable")
+    const credential = {
+      environmentVariable: "MODEL_TOKEN",
+      host: "api.example.com",
+      methods: ["POST" as const],
+      value: "source-credential",
+    }
+    const input = {
+      leaseId: "a4a6b83c-551b-4c43-89f1-c2a995334b46",
+      runtime,
+      allowedHosts: ["api.example.com"],
+      credentials: [credential],
+    }
+
+    const attached = await broker.attach(input)
+    expect(await broker.attach(input)).toEqual(attached)
+    expect(attached.environment["MODEL_TOKEN"]).not.toBe("source-credential")
+    await expect(
+      broker.attach({
+        ...input,
+        credentials: [{ ...credential, value: "conflicting-credential" }],
+      }),
+    ).rejects.toMatchObject({ code: "CREDENTIAL_LEASE_CONFLICT" })
+
+    await broker.revoke({ leaseId: input.leaseId, runtime, handle: attached.handle })
+    await broker.revoke({ leaseId: input.leaseId, runtime, handle: attached.handle })
+    await expect(broker.attach(input)).rejects.toMatchObject({ code: "CREDENTIAL_LEASE_REVOKED" })
+  })
+
   test("handles are versioned, persistable, and provider-bound", async () => {
     const provider = new MockRuntimeProvider()
     const runtime = await provider.create({ runtimeId: "runtime-1" })

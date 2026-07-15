@@ -18,6 +18,8 @@ isolated compute
 
 The boundary is process-aware rather than a one-shot command runner because cancellation, timeout, event replay, restart recovery, interactive turns, artifact capture, and cleanup all require durable identity beyond `exec(command)`.
 
+Process recovery binds admission and evidence, not merely a provider PID. A provider that declares recovery must reserve the logical process identity before spawn, make an exact retry reacquire that execution, and retain an immutable terminal observation outside disposable compute. If the native SDK separates active process lookup from retained logs, the adapter may reconstruct terminal status only from a versioned, integrity-checked closure frame it installed itself; agent prose and log absence are never terminal evidence.
+
 ## Ownership
 
 The adapter owns:
@@ -39,7 +41,7 @@ The adapter never owns:
 - audit policy, artifact retention, or deployment;
 - API schemas or database access.
 
-The provider may transport an opaque runner specification as initial stdin and secret values as process environment. It must not parse, persist, echo, or attach either to diagnostics.
+The compute provider may transport an opaque runner specification as initial stdin and broker-issued credential placeholders as process environment. Real agent credential values belong only to the separate mediation contract and must never enter compute diagnostics or handles.
 
 ## Contract surface
 
@@ -77,6 +79,36 @@ Do not widen this interface with provider settings that belong in adapter constr
 
 Runtime inspection, file enumeration, and file reads honor the optional abort signal. The executor uses it to stop observation on control-plane shutdown and to bound artifact capture by the run's accepted absolute deadline; an adapter must not hide an unbounded observation behind this contract. Aborting an observation never mutates the runtime.
 
+## Credential mediation
+
+A provider may additionally implement `RuntimeCredentialBroker` when it can enforce a real trusted egress boundary:
+
+```ts
+interface RuntimeCredentialBroker {
+  readonly credentialProvider: string
+  attach(input: {
+    leaseId: string
+    runtime: RuntimeHandle
+    allowedHosts: string[]
+    credentials: Array<{
+      environmentVariable: string
+      host: string
+      methods: HttpMethod[]
+      value: string
+    }>
+  }): Promise<{ handle: CredentialLeaseHandle; environment: Record<string, string> }>
+  revoke(input: {
+    leaseId: string
+    runtime: RuntimeHandle
+    handle: CredentialLeaseHandle | null
+  }): Promise<void>
+}
+```
+
+Attachment is idempotent for the complete lease identity and policy: an exact retry returns the same placeholders; conflicting reuse fails closed. Values remain in trusted broker storage, placeholders are opaque and revocable, destination hosts are exact names rather than suffix patterns, methods are explicit, redirects cannot escape policy, exact source values are stream-redacted from authorized responses, and all other agent-phase egress is denied. Revocation is idempotent even when acknowledgement was lost and no handle was persisted. A provider that cannot prove these semantics declares `networkPolicy: false`, `credentialMediation: "none"`, omits the broker, and rejects secret-bearing agent work at admission.
+
+This contract does not authorize owners, issue source credentials, or make an allowed destination trustworthy. Runtime destruction must wait for the control plane's durable revocation lifecycle.
+
 ## Provenance and capabilities
 
 Capabilities are provider-neutral behavioral facts used by policy: isolation class, process recovery, event replay, process input, port exposure, and exact signal semantics. Provenance identifies the accepted implementation: adapter version, runner digest when known, pinned runtime image reference/digest when known, and bridge protocol version.
@@ -111,14 +143,16 @@ Reject a handle with the wrong provider or unsupported version. Provider handles
 
 Capabilities state facts that affect recovery and feature availability. They are not marketing labels and do not make unsupported behavior appear portable.
 
-The contract describes exactly six properties:
+The contract describes exactly eight properties:
 
 - `isolation`: `none`, `container`, or `virtual-machine`;
 - `processRecovery`: whether the process can be inspected after the original request ends;
 - `eventReplay`: whether events can be resumed from a persisted provider cursor;
 - `processInput`: whether the adapter implements the ordered/idempotent `send` contract;
 - `portExposure`: whether `expose` is implemented;
-- `processSignals`: the exact signal semantics the adapter can honestly deliver.
+- `processSignals`: the exact signal semantics the adapter can honestly deliver;
+- `networkPolicy`: whether the provider can enforce the broker's exact-host default-deny boundary;
+- `credentialMediation`: `none` or the currently supported `http` substitution boundary.
 
 Retention windows, hard limits, and provider lifecycle constraints belong in provider diagnostics and documentation until a provider-neutral product policy requires a versioned capability.
 
@@ -158,7 +192,7 @@ A process specification contains:
 
 - a non-empty argv array whose first entry is the executable;
 - normalized relative working directory;
-- non-secret and resolved secret environment for that process;
+- non-secret environment and opaque credential placeholders for that process;
 - remaining relative timeout duration plus an explicit bounded hard-termination grace;
 - optional bounded initial stdin;
 - an input mode that is either closed after spawn or an explicitly declared ordered mailbox.
@@ -291,7 +325,8 @@ An adapter is trusted control-plane code. The workload is not.
 - Validate opaque handles and paths again at the bridge.
 - Never accept an arbitrary provider handle from a client.
 - Keep provider credentials in the control plane or bridge, never the workload.
-- Treat any secret injected into a runtime as visible to all code in that runtime unless the provider proves a stronger boundary.
+- Build standalone runners with the exact root-pinned Bun version and verify that embedded runtime inside the final provider image.
+- Treat every value placed in a runtime as visible to all code there; real agent credentials require the separate mediation contract.
 - Do not describe runner placement, filenames, or Unix users as isolation without a tested provider guarantee.
 
 Read [Threat model](threat-model.md) before implementing file, process, preview, or secret behavior.
@@ -302,13 +337,16 @@ Cloudflare-specific SDK types live only under `providers/cloudflare-sandbox/` an
 
 - authenticates the control plane;
 - validates the versioned bridge request;
-- translates to the official Sandbox SDK using its current RPC transport;
+- translates authenticated versioned HTTP into the official Sandbox SDK's HTTP container transport;
+- installs deny-all outbound interception before container startup, ensuring the SDK-managed HTTPS CA exists even when no lease is active; exact-host/method credential handlers are the only overrides;
+- closes agent-phase egress to exact allowed hosts, keeps source values encrypted in Durable Object state, and substitutes broker placeholders only in the trusted outbound handler;
 - applies and verifies declared workspace file modes through a fixed internal command because the pinned file API does not expose mode directly;
 - starts the fixed runner with bounded initial stdin;
 - when an SDK lacks direct initial stdin, may use a random provider-private staging file plus safely quoted redirection, provided the bytes never enter argv/diagnostics and the file is removed on every path;
 - when the pinned SDK lacks ongoing stdin, implements session input as a provider-private sequential mailbox only after durable bridge state binds `(process, sequence)` to one command fingerprint;
 - preserves runner stdout as protocol and stderr as diagnostics;
-- provides cursor-bearing live/replayed events;
+- durably reserves process identity before spawn and stores immutable terminal observations outside disposable compute;
+- provides cursor-bearing live/replayed events, using matching stdout/stderr exit-code closure frames to recover retained logs after the SDK removes an exited process from active lookup;
 - advertises only hard termination for the pinned SDK, while control-plane stop destroys remaining sandbox processes after cancellation;
 - performs explicit idempotent destruction;
 - reports safe health and version compatibility.
@@ -331,11 +369,12 @@ Every adapter, including local and fake, runs the same deterministic suite:
 10. treat cleanup of a missing resource as already absent;
 11. expose a port when capability is true;
 12. normalize authentication, unavailable, expired cursor, and invalid-handle errors;
-13. ensure diagnostics and handles contain no injected secret;
+13. ensure diagnostics and handles contain no source credential or capability placeholder;
 14. reconnect according to declared capabilities;
 15. preserve declared workspace file modes;
 16. keep provenance immutable and reject configuration drift before an execution uses the adapter;
 17. when `processInput` is true, accept exact retries, reject conflicting sequence reuse, preserve order, and fail after process exit.
+18. when credential mediation is declared, prove placeholder-only attachment, exact host/method default-deny policy, conflicting-retry rejection, idempotent revocation, and revocation-before-destroy ordering.
 
 Use injected identities and bounded event-driven waits; do not use arbitrary sleeps. A fake proves core replaceability. A local adapter proves real host process semantics. Each remote adapter additionally needs a credential-gated live test that creates, starts, executes, reads, stops, and destroys actual provider compute.
 

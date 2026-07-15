@@ -86,7 +86,8 @@ describe("agent launch catalog", () => {
     const right = {
       agents: {
         fixture: {
-          secretEnvNames: left.agents.fixture.secretEnvNames,
+          credentials: left.agents.fixture.credentials,
+          networkPolicy: left.agents.fixture.networkPolicy,
           envNames: left.agents.fixture.envNames,
           capabilities: {
             terminal: left.agents.fixture.capabilities.terminal,
@@ -124,7 +125,12 @@ interface AgentJson {
   workingDirectory: "workspace"
   capabilities: { filesystem: boolean; terminal: boolean }
   envNames: string[]
-  secretEnvNames: string[]
+  networkPolicy: { allowedHosts: string[] }
+  credentials: Array<{
+    environmentVariable: string
+    host: string
+    methods: Array<"POST">
+  }>
 }
 
 function validCatalog(): CatalogJson {
@@ -138,7 +144,8 @@ function validCatalog(): CatalogJson {
         workingDirectory: "workspace",
         capabilities: { filesystem: true, terminal: false },
         envNames: [],
-        secretEnvNames: [],
+        networkPolicy: { allowedHosts: [] },
+        credentials: [],
       },
     },
   }

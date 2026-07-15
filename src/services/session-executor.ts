@@ -21,6 +21,7 @@ import {
 } from "../providers/runtime-provider"
 import type { ResolvedSecretMaterial, SecretRedactor, SecretResolver } from "../secrets"
 import type { StructuredLogger, Telemetry, TelemetryScope } from "../telemetry"
+import { attachAgentCredentialLease } from "./credential-lease-attacher"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
 const DEFAULT_POLL_MS = 250
@@ -318,13 +319,35 @@ export class SessionExecutor implements ManagedComponent {
       )
     }
 
-    const agentSecrets = await this.#secrets.resolve(session.secretRefs, {
+    if (!lease?.processHandle) {
+      await this.#prepareWorkspace(session, provider, runtime)
+    }
+    session = this.#store.getAgentSessionInternal(session.id) as AgentSession
+    if (session.runtimeId === null) {
+      throw new AppError({
+        code: "DATABASE_INTEGRITY_FAILED",
+        message: "Session credential lease is missing its runtime identity",
+      })
+    }
+    const resolvedAgentSecrets = await this.#secrets.resolve(session.secretRefs, {
       ownerId: session.ownerId,
       purpose: "agent",
       resourceType: "session",
       resourceId: session.id,
     })
+    let agentSecrets = resolvedAgentSecrets
     try {
+      agentSecrets = await attachAgentCredentialLease(this.#store, {
+        ownerId: session.ownerId,
+        resourceType: "session",
+        resourceId: session.id,
+        runtimeId: session.runtimeId,
+        runtime,
+        provider,
+        agentSpec: session.agentSpec,
+        secrets: resolvedAgentSecrets,
+        at: this.#now(),
+      })
       if (!lease?.processHandle) {
         session = this.#store.getAgentSessionInternal(session.id) as AgentSession
         if (session.status === "closing") {
@@ -439,9 +462,8 @@ export class SessionExecutor implements ManagedComponent {
     session: AgentSession,
     provider: RuntimeProvider,
     runtime: RuntimeHandle,
-    secretEnvironment: Readonly<Record<string, string>>,
+    credentialEnvironment: Readonly<Record<string, string>>,
   ): Promise<void> {
-    await this.#prepareWorkspace(session, provider, runtime)
     const processId = `session-runner-${session.id}`.slice(0, 128)
     const spec: SessionRunnerSpec = {
       protocolVersion: RUNNER_PROTOCOL_VERSION,
@@ -461,7 +483,7 @@ export class SessionExecutor implements ManagedComponent {
               toolKinds: [...session.agentSpec.permissionPolicy.toolKinds],
             },
       environment: { ...session.env },
-      secretEnvironmentNames: Object.keys(secretEnvironment),
+      credentialEnvironmentNames: Object.keys(credentialEnvironment),
       idleTimeoutMs: session.idleTimeoutMs,
     }
     const process = await this.#runner.start({
@@ -469,7 +491,7 @@ export class SessionExecutor implements ManagedComponent {
       runtime,
       processId,
       spec,
-      secretEnvironment,
+      credentialEnvironment,
     })
     this.#store.materializeSessionProcessLaunch({
       sessionId: session.id,
@@ -629,8 +651,15 @@ export class SessionExecutor implements ManagedComponent {
       sessionId,
       code: normalized.code,
     })
-    this.#telemetry?.metrics.increment("meanwhile.session.outcomes", 1, { status: "failed" })
-    this.#store.failAgentSession(sessionId, normalized.toStructuredError(), this.#now())
+    const continuityWasLost = normalized.code === "RUNTIME_LOST"
+    this.#telemetry?.metrics.increment("meanwhile.session.outcomes", 1, {
+      status: continuityWasLost ? "continuity_lost" : "failed",
+    })
+    if (continuityWasLost) {
+      this.#store.loseAgentSession(sessionId, continuityLost("runtime_generation"), this.#now())
+    } else {
+      this.#store.failAgentSession(sessionId, normalized.toStructuredError(), this.#now())
+    }
     const session = this.#store.getAgentSessionInternal(sessionId)
     const lease = this.#store.getSessionRuntimeLease(sessionId)
     if (session && lease) {

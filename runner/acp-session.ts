@@ -259,7 +259,7 @@ export async function runAcpSession(
 ): Promise<RunnerTerminalPayload> {
   const ambientEnvironment = options.environment ?? Bun.env
   const redactor = new ExactValueRedactor(
-    spec.secretEnvironmentNames.map((name) => ambientEnvironment[name]),
+    spec.credentialEnvironmentNames.map((name) => ambientEnvironment[name]),
   )
 
   if (options.signal.aborted) {
@@ -489,12 +489,12 @@ function buildAgentEnvironment(
 
   Object.assign(environment, spec.environment)
   environment["TZ"] = "UTC"
-  for (const name of spec.secretEnvironmentNames) {
+  for (const name of spec.credentialEnvironmentNames) {
     const value = ambient[name]
     if (value === undefined) {
       throw new RunnerSessionError(
-        "MISSING_SECRET_ENVIRONMENT",
-        `Required secret environment variable is unavailable: ${name}`,
+        "MISSING_CREDENTIAL_ENVIRONMENT",
+        `Required credential placeholder is unavailable: ${name}`,
       )
     }
     environment[name] = value
@@ -840,8 +840,8 @@ function safeMessageFor(code: RunnerErrorCode): string {
       return "The ACP session failed before producing a terminal result"
     case "AGENT_EXITED":
       return "The ACP agent exited before the prompt completed"
-    case "MISSING_SECRET_ENVIRONMENT":
-      return "A required secret environment variable is unavailable"
+    case "MISSING_CREDENTIAL_ENVIRONMENT":
+      return "A required credential placeholder is unavailable"
     case "WORKSPACE_INVALID":
       return "The provider workspace or agent working directory is invalid"
     case "RUNNER_INTERNAL_ERROR":

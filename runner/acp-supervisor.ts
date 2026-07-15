@@ -39,7 +39,7 @@ export async function runAcpSupervisor(
   if (!mailboxPath) throw new Error("Session runner mailbox is unavailable")
   const mailbox = new CommandMailbox(mailboxPath)
   const redactor = new ExactValueRedactor(
-    spec.secretEnvironmentNames.map((name) => environment[name]),
+    spec.credentialEnvironmentNames.map((name) => environment[name]),
   )
   const workingDirectory = await resolveAgentWorkingDirectory()
   const child = spawnAgent(spec, environment, workingDirectory)

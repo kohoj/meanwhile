@@ -11,7 +11,14 @@
         "terminal": true
       },
       "envNames": ["CI"],
-      "secretEnvNames": ["OPENAI_API_KEY"]
+      "networkPolicy": { "allowedHosts": ["api.openai.com"] },
+      "credentials": [
+        {
+          "environmentVariable": "OPENAI_API_KEY",
+          "host": "api.openai.com",
+          "methods": ["POST"]
+        }
+      ]
     },
     "claude-code": {
       "transport": "stdio",
@@ -29,15 +36,16 @@
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
         "CLAUDE_CODE_ATTRIBUTION_HEADER",
         "CLAUDE_CODE_USE_VERTEX",
-        "ANTHROPIC_VERTEX_PROJECT_ID"
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_BASE_URL"
       ],
-      "secretEnvNames": [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CONFIG_DIR",
-        "GOOGLE_APPLICATION_CREDENTIALS"
+      "networkPolicy": { "allowedHosts": ["api.anthropic.com"] },
+      "credentials": [
+        {
+          "environmentVariable": "ANTHROPIC_API_KEY",
+          "host": "api.anthropic.com",
+          "methods": ["POST"]
+        }
       ]
     },
     "pi": {
@@ -50,11 +58,15 @@
         "terminal": true
       },
       "envNames": ["AWS_REGION", "PI_TELEMETRY"],
-      "secretEnvNames": [
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "PI_CODING_AGENT_DIR"
+      "networkPolicy": {
+        "allowedHosts": ["bedrock-runtime.us-east-1.amazonaws.com"]
+      },
+      "credentials": [
+        {
+          "environmentVariable": "AWS_BEARER_TOKEN_BEDROCK",
+          "host": "bedrock-runtime.us-east-1.amazonaws.com",
+          "methods": ["POST"]
+        }
       ]
     },
     "hermes": {
@@ -67,7 +79,14 @@
         "terminal": true
       },
       "envNames": ["CI"],
-      "secretEnvNames": ["OPENAI_API_KEY"]
+      "networkPolicy": { "allowedHosts": ["api.openai.com"] },
+      "credentials": [
+        {
+          "environmentVariable": "OPENAI_API_KEY",
+          "host": "api.openai.com",
+          "methods": ["POST"]
+        }
+      ]
     }
   }
 }

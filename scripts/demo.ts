@@ -1,65 +1,42 @@
 import { Meanwhile, MeanwhileError } from "../src/client"
-import {
-  createDemoEnvironment,
-  type DemoAgentType,
-  type DemoEnvironment,
-  DemoError,
-} from "./demo-environment"
+import { createDemoEnvironment, type DemoEnvironment, DemoError } from "./demo-environment"
 
 const arguments_ = process.argv.slice(2)
-const agentType = selectedAgentType(arguments_)
-const proofText =
-  agentType === "codex"
-    ? "Meanwhile Codex ACP local proof"
-    : agentType === "claude-code"
-      ? "Meanwhile Claude Code ACP local proof"
-      : agentType === "pi"
-        ? "Meanwhile Pi ACP local proof"
-        : "Meanwhile local demo"
+const proofText = "Meanwhile local demo"
 const servePreview = arguments_.includes("--serve")
-const timeoutMs = agentType === "demo" ? 30_000 : 5 * 60_000
+const timeoutMs = 30_000
 
 let environment: DemoEnvironment | null = null
 
 try {
-  environment = await createDemoEnvironment(agentType)
+  environment = await createDemoEnvironment()
   const meanwhile = new Meanwhile(environment.clientOptions)
-  const { agent } = environment
   const created = await meanwhile.runs.create(
     {
       workspace: { type: "files", files: [...environment.workspaceFiles] },
-      agentType,
+      agentType: "demo",
       provider: "local",
       artifactPaths: ["site"],
-      timeoutMs: agent === null ? 20_000 : 4 * 60_000,
-      env: { ...agent?.environment },
-      secretRefs: { ...agent?.secretReferences },
-      prompt:
-        agent === null
-          ? "Verify the immutable static preview"
-          : `Create site/index.html as a complete HTML document containing the exact visible text '${proofText}'. Do not modify any other file. Finish after saving it.`,
+      timeoutMs: 20_000,
+      env: {},
+      secretRefs: {},
+      prompt: "Verify the immutable static preview",
     },
     {
-      idempotencyKey: `meanwhile-local-${agentType}-v1`,
+      idempotencyKey: "meanwhile-local-demo-v1",
     },
   )
   const run = await meanwhile.runs.wait(created.id, { timeoutMs, pollIntervalMs: 25 })
   const logs = await meanwhile.runs.logs(run.id, { limit: 1_000 })
   const eventTypes = new Set(logs.items.map((item) => item.eventType))
   if (run.status !== "succeeded") {
-    throw new DemoError(
-      agent === null
-        ? "DEMO_RUN_FAILED"
-        : `${agent.type.toUpperCase().replaceAll("-", "_")}_RUN_FAILED`,
-      agent === null ? "The deterministic ACP run did not succeed" : `${agent.type} ACP run failed`,
-      {
-        runStatus: run.status,
-        runErrorCode: run.error?.code ?? null,
-        acpInitialized: eventTypes.has("agent.initialized"),
-        sessionStarted: eventTypes.has("session.started"),
-        terminalRecorded: eventTypes.has("terminal"),
-      },
-    )
+    throw new DemoError("DEMO_RUN_FAILED", "The deterministic ACP run did not succeed", {
+      runStatus: run.status,
+      runErrorCode: run.error?.code ?? null,
+      acpInitialized: eventTypes.has("agent.initialized"),
+      sessionStarted: eventTypes.has("session.started"),
+      terminalRecorded: eventTypes.has("terminal"),
+    })
   }
 
   const artifacts = await meanwhile.artifacts.list(run.id)
@@ -67,18 +44,6 @@ try {
   if (site === undefined) {
     throw new DemoError("DEMO_ARTIFACT_MISSING", "The declared site artifact was not captured")
   }
-  if (
-    agent !== null &&
-    (!eventTypes.has("agent.initialized") ||
-      !eventTypes.has("session.started") ||
-      !eventTypes.has("terminal"))
-  ) {
-    throw new DemoError(
-      "AGENT_PROTOCOL_EVIDENCE_MISSING",
-      "The live run did not persist the required ACP lifecycle evidence",
-    )
-  }
-
   const downloaded = await meanwhile.artifacts.download(site.id, { path: "index.html" })
   const downloadedBytes = new Uint8Array(await new Response(downloaded.body).arrayBuffer())
   const downloadedText = new TextDecoder().decode(downloadedBytes)
@@ -118,17 +83,9 @@ try {
   const deploymentLogs = await meanwhile.deployments.logs(deployment.id, { limit: 1_000 })
 
   await writeStdout({
-    demo: agent === null ? "meanwhile-local" : `meanwhile-local-${agent.type}`,
+    demo: "meanwhile-local",
     status: "succeeded",
-    agent:
-      agent === null
-        ? { type: "demo" }
-        : {
-            type: agent.type,
-            version: agent.runtimeVersion,
-            adapter: agent.adapter,
-            loginVerifiedBy: agent.loginVerifiedBy,
-          },
+    agent: { type: "demo" },
     run: { id: run.id, status: run.status },
     evidence: {
       runLogCount: logs.items.length,
@@ -152,9 +109,7 @@ try {
     },
     note: servePreview
       ? "The verified preview remains available until this process receives SIGINT or SIGTERM."
-      : agent === null
-        ? "The preview server is stopped when this demonstration exits."
-        : "Existing local agent authentication was referenced ephemerally; the preview server and disposable local runtime are stopped when this proof exits.",
+      : "The preview server is stopped when this demonstration exits.",
   })
   if (servePreview) await waitForShutdown()
 } catch (error) {
@@ -165,18 +120,6 @@ try {
   process.exitCode = 1
 } finally {
   await environment?.close()
-}
-
-function selectedAgentType(arguments_: readonly string[]): DemoAgentType {
-  const selections = [
-    arguments_.includes("--codex") ? "codex" : null,
-    arguments_.includes("--claude") ? "claude-code" : null,
-    arguments_.includes("--pi") ? "pi" : null,
-  ].filter((value): value is Exclude<DemoAgentType, "demo"> => value !== null)
-  if (selections.length > 1) {
-    throw new DemoError("DEMO_AGENT_CONFLICT", "Select at most one live agent")
-  }
-  return selections[0] ?? "demo"
 }
 
 function normalizeDemoError(error: unknown): DemoError {

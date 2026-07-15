@@ -290,7 +290,14 @@ The checkout ships a deterministic `demo` agent. Copy the required entries from 
       "workingDirectory": "workspace",
       "capabilities": { "filesystem": true, "terminal": true },
       "envNames": ["CI"],
-      "secretEnvNames": ["OPENAI_API_KEY"]
+      "networkPolicy": { "allowedHosts": ["api.openai.com"] },
+      "credentials": [
+        {
+          "environmentVariable": "OPENAI_API_KEY",
+          "host": "api.openai.com",
+          "methods": ["POST"]
+        }
+      ]
     }
   }
 }
@@ -298,18 +305,14 @@ The checkout ships a deterministic `demo` agent. Copy the required entries from 
 
 Claude Code, Pi, and Hermes use the same shape with `claude-agent-acp`, `pi-acp`, and `hermes-acp`. A tool without native ACP needs a small explicit adapter executable; agent-specific output parsing never belongs in the control plane.
 
-Authenticated local proofs are available when the corresponding local credentials are configured:
+The local provider intentionally has no credential-mediation claim. It runs the deterministic, no-account proof only:
 
 ```console
-bun run demo:codex
-bun run demo:claude
-bun run demo:pi
-bun run proof:release:local:codex
-bun run proof:release:local:claude
-bun run proof:release:local:pi
+bun run demo
+bun run proof:release
 ```
 
-The demo commands keep the path concise. The release-proof commands additionally exercise a two-turn durable session across a control-plane restart, telemetry, cleanup, backup, and restore. Every command installs an exact adapter/runtime pair into a disposable directory, references existing local authentication only for the agent process, verifies the agent-written artifact, deploys it through the API, and fetches the immutable preview. The Pi proof uses its pinned headless RPC runtime through `pi-acp`; on this bootstrap path it accepts an allowlisted Amazon Bedrock token and region without persisting either value.
+Credential-bearing real-agent proofs run only through the Cloudflare brokered-egress path. The agent receives a revocable placeholder, the bridge substitutes the real credential only on an exact host/method grant, stream-redacts exact values from the upstream response, and denies all other agent-phase egress. `proof:release:cloudflare:codex` requires API-key authentication; ChatGPT session tokens are deliberately not injected because the Codex client must parse them locally. Claude file credentials and metadata-service authentication are likewise rejected instead of being represented as safe.
 
 ## Runtime providers
 
@@ -340,7 +343,7 @@ interface RuntimeProvider {
 }
 ```
 
-`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, image, standalone Bun runner, and bundled ACP toolchains are pinned as one compatibility unit; Cloudflare types remain inside the provider package. The reference image proves Codex, Claude Code, and Pi through exact adapter/runtime pairs. Production operators can derive smaller agent-profile images from the same contract without changing the control plane. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor. The bridge appends an internal closure marker to both process streams and withholds the irreversible exit cursor until both markers are visible, so an eventually consistent terminal log read cannot silently discard a delayed tail.
+`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, digest-pinned base image, standalone runner's Bun runtime, and bundled ACP toolchains are pinned as one compatibility unit; the root `packageManager` is the single Bun-version source and Cloudflare types remain inside the provider package. The reference image proves Codex, Claude Code, and Pi through exact adapter/runtime pairs. Production operators can derive smaller agent-profile images from the same contract without changing the control plane. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor. The bridge durably reserves each process before spawn, records its immutable terminal result outside the sandbox, and appends an exit-code closure frame to both streams. If the SDK removes an exited process from `getProcess()`, the bridge recovers that same execution through retained `getProcessLogs()` evidence; it withholds the irreversible exit cursor until both matching frames are visible, so neither an admission retry nor an eventually consistent terminal read can duplicate work or discard a delayed tail.
 
 The pinned Sandbox SDK does not expose ongoing stdin after process creation. Meanwhile therefore does not claim generic interactive process I/O: the bridge durably binds each `(process, sequence)` to one secret-safe command fingerprint, then publishes a validated command to a provider-private mailbox. Exact retries are harmless; conflicting reuse fails closed. This is a capability-gated runner command transport, not remote ACP, a PTY, or a second control plane.
 
@@ -425,20 +428,20 @@ queued → provisioning → running → succeeded
 | Guarantee | Implementation |
 | --- | --- |
 | Tenant isolation | Bearer keys derive identity; all public reads and mutations include `ownerId`; cross-owner access returns `NOT_FOUND` |
-| Secrets | Public input stores references only; values resolve immediately before use, are redacted before output consumption, and never enter SQLite or artifacts |
+| Secrets | Public input stores references only; mediated providers expose revocable placeholders to agents and inject real values only at exact outbound host/method grants; neither values nor placeholders enter durable evidence |
 | Idempotency | Run, session, turn, and deployment admission independently bind `(ownerId, Idempotency-Key)` to a canonical request hash; conflicting reuse returns `409` |
 | Timeout | Provisioning starts a persisted absolute deadline; the runner receives only a remaining monotonic duration, and post-terminal artifact reads remain bounded by the same deadline |
 | Cancellation | One atomic outcome claim commits request audit, immutable `cancelled`, terminal evidence, and cleanup eligibility before signalling |
 | Restart recovery | Durable create intents reacquire the same provider runtime by id; persisted handles/cursors then reconnect and deduplicate replay where capabilities permit |
-| Cleanup | Terminal runtimes and uncertain create side effects enter durable bounded-retry reconciliation/destruction; active work is never eligible |
+| Cleanup | Terminal work first enters durable credential revocation; runtime destruction is ineligible until revocation succeeds, and active work is never eligible |
 | Admission | One-shot runs and new session leases have independent configurable concurrency; already-live sessions are always reattached after restart, and cleanup has its own bounded lane |
 | Timezones | Durable timestamps are UTC instants accepted by the control plane; agent processes receive `TZ=UTC`; local rendering belongs to clients |
 
 Session and turn creation use the same owner-scoped idempotency rule independently. Session events bind runner evidence, control-plane transitions, and turn identity to one contiguous durable sequence. A session runtime is never cleanup-eligible while its session is operational; a timed-out or interrupted turn does not destroy continuity.
 
-Run, session, and deployment executors depend on one `SecretResolver` contract that binds resolution to a stable durable resource identity and returns local sensitive material plus its matching redactor. Awaited release zeroizes only those control-plane copies; it never revokes or rotates a credential already injected into compute that may survive a control-plane restart. Recovery reacquisition must still redact every value previously injected into a still-existing resource, and live artifact scanning reuses the exact values injected into that run rather than resolving a potentially different credential. The built-in process-environment resolver remains a bootstrap-only static credential source. Short-lived issuance, renewal, and revocation require a separate resource-lifecycle credential broker; this implementation does not claim that boundary.
+The `SecretResolver` owns resource-bound control-plane material; the independent `RuntimeCredentialBroker` owns agent-phase egress grants and revocation. Run/session admission rejects secret references when the selected provider cannot mediate them. Cloudflare stores lease material encrypted in bridge Durable Object state, gives the agent only deterministic opaque placeholders, substitutes values inside the trusted Worker outbound handler, stream-redacts exact values from the upstream response, and revokes the lease before runtime destruction. Recovery reattaches the same lease identity and fails closed on conflicting policy or credential material.
 
-Redaction prevents accidental known-value leakage. It cannot stop an agent from transforming or exfiltrating a credential it was intentionally given. Use short-lived, least-privilege, per-run credentials.
+This boundary prevents the agent from reading the source credential. It does not make an authorized destination trustworthy or prevent workspace-data exfiltration to that explicitly allowed destination. The built-in environment resolver is still a bootstrap secret source; production tenants need an owner-scoped secret manager and preferably short-lived source credentials.
 
 ## Persistence and operations
 
@@ -499,9 +502,9 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 ## Production status
 
-Meanwhile `v0.1.1` is the current public release baseline. The complete local product path, packaged container topology, and real Cloudflare Sandbox Codex, Claude Code, and Pi paths are implemented and release-proven through durable multi-turn continuity, immutable artifact download, and deployment. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
+Meanwhile `v0.1.1` is the current public release baseline. The complete credential-free local product path and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful run of the corresponding current command is evidence for that revision. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
-Durable sessions on this branch are proven end to end through both runtime adapters, including one ACP identity across turns, interrupt, timeout, event replay, cleanup, and control-plane restart. Cloudflare evidence is bound to bridge protocol v4, an exact runner digest, and the deployed image reference/digest; these are operator/platform provenance assertions rather than remote attestation.
+Durable sessions on this branch are proven end to end through both runtime adapters, including one ACP identity across turns, interrupt, timeout, event replay, cleanup, and control-plane restart. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these are operator/platform provenance assertions rather than remote attestation.
 
 Before broad multi-tenant production use, the project still needs:
 
@@ -510,7 +513,7 @@ Before broad multi-tenant production use, the project still needs:
 - owner quotas and request rate limits beyond the implemented process-level admission bounds;
 - a lease-capable shared database for horizontal control-plane writers;
 - object-backed retention for logs beyond provider replay limits;
-- a tenant secret manager or host-scoped credential broker for private repository checkout;
+- an owner-scoped secret-manager/short-lived issuer backend and a host-bound private-repository checkout broker;
 - a versioned permission-response command and explicit approval policy before interactive human approval can be supported;
 - provider-neutral suspend/resume semantics before idle sessions can release compute without closing ACP continuity.
 

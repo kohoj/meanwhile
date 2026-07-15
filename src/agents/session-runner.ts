@@ -19,7 +19,7 @@ export interface StartSessionRunnerInput {
   readonly runtime: RuntimeHandle
   readonly processId: string
   readonly spec: SessionRunnerSpec
-  readonly secretEnvironment: Readonly<Record<string, string>>
+  readonly credentialEnvironment: Readonly<Record<string, string>>
 }
 
 export class SessionRunnerController {
@@ -39,7 +39,7 @@ export class SessionRunnerController {
       processId: input.processId,
       argv: ["meanwhile-runner"],
       cwd: relativePath("."),
-      env: input.secretEnvironment,
+      env: input.credentialEnvironment,
       initialStdin: `${JSON.stringify(input.spec)}\n`,
       input: "mailbox",
     })

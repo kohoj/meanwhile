@@ -121,6 +121,8 @@ export class LocalRuntimeProvider implements RuntimeProvider {
     eventReplay: true,
     processInput: true,
     portExposure: true,
+    networkPolicy: false,
+    credentialMediation: "none" as const,
     processSignals: Object.freeze(["SIGINT", "SIGTERM", "SIGKILL"] as const),
   })
 

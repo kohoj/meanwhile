@@ -1,4 +1,11 @@
 import { describe, expect, test } from "bun:test"
+import {
+  type AttachCredentialLeaseInput,
+  type AttachedCredentialLease,
+  type CredentialLeaseHandle,
+  credentialLeaseHandle,
+  type RuntimeCredentialBroker,
+} from "../../src/credentials"
 import type { RunStatus, RuntimeInstance } from "../../src/domain"
 import { Store } from "../../src/persistence/store"
 import { RuntimeProviderRegistry } from "../../src/providers/registry"
@@ -23,6 +30,7 @@ import {
   RuntimeProviderError,
   type RuntimeState,
 } from "../../src/providers/runtime-provider"
+import { CredentialLeaseReaper } from "../../src/services/credential-lease-reaper"
 import {
   RuntimeReaper,
   type RuntimeReaperEvent,
@@ -37,7 +45,7 @@ import {
 const OWNER_ID = "owner-cleanup"
 const START = "2026-01-01T00:00:00.000Z"
 
-class DestroyProvider implements RuntimeProvider {
+class DestroyProvider implements RuntimeProvider, RuntimeCredentialBroker {
   readonly name = "fake"
   readonly provenance = Object.freeze({
     adapterVersion: "test",
@@ -52,10 +60,14 @@ class DestroyProvider implements RuntimeProvider {
     eventReplay: true,
     processInput: false,
     portExposure: false,
+    networkPolicy: true,
+    credentialMediation: "http",
     processSignals: ["SIGINT", "SIGTERM", "SIGKILL"] as const,
   } as const
   readonly created: CreateRuntimeInput[] = []
   readonly destroyed: RuntimeHandle[] = []
+  readonly revoked: string[] = []
+  readonly credentialProvider = "fake"
 
   constructor(
     private readonly failCount = 0,
@@ -68,6 +80,21 @@ class DestroyProvider implements RuntimeProvider {
         retryable: true,
       }),
   ) {}
+
+  async attach(input: AttachCredentialLeaseInput): Promise<AttachedCredentialLease> {
+    return {
+      handle: credentialLeaseHandle(this.name, input.leaseId),
+      environment: {},
+    }
+  }
+
+  async revoke(input: {
+    readonly leaseId: string
+    readonly runtime: RuntimeHandle
+    readonly handle: CredentialLeaseHandle | null
+  }): Promise<void> {
+    this.revoked.push(input.leaseId)
+  }
 
   async destroy(runtime: RuntimeHandle): Promise<void> {
     this.destroyed.push(runtime)
@@ -185,6 +212,94 @@ describe("runtime cleanup", () => {
       })
       expect(provider.destroyed).toHaveLength(0)
       expect(store.getRuntimeForRun("run-active")?.cleanupStatus).toBe("pending")
+    } finally {
+      store.close()
+    }
+  })
+
+  test("revokes the credential lease before runtime destruction", async () => {
+    const store = createStore()
+    try {
+      const runtime = createRunWithRuntime(store, "run-credential-order", "running")
+      const lease = store.ensureCredentialLease({
+        ownerId: OWNER_ID,
+        resourceType: "run",
+        resourceId: "run-credential-order",
+        runtimeId: runtime.id,
+        runtimeHandle: runtime.handle,
+        provider: runtime.provider,
+        policyDigest: "a".repeat(64),
+        at: START,
+      })
+      expect(lease?.status).toBe("attaching")
+      if (lease === null) throw new Error("Credential lease was not created")
+      const leaseId = lease.id
+      expect(
+        store.ensureCredentialLease({
+          ownerId: OWNER_ID,
+          resourceType: "run",
+          resourceId: "run-credential-order",
+          runtimeId: runtime.id,
+          runtimeHandle: runtime.handle,
+          provider: runtime.provider,
+          policyDigest: "a".repeat(64),
+          at: START,
+        })?.id,
+      ).toBe(leaseId)
+      expect(() =>
+        store.ensureCredentialLease({
+          ownerId: OWNER_ID,
+          resourceType: "run",
+          resourceId: "run-credential-order",
+          runtimeId: runtime.id,
+          runtimeHandle: runtime.handle,
+          provider: runtime.provider,
+          policyDigest: "b".repeat(64),
+          at: START,
+        }),
+      ).toThrow(expect.objectContaining({ code: "DATABASE_INTEGRITY_FAILED" }))
+      store.materializeCredentialLease({
+        leaseId,
+        handle: credentialLeaseHandle("fake", leaseId),
+        at: START,
+        audit: {
+          id: crypto.randomUUID(),
+          ownerId: OWNER_ID,
+          actorApiKeyId: null,
+          action: "credential.attach",
+          resourceType: "credential_lease",
+          resourceId: leaseId,
+          requestId: "credential-attach-test",
+          traceId: null,
+          metadata: {},
+          createdAt: START,
+        },
+      })
+      transition(store, "run-credential-order", "running", "succeeded")
+
+      const provider = new DestroyProvider()
+      const providers = new RuntimeProviderRegistry([provider])
+      const runtimeReaper = new RuntimeReaper(store, providers, {
+        clock: () => new Date(START),
+      })
+      const credentialReaper = new CredentialLeaseReaper(store, providers, {
+        clock: () => new Date(START),
+      })
+
+      expect(await runtimeReaper.runOnce()).toMatchObject({ eligible: 0, succeeded: 0 })
+      await credentialReaper.runOnce()
+      expect(provider.revoked).toEqual([leaseId])
+      expect(store.getCredentialLeaseInternal("run", "run-credential-order")?.status).toBe(
+        "revoked",
+      )
+      expect(await runtimeReaper.runOnce()).toMatchObject({ eligible: 1, succeeded: 1 })
+      expect(provider.destroyed).toHaveLength(1)
+      expect(
+        store
+          .listAudit(OWNER_ID, leaseId)
+          .map(({ action }) => action)
+          .sort(),
+      ).toEqual(["credential.attach", "credential.revoke"])
     } finally {
       store.close()
     }

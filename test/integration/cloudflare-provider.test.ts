@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { BRIDGE_PROTOCOL_VERSION } from "../../providers/cloudflare-sandbox/src/protocol"
+import {
+  BRIDGE_PROTOCOL_VERSION,
+  INITIAL_EVENT_CURSOR,
+} from "../../providers/cloudflare-sandbox/src/protocol"
 import { CloudflareRuntimeProvider } from "../../src/providers/cloudflare-provider"
 import {
   processHandle,
@@ -9,6 +12,11 @@ import {
 
 const TOKEN = "bridge-test-token-that-is-at-least-thirty-two-bytes"
 const NOW = "2026-07-13T00:00:00.000Z"
+const EMPTY_DIGEST = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+const OUTPUT_CURSOR = `v3.13.0.0.${EMPTY_DIGEST}.${EMPTY_DIGEST}`
+const TERMINAL_CURSOR = `v3.13.0.1.${EMPTY_DIGEST}.${EMPTY_DIGEST}`
+const RETRY_OUTPUT_CURSOR = `v3.6.0.0.${EMPTY_DIGEST}.${EMPTY_DIGEST}`
+const RETRY_TERMINAL_CURSOR = `v3.6.0.1.${EMPTY_DIGEST}.${EMPTY_DIGEST}`
 
 describe("CloudflareRuntimeProvider", () => {
   test("maps the complete provider contract over the authenticated bridge protocol", async () => {
@@ -25,6 +33,8 @@ describe("CloudflareRuntimeProvider", () => {
       eventReplay: true,
       processInput: true,
       portExposure: true,
+      networkPolicy: true,
+      credentialMediation: "http",
       processSignals: ["SIGKILL"],
     })
     expect(provider.provenance).toMatchObject({
@@ -34,6 +44,22 @@ describe("CloudflareRuntimeProvider", () => {
 
     await provider.start(runtime)
     expect((await provider.inspect(runtime)).status).toBe("running")
+    const credentialLeaseId = "70c78f7e-a915-4a4b-a9cb-e805f534f607"
+    const attached = await provider.attach({
+      leaseId: credentialLeaseId,
+      runtime,
+      allowedHosts: ["api.example.com"],
+      credentials: [
+        {
+          environmentVariable: "MODEL_API_KEY",
+          host: "api.example.com",
+          methods: ["POST"],
+          value: "real-secret-value",
+        },
+      ],
+    })
+    expect(attached.environment).toEqual({ MODEL_API_KEY: `mwcap_${credentialLeaseId}` })
+    expect(JSON.stringify(attached)).not.toContain("real-secret-value")
     await provider.writeFiles(runtime, [
       {
         path: relativePath("src/main.ts"),
@@ -99,7 +125,7 @@ describe("CloudflareRuntimeProvider", () => {
 
     expect(await Array.fromAsync(provider.events(process, null))).toEqual([
       {
-        cursor: "v2.13.0.0",
+        cursor: OUTPUT_CURSOR,
         timestamp: NOW,
         stream: "stdout",
         data: "runner-frame\n",
@@ -111,6 +137,9 @@ describe("CloudflareRuntimeProvider", () => {
       url: "https://preview.example.test/",
     })
     expect(await provider.health()).toMatchObject({ status: "healthy" })
+
+    await provider.revoke({ leaseId: credentialLeaseId, runtime, handle: attached.handle })
+    expect(bridge.revokedCredentialLeases).toEqual([credentialLeaseId])
 
     await provider.stop(runtime)
     await provider.stop(runtime)
@@ -183,6 +212,25 @@ describe("CloudflareRuntimeProvider", () => {
       message: "Cloudflare capacity is temporarily unavailable.",
     })
     expect(JSON.stringify(failure)).not.toContain("internalCredential")
+  })
+
+  test("honors an explicit non-retryable bridge decision on a 5xx response", async () => {
+    let attempts = 0
+    const provider = new CloudflareRuntimeProvider({
+      bridgeUrl: "https://bridge.example.test/",
+      bridgeToken: TOKEN,
+      retryDelaysMs: [1, 1],
+      fetch: async () => {
+        attempts += 1
+        return errorResponse(502, "STAGING_CLEANUP_FAILED", false)
+      },
+    })
+
+    await expect(provider.create({ runtimeId: "failed-runtime" })).rejects.toMatchObject({
+      code: "STAGING_CLEANUP_FAILED",
+      retryable: false,
+    })
+    expect(attempts).toBe(1)
   })
 
   test("fails closed on transport, protocol, URL, and invalid-mode errors", async () => {
@@ -275,20 +323,20 @@ describe("CloudflareRuntimeProvider", () => {
           events: [
             {
               type: "output",
-              cursor: "v2.6.0.0",
+              cursor: RETRY_OUTPUT_CURSOR,
               timestamp: NOW,
               stream: "stdout",
               data: "frame\n",
             },
             {
               type: "exit",
-              cursor: "v2.6.0.1",
+              cursor: RETRY_TERMINAL_CURSOR,
               timestamp: NOW,
               status: "completed",
               exitCode: 0,
             },
           ],
-          nextCursor: "v2.6.0.1",
+          nextCursor: RETRY_TERMINAL_CURSOR,
         })
       },
     })
@@ -298,10 +346,72 @@ describe("CloudflareRuntimeProvider", () => {
       "mw-00000000-0000-4000-8000-000000000001.mp-00000000-0000-4000-8000-000000000002",
     )
     expect(
-      (await Array.fromAsync(provider.events(process, "v2.0.0.0"))).map(({ data }) => data),
+      (await Array.fromAsync(provider.events(process, INITIAL_EVENT_CURSOR))).map(
+        ({ data }) => data,
+      ),
     ).toEqual(["frame\n"])
-    expect(cursors).toEqual(["v2.0.0.0", "v2.0.0.0", "v2.0.0.0"])
+    expect(cursors).toEqual([INITIAL_EVENT_CURSOR, INITIAL_EVENT_CURSOR, INITIAL_EVENT_CURSOR])
     expect(new Set(requestIds).size).toBe(1)
+  })
+
+  test("drains final process output after terminal state wins the observation race", async () => {
+    let eventReads = 0
+    const provider = new CloudflareRuntimeProvider({
+      bridgeUrl: "https://bridge.example.test/",
+      bridgeToken: TOKEN,
+      eventPollIntervalMs: 1,
+      fetch: async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init)
+        const path = new URL(request.url).pathname
+        if (path.endsWith("/events")) {
+          eventReads += 1
+          if (eventReads === 1) {
+            return json({ events: [], nextCursor: INITIAL_EVENT_CURSOR })
+          }
+          return json({
+            events: [
+              {
+                type: "output",
+                cursor: OUTPUT_CURSOR,
+                timestamp: NOW,
+                stream: "stdout",
+                data: "final-frame\n",
+              },
+              {
+                type: "exit",
+                cursor: TERMINAL_CURSOR,
+                timestamp: NOW,
+                status: "completed",
+                exitCode: 0,
+              },
+            ],
+            nextCursor: TERMINAL_CURSOR,
+          })
+        }
+        return json({
+          process: {
+            handle: {
+              version: BRIDGE_PROTOCOL_VERSION,
+              id: "mp-00000000-0000-4000-8000-000000000002",
+              runtimeId: "mw-00000000-0000-4000-8000-000000000001",
+            },
+            status: "completed",
+            exitCode: 0,
+            startedAt: NOW,
+            finishedAt: NOW,
+          },
+        })
+      },
+    })
+    const process = processHandle(
+      "cloudflare",
+      "mw-00000000-0000-4000-8000-000000000001.mp-00000000-0000-4000-8000-000000000002",
+    )
+
+    expect((await Array.fromAsync(provider.events(process, null))).map(({ data }) => data)).toEqual(
+      ["final-frame\n"],
+    )
+    expect(eventReads).toBe(2)
   })
 
   test("retries transient lifecycle mutations with one stable request identity", async () => {
@@ -348,6 +458,7 @@ class BridgeStub {
   readonly processOperationIds: string[] = []
   readonly fileModes = new Map<string, number>()
   readonly processInputs: unknown[] = []
+  readonly revokedCredentialLeases: string[] = []
   readonly #token: string
   readonly #files = new Map<string, Uint8Array>()
   runtimeId: string | null = null
@@ -399,6 +510,32 @@ class BridgeStub {
     if (request.method === "GET" && path === `/v1/runtimes/${this.runtimeId}`) {
       return json({ runtime: this.#runtimeSnapshot(this.runtimeState) })
     }
+    if (request.method === "POST" && path.endsWith("/credential-leases")) {
+      const body = (await request.json()) as {
+        leaseId: string
+        credentials: Array<{ environmentVariable: string }>
+      }
+      return json(
+        {
+          credentialLease: {
+            version: BRIDGE_PROTOCOL_VERSION,
+            id: body.leaseId,
+            runtimeId: this.runtimeId,
+            environment: Object.fromEntries(
+              body.credentials.map(({ environmentVariable }) => [
+                environmentVariable,
+                `mwcap_${body.leaseId}`,
+              ]),
+            ),
+          },
+        },
+        201,
+      )
+    }
+    if (request.method === "DELETE" && path.includes("/credential-leases/")) {
+      this.revokedCredentialLeases.push(path.split("/").at(-1) ?? "")
+      return json({ revoked: true })
+    }
     if (request.method === "POST" && path.endsWith("/processes")) {
       const body = (await request.json()) as { operationId: string }
       this.processOperationIds.push(body.operationId)
@@ -415,14 +552,20 @@ class BridgeStub {
           events: [
             {
               type: "output",
-              cursor: "v2.13.0.0",
+              cursor: OUTPUT_CURSOR,
               timestamp: NOW,
               stream: "stdout",
               data: "runner-frame\n",
             },
-            { type: "exit", cursor: "v2.13.0.1", timestamp: NOW, status: "completed", exitCode: 0 },
+            {
+              type: "exit",
+              cursor: TERMINAL_CURSOR,
+              timestamp: NOW,
+              status: "completed",
+              exitCode: 0,
+            },
           ],
-          nextCursor: "v2.13.0.1",
+          nextCursor: TERMINAL_CURSOR,
         })
       }
       if (request.method === "GET" && path.endsWith("/wait")) {

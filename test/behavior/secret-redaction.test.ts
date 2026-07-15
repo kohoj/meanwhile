@@ -6,11 +6,7 @@ import {
   SecretRedactor,
   SecretResolutionError,
 } from "../../src/secrets"
-import {
-  type ApplicationHarness,
-  createApplicationHarness,
-  createDemoRun,
-} from "../application-harness"
+import { type ApplicationHarness, createApplicationHarness } from "../application-harness"
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -205,53 +201,43 @@ describe("end-to-end secret boundary", () => {
     else Bun.env[sourceName] = original
   })
 
-  test("redacts agent output and rejects a candidate artifact containing the resolved value", async () => {
-    const secret = `pipeline-secret-${crypto.randomUUID()}`
+  test("rejects agent credentials before durable intent on a runtime without mediation", async () => {
+    const secret = `local-runtime-secret-${crypto.randomUUID()}`
     Bun.env[sourceName] = secret
     harness = await createApplicationHarness()
-    const created = await createDemoRun(harness, {
-      secretRefs: { TEST_RUNNER_SECRET: `env://${sourceName}` },
-      files: [{ path: "dist/index.html", content: `<p>${secret}</p>` }],
+    const ownerId = "00000000-0000-4000-8000-000000000001"
+    const auditBefore = harness.application.store.listAudit(ownerId)
+    const response = await harness.request("/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({
+        workspace: {
+          type: "files",
+          files: [
+            {
+              path: "README.md",
+              contentBase64: encoder.encode("credential admission").toBase64(),
+            },
+          ],
+        },
+        agentType: "demo",
+        prompt: "Attempt local execution with a credential",
+        env: {},
+        secretRefs: { TEST_RUNNER_SECRET: `env://${sourceName}` },
+        provider: "local",
+        artifactPaths: [],
+        timeoutMs: 5_000,
+      }),
     })
-    const terminal = await harness.waitForRun(created.id)
-    expect(terminal.status).toBe("succeeded")
+    expect(response.status).toBe(422)
+    const body = await response.json()
+    expect(body).toMatchObject({ error: { code: "PROVIDER_CAPABILITY_UNAVAILABLE" } })
+    expect(JSON.stringify(body)).not.toContain(secret)
 
-    const logs = harness.application.store.listRunLogs(terminal.ownerId, terminal.id, 0, 1_000)
-    expect(JSON.stringify(logs)).not.toContain(secret)
-    expect(JSON.stringify(logs)).toContain("[REDACTED]")
+    expect(harness.application.store.listRuns(ownerId, { limit: 100 }).items).toEqual([])
+    expect(harness.application.store.listAudit(ownerId)).toEqual(auditBefore)
+    expect(await readdir(`${harness.directory}/runtimes`)).toEqual([])
     expect(harness.operationalLogs.join("\n")).not.toContain(secret)
-    expect(JSON.stringify(harness.application.store.listAudit(terminal.ownerId))).not.toContain(
-      secret,
-    )
-    expect(harness.application.store.listArtifacts(terminal.ownerId, terminal.id)).toHaveLength(0)
-    expect(
-      harness.application.store
-        .listAudit(terminal.ownerId)
-        .some((record) => record.action === "artifact.capture_rejected"),
-    ).toBeTrue()
-  })
-
-  test("keeps process output in owner-visible run logs, never operational telemetry", async () => {
-    const secret = `evidence-plane-${crypto.randomUUID()}`
-    Bun.env[sourceName] = secret
-    harness = await createApplicationHarness({ logLevel: "debug" })
-    const created = await createDemoRun(harness, {
-      secretRefs: { TEST_RUNNER_SECRET: `env://${sourceName}` },
-      artifactPaths: [],
-    })
-    const terminal = await harness.waitForRun(created.id)
-    const logs = harness.application.store.listRunLogs(terminal.ownerId, terminal.id, 0, 1_000)
-    expect(
-      logs.some(
-        (log) =>
-          log.stream === "stderr" &&
-          log.eventType === "agent.stderr" &&
-          log.data.includes("fixture stderr secret=[REDACTED]"),
-      ),
-    ).toBeTrue()
-    const operational = harness.operationalLogs.join("\n")
-    expect(operational).not.toContain("fixture stderr secret=")
-    expect(operational).not.toContain(secret)
   })
 
   test("rejects reserved agent and repository sources before durable intent or provider work", async () => {

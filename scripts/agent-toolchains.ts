@@ -1,5 +1,5 @@
-import { chmod, mkdir } from "node:fs/promises"
-import { delimiter, join } from "node:path"
+import { join } from "node:path"
+import type { AgentCredentialHttpMethod, AgentCredentialPolicy } from "../src/domain"
 import {
   CLAUDE_ADAPTER_NAME,
   CLAUDE_ADAPTER_VERSION,
@@ -19,17 +19,7 @@ export const PI_ADAPTER_VERSION = "0.0.31"
 export const PI_RUNTIME_NAME = "@earendil-works/pi-coding-agent"
 export const PI_RUNTIME_VERSION = "0.80.6"
 
-const PI_PROVIDER = "amazon-bedrock"
-const PI_MODEL = "us.anthropic.claude-opus-4-8"
-const CODEX_NATIVE_TARGETS = {
-  "darwin:arm64": ["@openai/codex-darwin-arm64", "aarch64-apple-darwin"],
-  "darwin:x64": ["@openai/codex-darwin-x64", "x86_64-apple-darwin"],
-  "linux:arm64": ["@openai/codex-linux-arm64", "aarch64-unknown-linux-musl"],
-  "linux:x64": ["@openai/codex-linux-x64", "x86_64-unknown-linux-musl"],
-} as const
-
 export type LiveAgentType = "codex" | "claude-code" | "pi"
-export type AgentToolchainLocation = "local" | "cloudflare"
 
 export interface PreparedAgentToolchain {
   readonly type: LiveAgentType
@@ -40,6 +30,8 @@ export interface PreparedAgentToolchain {
   readonly environment: Readonly<Record<string, string>>
   readonly secretReferences: Readonly<Record<string, string>>
   readonly secretValues: readonly string[]
+  readonly allowedHosts: readonly string[]
+  readonly credentialPolicies: readonly AgentCredentialPolicy[]
   restore(): void
 }
 
@@ -53,17 +45,12 @@ export class AgentToolchainError extends Error {
   }
 }
 
-export async function prepareAgentToolchain(
+export async function prepareCloudflareAgentToolchain(
   type: LiveAgentType,
-  location: AgentToolchainLocation,
-  directory: string,
 ): Promise<PreparedAgentToolchain> {
   const environment = new EnvironmentScope()
   try {
-    const prepared =
-      location === "local"
-        ? await prepareLocalToolchain(type, directory, environment)
-        : await prepareCloudflareToolchain(type, environment)
+    const prepared = await prepareCloudflareToolchain(type, environment)
     return { ...prepared, restore: () => environment.restore() }
   } catch (error) {
     environment.restore()
@@ -85,24 +72,13 @@ export function agentCatalog(toolchain: PreparedAgentToolchain): object {
         workingDirectory: "workspace",
         capabilities: { filesystem: true, terminal: true },
         envNames: Object.keys(toolchain.environment),
-        secretEnvNames: Object.keys(toolchain.secretReferences),
+        networkPolicy: { allowedHosts: [...toolchain.allowedHosts] },
+        credentials: toolchain.credentialPolicies.map((policy) => ({
+          ...policy,
+          methods: [...policy.methods],
+        })),
       },
     },
-  }
-}
-
-async function prepareLocalToolchain(
-  type: LiveAgentType,
-  directory: string,
-  environment: EnvironmentScope,
-): Promise<Omit<PreparedAgentToolchain, "restore">> {
-  switch (type) {
-    case "codex":
-      return prepareLocalCodex(directory, environment)
-    case "claude-code":
-      return prepareLocalClaude(directory, environment)
-    case "pi":
-      return prepareLocalPi(directory, environment)
   }
 }
 
@@ -113,24 +89,33 @@ async function prepareCloudflareToolchain(
   switch (type) {
     case "codex": {
       const authentication = await readCodexAuthentication()
-      for (const [name, value] of Object.entries(authentication.environment)) {
-        environment.set(name, value)
-      }
+      const hosts = ["api.openai.com"] as const
+      environment.set("CODEX_AUTH_OPENAI_API_KEY", authentication.apiKey)
       return {
         type,
         executable: "codex-acp",
         adapter: `${CODEX_ADAPTER_NAME}@${CODEX_ADAPTER_VERSION}`,
         runtime: `${CODEX_RUNTIME_NAME}@${CODEX_RUNTIME_VERSION}`,
-        authenticationEvidence: "Codex ChatGPT login materialized into a process-private home",
-        environment: { INITIAL_AGENT_MODE: "agent", NO_BROWSER: "1" },
-        secretReferences: Object.fromEntries(
-          Object.keys(authentication.environment).map((name) => [name, `env://${name}`]),
-        ),
-        secretValues: Object.values(authentication.environment),
+        authenticationEvidence: "OpenAI API key mediated at the Cloudflare egress boundary",
+        environment: {
+          INITIAL_AGENT_MODE: "agent",
+          NO_BROWSER: "1",
+          CODEX_AUTH_METADATA_JSON: JSON.stringify({
+            auth_mode: "apikey",
+            OPENAI_API_KEY: null,
+          }),
+        },
+        secretReferences: {
+          CODEX_AUTH_OPENAI_API_KEY: "env://CODEX_AUTH_OPENAI_API_KEY",
+        },
+        secretValues: [authentication.apiKey],
+        allowedHosts: hosts,
+        credentialPolicies: credentialPolicies(["CODEX_AUTH_OPENAI_API_KEY"], hosts, ["POST"]),
       }
     }
     case "claude-code": {
       const configured = await loadClaudeRunEnvironment()
+      const hosts = cloudflareClaudeHosts(configured.environment, configured.secretReferences)
       for (const [name, value] of Object.entries(configured.secretValues)) {
         environment.set(name, value)
       }
@@ -143,10 +128,15 @@ async function prepareCloudflareToolchain(
         environment: configured.environment,
         secretReferences: configured.secretReferences,
         secretValues: Object.values(configured.secretValues),
+        allowedHosts: hosts,
+        credentialPolicies: credentialPolicies(Object.keys(configured.secretReferences), hosts, [
+          "POST",
+        ]),
       }
     }
     case "pi": {
       const authentication = await resolvePiBedrockAuthentication()
+      const host = bedrockHost(authentication.region)
       environment.set("AWS_BEARER_TOKEN_BEDROCK", authentication.bearerToken)
       return {
         type,
@@ -159,257 +149,124 @@ async function prepareCloudflareToolchain(
           AWS_BEARER_TOKEN_BEDROCK: "env://AWS_BEARER_TOKEN_BEDROCK",
         },
         secretValues: [authentication.bearerToken],
+        allowedHosts: [host],
+        credentialPolicies: credentialPolicies(["AWS_BEARER_TOKEN_BEDROCK"], [host], ["POST"]),
       }
     }
   }
 }
 
-async function prepareLocalCodex(
-  directory: string,
-  environment: EnvironmentScope,
-): Promise<Omit<PreparedAgentToolchain, "restore">> {
-  const loginCodexPath = Bun.which("codex")
-  const home = Bun.env["HOME"]
-  const codexHome = Bun.env["CODEX_HOME"] ?? (home === undefined ? null : join(home, ".codex"))
-  if (loginCodexPath === null) {
-    throw new AgentToolchainError("CODEX_NOT_FOUND", "Codex must be installed for this proof")
-  }
-  if (codexHome === null) {
-    throw new AgentToolchainError("CODEX_HOME_MISSING", "CODEX_HOME could not be resolved")
-  }
-
-  const login = Bun.spawn([loginCodexPath, "login", "status"], {
-    env: { ...Bun.env, CODEX_HOME: codexHome },
-    stdout: "ignore",
-    stderr: "ignore",
-  })
-  if ((await login.exited) !== 0) {
-    throw new AgentToolchainError(
-      "CODEX_AUTHENTICATION_REQUIRED",
-      "Run 'codex login' before this proof",
-    )
-  }
-
-  const loginVersion = await executableVersion(loginCodexPath, "CODEX_VERSION_UNAVAILABLE")
-  await installToolchain(directory, {
-    [CODEX_ADAPTER_NAME]: CODEX_ADAPTER_VERSION,
-    [CODEX_RUNTIME_NAME]: CODEX_RUNTIME_VERSION,
-  })
-  const adapterPath = await createBunModuleExecutable(
-    directory,
-    "codex-acp",
-    join(directory, "node_modules", "@agentclientprotocol", "codex-acp", "dist", "index.js"),
+function credentialPolicies(
+  environmentVariables: readonly string[],
+  hosts: readonly string[],
+  methods: readonly AgentCredentialHttpMethod[],
+): readonly AgentCredentialPolicy[] {
+  return environmentVariables.flatMap((environmentVariable) =>
+    hosts.map((host) => ({ environmentVariable, host, methods: [...methods] })),
   )
-  const runtimePath = await codexNativeExecutable(directory)
-  await assertExecutableVersion(adapterPath, CODEX_ADAPTER_VERSION, "CODEX_ADAPTER_UNAVAILABLE")
-  await assertExecutableVersion(runtimePath, CODEX_RUNTIME_VERSION, "CODEX_VERSION_UNAVAILABLE")
-  environment.prependPath(join(directory, "bin"))
-  environment.set("CODEX_HOME", codexHome)
-  environment.set("CODEX_PATH", runtimePath)
-  return {
-    type: "codex",
-    executable: "codex-acp",
-    adapter: `${CODEX_ADAPTER_NAME}@${CODEX_ADAPTER_VERSION}`,
-    runtime: `${CODEX_RUNTIME_NAME}@${CODEX_RUNTIME_VERSION}`,
-    authenticationEvidence: loginVersion,
-    environment: { INITIAL_AGENT_MODE: "agent", NO_BROWSER: "1" },
-    secretReferences: { CODEX_HOME: "env://CODEX_HOME", CODEX_PATH: "env://CODEX_PATH" },
-    secretValues: [],
-  }
 }
 
-async function prepareLocalClaude(
-  directory: string,
-  environment: EnvironmentScope,
-): Promise<Omit<PreparedAgentToolchain, "restore">> {
-  const claudePath = Bun.which("claude")
-  if (claudePath === null) {
+export function cloudflareClaudeHosts(
+  environment: Readonly<Record<string, string>>,
+  secretReferences: Readonly<Record<string, string>>,
+): readonly string[] {
+  const anthropicCredentials = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ].filter((name) => secretReferences[name] !== undefined)
+  if (anthropicCredentials.length > 1) {
     throw new AgentToolchainError(
-      "CLAUDE_NOT_FOUND",
-      "Claude Code must be installed for this proof",
+      "CLAUDE_AUTH_AMBIGUOUS",
+      "The Cloudflare proof requires exactly one Claude authentication authority",
     )
   }
-  const configured = await loadClaudeRunEnvironment()
-  for (const [name, value] of Object.entries(configured.secretValues)) {
-    environment.set(name, value)
-  }
-  await installToolchain(directory, { [CLAUDE_ADAPTER_NAME]: CLAUDE_ADAPTER_VERSION })
-  await assertPackageVersion(directory, CLAUDE_ADAPTER_NAME, CLAUDE_ADAPTER_VERSION)
-  await assertPackageVersion(directory, CLAUDE_SDK_NAME, CLAUDE_SDK_VERSION)
-  const adapterPath = await createBunModuleExecutable(
-    directory,
-    "claude-agent-acp",
-    join(directory, "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js"),
-  )
-  await assertExecutableVersion(adapterPath, CLAUDE_ADAPTER_VERSION, "CLAUDE_ADAPTER_UNAVAILABLE")
-  environment.prependPath(join(directory, "bin"))
-  return {
-    type: "claude-code",
-    executable: "claude-agent-acp",
-    adapter: `${CLAUDE_ADAPTER_NAME}@${CLAUDE_ADAPTER_VERSION}`,
-    runtime: `${CLAUDE_SDK_NAME}@${CLAUDE_SDK_VERSION}`,
-    authenticationEvidence: `${await executableVersion(claudePath, "CLAUDE_VERSION_UNAVAILABLE")} via ~/.claude/settings.json`,
-    environment: configured.environment,
-    secretReferences: configured.secretReferences,
-    secretValues: Object.values(configured.secretValues),
-  }
-}
 
-async function prepareLocalPi(
-  directory: string,
-  environment: EnvironmentScope,
-): Promise<Omit<PreparedAgentToolchain, "restore">> {
-  const authentication = await resolvePiBedrockAuthentication()
-  await installToolchain(directory, {
-    [PI_ADAPTER_NAME]: PI_ADAPTER_VERSION,
-    [PI_RUNTIME_NAME]: PI_RUNTIME_VERSION,
-  })
-  await assertPackageVersion(directory, PI_ADAPTER_NAME, PI_ADAPTER_VERSION)
-  await assertPackageVersion(directory, PI_RUNTIME_NAME, PI_RUNTIME_VERSION)
-  await createBunModuleExecutable(
-    directory,
-    "pi-acp",
-    join(directory, "node_modules", "pi-acp", "dist", "index.js"),
-  )
-  const piPath = await createBunModuleExecutable(
-    directory,
-    "pi-runtime",
-    join(directory, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
-  )
-  await assertExecutableVersion(piPath, PI_RUNTIME_VERSION, "PI_VERSION_UNAVAILABLE")
-  const configDirectory = join(directory, "config")
-  await mkdir(configDirectory, { recursive: true })
-  await Bun.write(
-    join(configDirectory, "settings.json"),
-    JSON.stringify({ defaultProvider: PI_PROVIDER, defaultModel: PI_MODEL }),
-  )
-  environment.prependPath(join(directory, "bin"))
-  environment.set("AWS_BEARER_TOKEN_BEDROCK", authentication.bearerToken)
-  environment.set("PI_ACP_PI_COMMAND", piPath)
-  environment.set("PI_CODING_AGENT_DIR", configDirectory)
-  return {
-    type: "pi",
-    executable: "pi-acp",
-    adapter: `${PI_ADAPTER_NAME}@${PI_ADAPTER_VERSION}`,
-    runtime: `${PI_RUNTIME_NAME}@${PI_RUNTIME_VERSION}`,
-    authenticationEvidence: `Amazon Bedrock ${authentication.region} via ${authentication.source}`,
-    environment: { AWS_REGION: authentication.region, PI_TELEMETRY: "0" },
-    secretReferences: {
-      AWS_BEARER_TOKEN_BEDROCK: "env://AWS_BEARER_TOKEN_BEDROCK",
-      PI_ACP_PI_COMMAND: "env://PI_ACP_PI_COMMAND",
-      PI_CODING_AGENT_DIR: "env://PI_CODING_AGENT_DIR",
-    },
-    secretValues: [authentication.bearerToken],
-  }
-}
-
-async function installToolchain(
-  directory: string,
-  dependencies: Readonly<Record<string, string>>,
-): Promise<void> {
-  await mkdir(directory, { recursive: true })
-  await Bun.write(join(directory, "package.json"), JSON.stringify({ private: true, dependencies }))
-  const bun = Bun.which("bun")
-  if (bun === null) throw new AgentToolchainError("BUN_NOT_FOUND", "Bun could not be located")
-  const install = Bun.spawn([bun, "install", "--no-progress"], {
-    cwd: directory,
-    stdout: "ignore",
-    stderr: "ignore",
-  })
-  if ((await install.exited) !== 0) {
+  const usesVertex =
+    secretReferences["GOOGLE_APPLICATION_CREDENTIALS"] !== undefined ||
+    environment["CLAUDE_CODE_USE_VERTEX"] === "1"
+  const usesFoundry = environment["CLAUDE_CODE_USE_FOUNDRY"] === "1"
+  const usesBedrock =
+    secretReferences["AWS_BEARER_TOKEN_BEDROCK"] !== undefined ||
+    environment["CLAUDE_CODE_USE_BEDROCK"] === "1"
+  const usesAnthropic = anthropicCredentials.length === 1
+  const authorityCount = [usesAnthropic, usesBedrock, usesVertex, usesFoundry].filter(
+    Boolean,
+  ).length
+  if (authorityCount !== 1) {
     throw new AgentToolchainError(
-      "AGENT_TOOLCHAIN_INSTALL_FAILED",
-      "The pinned ACP toolchain could not be installed",
+      "CLAUDE_AUTH_AMBIGUOUS",
+      "The Cloudflare proof requires exactly one Claude authentication authority",
     )
   }
-}
 
-async function createBunModuleExecutable(
-  directory: string,
-  name: string,
-  modulePath: string,
-): Promise<string> {
-  if (!(await Bun.file(modulePath).exists())) {
+  if (usesVertex) {
     throw new AgentToolchainError(
-      "AGENT_TOOLCHAIN_UNAVAILABLE",
-      "The pinned agent module is unavailable",
+      "CLAUDE_AUTH_UNSUPPORTED",
+      "The Cloudflare proof does not pass file credentials or metadata-service authority to the agent runtime",
     )
   }
-  const binaryDirectory = join(directory, "bin")
-  const executable = join(binaryDirectory, name)
-  await mkdir(binaryDirectory, { recursive: true })
-  await Bun.write(executable, `#!/usr/bin/env bun\nawait import(${JSON.stringify(modulePath)})\n`)
-  await chmod(executable, 0o755)
-  return executable
-}
-
-async function codexNativeExecutable(directory: string): Promise<string> {
-  const target = Reflect.get(CODEX_NATIVE_TARGETS, `${process.platform}:${process.arch}`) as
-    | readonly [string, string]
-    | undefined
-  if (target === undefined) {
+  if (usesFoundry) {
     throw new AgentToolchainError(
-      "CODEX_PLATFORM_UNSUPPORTED",
-      "The pinned Codex runtime does not support this platform",
+      "CLAUDE_AUTH_UNSUPPORTED",
+      "The Cloudflare proof requires an exact destination policy and does not accept Foundry discovery",
     )
   }
-  const [packageName, triple] = target
-  const executable = join(
-    directory,
-    "node_modules",
-    ...packageName.split("/"),
-    "vendor",
-    triple,
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  )
-  if (!(await Bun.file(executable).exists())) {
+  if (usesBedrock) {
+    if (environment["ANTHROPIC_BASE_URL"] !== undefined) {
+      throw new AgentToolchainError(
+        "CLAUDE_AUTH_AMBIGUOUS",
+        "ANTHROPIC_BASE_URL cannot be combined with Bedrock authentication",
+      )
+    }
+    const region = environment["AWS_REGION"]
+    if (region === undefined) {
+      throw new AgentToolchainError(
+        "CLAUDE_AUTH_UNSUPPORTED",
+        "Bedrock authentication requires an explicit AWS_REGION",
+      )
+    }
+    return [bedrockHost(region)]
+  }
+  const baseUrl = environment["ANTHROPIC_BASE_URL"]
+  return [baseUrl === undefined ? "api.anthropic.com" : exactHttpsHost(baseUrl)]
+}
+
+function bedrockHost(region: string): string {
+  if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(region)) {
+    throw new AgentToolchainError("BEDROCK_REGION_INVALID", "AWS_REGION is not a valid region")
+  }
+  return `bedrock-runtime.${region}.amazonaws.com`
+}
+
+function exactHttpsHost(value: string): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new AgentToolchainError("CLAUDE_BASE_URL_INVALID", "ANTHROPIC_BASE_URL is invalid")
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0 ||
+    url.hostname !== url.hostname.toLowerCase()
+  ) {
     throw new AgentToolchainError(
-      "CODEX_VERSION_UNAVAILABLE",
-      "The pinned native Codex executable is unavailable",
+      "CLAUDE_BASE_URL_INVALID",
+      "ANTHROPIC_BASE_URL must be a credential-free HTTPS URL with an exact lowercase host",
     )
   }
-  return executable
-}
-
-async function assertPackageVersion(
-  directory: string,
-  packageName: string,
-  expected: string,
-): Promise<void> {
-  const manifest = await Bun.file(
-    join(directory, "node_modules", ...packageName.split("/"), "package.json"),
-  ).json()
-  if (Reflect.get(manifest, "version") !== expected) {
-    throw new AgentToolchainError(
-      "AGENT_TOOLCHAIN_VERSION_MISMATCH",
-      "The installed agent toolchain does not match its pinned version",
-    )
-  }
-}
-
-async function assertExecutableVersion(
-  executable: string,
-  expected: string,
-  code: string,
-): Promise<void> {
-  if (!(await executableVersion(executable, code)).includes(expected)) {
-    throw new AgentToolchainError(code, "The installed executable is not the pinned version")
-  }
-}
-
-async function executableVersion(executable: string, code: string): Promise<string> {
-  const process = Bun.spawn([executable, "--version"], { stdout: "pipe", stderr: "ignore" })
-  const output = await new Response(process.stdout).text()
-  if ((await process.exited) !== 0 || output.trim().length === 0) {
-    throw new AgentToolchainError(code, "The agent executable version could not be verified")
-  }
-  return output.trim()
+  return url.hostname
 }
 
 async function readCodexAuthentication(): Promise<{
-  readonly environment: Readonly<Record<string, string>>
+  readonly apiKey: string
 }> {
+  const directApiKey = Bun.env["OPENAI_API_KEY"]
+  if (directApiKey !== undefined && directApiKey.length > 0) return { apiKey: directApiKey }
   const home =
     Bun.env["CODEX_HOME"] ??
     (Bun.env["HOME"] === undefined ? undefined : join(Bun.env["HOME"] as string, ".codex"))
@@ -418,7 +275,10 @@ async function readCodexAuthentication(): Promise<{
   }
   const file = Bun.file(join(home, "auth.json"))
   if (!(await file.exists())) {
-    throw new AgentToolchainError("CODEX_AUTHENTICATION_REQUIRED", "Run 'codex login' first")
+    throw new AgentToolchainError(
+      "CODEX_API_KEY_REQUIRED",
+      "The brokered Cloudflare proof requires OPENAI_API_KEY authentication",
+    )
   }
   const serialized = await file.text()
   let parsed: unknown
@@ -430,57 +290,14 @@ async function readCodexAuthentication(): Promise<{
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new AgentToolchainError("CODEX_AUTH_INVALID", "Codex authentication is invalid")
   }
-  const authMode = requiredString(parsed, "auth_mode")
-  const lastRefresh = Reflect.get(parsed, "last_refresh")
-  if (lastRefresh !== null && lastRefresh !== undefined && typeof lastRefresh !== "string") {
-    throw new AgentToolchainError("CODEX_AUTH_INVALID", "Codex authentication is invalid")
-  }
   const openAiApiKey = Reflect.get(parsed, "OPENAI_API_KEY")
-  if (openAiApiKey !== null && openAiApiKey !== undefined && typeof openAiApiKey !== "string") {
-    throw new AgentToolchainError("CODEX_AUTH_INVALID", "Codex authentication is invalid")
+  if (typeof openAiApiKey !== "string" || openAiApiKey.length === 0) {
+    throw new AgentToolchainError(
+      "CODEX_API_KEY_REQUIRED",
+      "The brokered Cloudflare proof requires OPENAI_API_KEY authentication; ChatGPT session tokens are intentionally not injected into the runtime",
+    )
   }
-  const environment: Record<string, string> = {
-    CODEX_AUTH_METADATA_JSON: JSON.stringify({
-      auth_mode: authMode,
-      OPENAI_API_KEY: null,
-      ...(lastRefresh === undefined ? {} : { last_refresh: lastRefresh }),
-    }),
-  }
-  const tokens = Reflect.get(parsed, "tokens")
-  if (tokens !== null && tokens !== undefined) {
-    const tokenRecord = requiredRecord(parsed, "tokens")
-    Object.assign(environment, {
-      CODEX_AUTH_ID_TOKEN: requiredString(tokenRecord, "id_token"),
-      CODEX_AUTH_ACCESS_TOKEN: requiredString(tokenRecord, "access_token"),
-      CODEX_AUTH_REFRESH_TOKEN: requiredString(tokenRecord, "refresh_token"),
-      CODEX_AUTH_ACCOUNT_ID: requiredString(tokenRecord, "account_id"),
-    })
-  }
-  if (typeof openAiApiKey === "string" && openAiApiKey.length > 0) {
-    environment["CODEX_AUTH_OPENAI_API_KEY"] = openAiApiKey
-  }
-  if (tokens === null || tokens === undefined) {
-    if (environment["CODEX_AUTH_OPENAI_API_KEY"] === undefined) {
-      throw new AgentToolchainError("CODEX_AUTH_INVALID", "Codex authentication is invalid")
-    }
-  }
-  return {
-    environment,
-  }
-}
-
-function requiredRecord(value: object, key: string): Record<string, unknown> {
-  const selected = Reflect.get(value, key)
-  if (typeof selected === "object" && selected !== null && !Array.isArray(selected)) {
-    return selected as Record<string, unknown>
-  }
-  throw new AgentToolchainError("CODEX_AUTH_INVALID", "Codex authentication is invalid")
-}
-
-function requiredString(value: object, key: string): string {
-  const selected = Reflect.get(value, key)
-  if (typeof selected === "string" && selected.length > 0) return selected
-  throw new AgentToolchainError("CODEX_AUTH_INVALID", "Codex authentication is invalid")
+  return { apiKey: openAiApiKey }
 }
 
 async function resolvePiBedrockAuthentication(): Promise<{
@@ -515,10 +332,6 @@ class EnvironmentScope {
   set(name: string, value: string): void {
     if (!this.#original.has(name)) this.#original.set(name, Bun.env[name])
     Bun.env[name] = value
-  }
-
-  prependPath(directory: string): void {
-    this.set("PATH", `${directory}${delimiter}${Bun.env["PATH"] ?? ""}`)
   }
 
   restore(): void {

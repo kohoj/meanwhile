@@ -19,6 +19,10 @@ export interface RuntimeCapabilities {
   /** Ordered, idempotent input delivery to an already-running process. */
   readonly processInput: boolean
   readonly portExposure: boolean
+  /** Agent-phase exact-host egress policy enforced outside the runtime. */
+  readonly networkPolicy: boolean
+  /** Real credentials remain outside the runtime and are redeemed only at trusted egress. */
+  readonly credentialMediation: "none" | "http"
   /** Signals delivered with their exact POSIX meaning by this adapter. */
   readonly processSignals: readonly ProcessSignal[]
 }
@@ -185,6 +189,8 @@ export type RuntimeProviderOperation =
   | "readFile"
   | "expose"
   | "health"
+  | "credentialAttach"
+  | "credentialRevoke"
 
 export interface RuntimeProviderErrorInput {
   readonly provider: string

@@ -20,7 +20,8 @@ export const testAgentSpec = (
     toolKinds: ["read", "edit", "delete", "move", "search"],
   },
   envNames: [],
-  secretEnvNames: [],
+  networkPolicy: { allowedHosts: [] },
+  credentials: [],
   ...overrides,
 })
 
@@ -30,7 +31,13 @@ export const permissiveTestAgentIntents: RunAgentIntentResolver = {
       agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
       agentSpec: testAgentSpec({
         envNames: Object.keys(environment).sort(),
-        secretEnvNames: Object.keys(secretReferences).sort(),
+        credentials: Object.keys(secretReferences)
+          .sort()
+          .map((environmentVariable) => ({
+            environmentVariable,
+            host: "example.com",
+            methods: ["POST"] as const,
+          })),
       }),
     }
   },

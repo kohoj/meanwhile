@@ -119,7 +119,7 @@ liveTest(
         artifactPaths: [],
         timeoutBudgetMs: 60_000,
         environment: {},
-        secretEnvironmentNames: [],
+        credentialEnvironmentNames: [],
       }
       const runnerProcess = await provider.spawn(runtime, {
         processId: `live-runner-${crypto.randomUUID()}`,
@@ -131,11 +131,15 @@ liveTest(
       })
       const runnerEvents = await Array.fromAsync(provider.events(runnerProcess, null))
       const runnerFrames = parseRunnerFrames(runnerEvents)
-      if (runnerFrames.length === 0) {
+      if (!runnerFrames.some((frame) => frame.type === "session.started")) {
         throw new Error(
-          `Remote runner emitted no protocol frames: ${JSON.stringify(
-            runnerEvents.map(({ stream, data }) => ({ stream, data: data.slice(0, 1_000) })),
-          )}`,
+          `Remote runner did not initialize ACP: ${JSON.stringify({
+            events: runnerEvents.map(({ stream, data }) => ({
+              stream,
+              data: data.slice(0, 1_000),
+            })),
+            exit: await provider.wait(runnerProcess),
+          })}`,
         )
       }
       expect(runnerFrames).toContainEqual(
@@ -167,7 +171,7 @@ liveTest(
           agent: { executable: "meanwhile-demo-agent", args: [] },
           permissionPolicy: { mode: "deny-all" },
           environment: {},
-          secretEnvironmentNames: [],
+          credentialEnvironmentNames: [],
           idleTimeoutMs: 60_000,
         } satisfies SessionRunnerSpec)}\n`,
         input: "mailbox",
@@ -251,11 +255,77 @@ liveTest(
         terminationGraceMs: 5_000,
       })
       await waitForProcessOutput(provider, previewServer, "preview-ready")
-      expect(await provider.expose(runtime, 3_001)).toMatchObject({
-        port: 3_001,
-        url: expect.stringMatching(/^https:\/\//),
-      })
+      if (new URL(bridgeUrl).hostname.endsWith(".workers.dev")) {
+        await expect(provider.expose(runtime, 3_001)).rejects.toMatchObject({
+          code: "PORT_EXPOSURE_REQUIRES_CUSTOM_DOMAIN",
+          retryable: false,
+        })
+      } else {
+        expect(await provider.expose(runtime, 3_001)).toMatchObject({
+          port: 3_001,
+          url: expect.stringMatching(/^https:\/\//),
+        })
+      }
       await provider.signal(previewServer, "SIGKILL")
+
+      const credentialLeaseId = crypto.randomUUID()
+      const credentialValue = `live-credential-${crypto.randomUUID()}`
+      const credentialLease = await provider.attach({
+        leaseId: credentialLeaseId,
+        runtime,
+        allowedHosts: ["httpbin.org"],
+        credentials: [
+          {
+            environmentVariable: "LIVE_PROVIDER_TOKEN",
+            host: "httpbin.org",
+            methods: ["POST"],
+            value: credentialValue,
+          },
+        ],
+      })
+      expect(credentialLease.environment["LIVE_PROVIDER_TOKEN"]).toMatch(/^mwcap_v1_/)
+      expect(credentialLease.environment["LIVE_PROVIDER_TOKEN"]).not.toBe(credentialValue)
+      const mediated = await provider.spawn(runtime, {
+        processId: `live-credential-${crypto.randomUUID()}`,
+        argv: [
+          "bun",
+          "-e",
+          "const value=process.env.LIVE_PROVIDER_TOKEN;if(!value?.startsWith('mwcap_v1_'))process.exit(41);const response=await fetch('https://httpbin.org/anything',{method:'POST',headers:{authorization:'Bearer '+value},body:'proof'});console.log(JSON.stringify(await response.json()))",
+        ],
+        cwd: relativePath("."),
+        env: credentialLease.environment,
+        timeoutMs: 30_000,
+        terminationGraceMs: 5_000,
+      })
+      const mediatedOutput = (await Array.fromAsync(provider.events(mediated, null)))
+        .map(({ data }) => data)
+        .join("")
+      expect(mediatedOutput).not.toContain(credentialValue)
+      expect(mediatedOutput).toContain(credentialLease.environment["LIVE_PROVIDER_TOKEN"] as string)
+      expect(await provider.wait(mediated)).toMatchObject({ exitCode: 0, reason: "exited" })
+
+      await provider.revoke({
+        leaseId: credentialLeaseId,
+        runtime,
+        handle: credentialLease.handle,
+      })
+      const denied = await provider.spawn(runtime, {
+        processId: `live-denied-egress-${crypto.randomUUID()}`,
+        argv: [
+          "bun",
+          "-e",
+          "const response=await fetch('https://example.com');console.log(response.status)",
+        ],
+        cwd: relativePath("."),
+        timeoutMs: 30_000,
+        terminationGraceMs: 5_000,
+      })
+      const deniedOutput = (await Array.fromAsync(provider.events(denied, null)))
+        .map(({ data }) => data)
+        .join("")
+        .trim()
+      expect(deniedOutput).toBe("403")
+      expect(await provider.wait(denied)).toMatchObject({ exitCode: 0, reason: "exited" })
 
       await provider.stop(runtime)
       await provider.stop(runtime)

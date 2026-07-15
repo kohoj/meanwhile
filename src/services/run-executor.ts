@@ -42,6 +42,7 @@ import {
   ExactSecretArtifactScanner,
   type WorkspaceEntry,
 } from "./artifact-collector"
+import { attachAgentCredentialLease } from "./credential-lease-attacher"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
 const DEFAULT_POLL_MS = 500
@@ -485,11 +486,23 @@ export class RunExecutor implements ManagedComponent {
         createdAt: this.#now(),
       })
       if (launch === null) return
-      const secrets = await this.#secrets.resolve(
+      const resolvedSecrets = await this.#secrets.resolve(
         run.secretRefs,
         secretScope(run.ownerId, "agent", run.id),
       )
+      let secrets = resolvedSecrets
       try {
+        secrets = await attachAgentCredentialLease(this.#store, {
+          ownerId: run.ownerId,
+          resourceType: "run",
+          resourceId: run.id,
+          runtimeId: runtimeRecord.id,
+          runtime,
+          provider,
+          agentSpec: run.agentSpec,
+          secrets: resolvedSecrets,
+          at: this.#now(),
+        })
         const timeoutBudgetMs = launch.timeoutBudgetMs
         const spec: RunnerSpec = {
           protocolVersion: RUNNER_PROTOCOL_VERSION,
@@ -511,7 +524,7 @@ export class RunExecutor implements ManagedComponent {
           artifactPaths: [...run.artifactPaths],
           timeoutBudgetMs,
           environment: { ...run.env },
-          secretEnvironmentNames: Object.keys(secrets.environment),
+          credentialEnvironmentNames: Object.keys(secrets.environment),
         }
         process = await this.#span(
           scope,
@@ -523,7 +536,7 @@ export class RunExecutor implements ManagedComponent {
               runtime,
               processId,
               spec,
-              secretEnvironment: secrets.environment,
+              credentialEnvironment: secrets.environment,
               timeoutMs: timeoutBudgetMs,
               terminationGraceMs: PROCESS_TERMINATION_GRACE_MS,
             }),
@@ -556,20 +569,50 @@ export class RunExecutor implements ManagedComponent {
           createdAt: at,
         })
         this.#assertRunning()
-        await this.#consume(run, provider, runtime, process, session, secrets, scope)
+        await this.#consume(
+          run,
+          provider,
+          runtime,
+          process,
+          session,
+          secrets,
+          resolvedSecrets.environment,
+          scope,
+        )
       } finally {
         await secrets.release()
       }
       return
     }
 
-    const recoverySecrets = await this.#secrets.resolve(
+    const resolvedRecoverySecrets = await this.#secrets.resolve(
       run.secretRefs,
       secretScope(run.ownerId, "agent", run.id),
     )
+    let recoverySecrets = resolvedRecoverySecrets
     try {
+      recoverySecrets = await attachAgentCredentialLease(this.#store, {
+        ownerId: run.ownerId,
+        resourceType: "run",
+        resourceId: run.id,
+        runtimeId: runtimeRecord.id,
+        runtime,
+        provider,
+        agentSpec: run.agentSpec,
+        secrets: resolvedRecoverySecrets,
+        at: this.#now(),
+      })
       try {
-        await this.#consume(run, provider, runtime, process, session, recoverySecrets, scope)
+        await this.#consume(
+          run,
+          provider,
+          runtime,
+          process,
+          session,
+          recoverySecrets,
+          resolvedRecoverySecrets.environment,
+          scope,
+        )
       } catch (error) {
         if (reconnecting && isMissingProcess(error)) {
           throw runtimeLost(provider.name, "process")
@@ -746,6 +789,7 @@ export class RunExecutor implements ManagedComponent {
     process: ProcessHandle,
     session: NonNullable<ReturnType<Store["getRunnerSession"]>>,
     secrets: Pick<ResolvedSecretMaterial, "environment" | "redactor">,
+    resolvedCredentialValues: Readonly<Record<string, string>>,
     scope?: TelemetryScope,
   ): Promise<void> {
     const { redactor } = secrets
@@ -886,7 +930,23 @@ export class RunExecutor implements ManagedComponent {
     let current = this.#store.getRunInternal(initialRun.id)
     this.#assertTerminalCanFinalize(current, acceptedTerminal)
     if (current === null || isTerminalRunStatus(current.status)) return
-    await this.#collectArtifacts(current, provider, runtime, scope, undefined, secrets.environment)
+    const artifactSecretValues = Object.fromEntries(
+      [...Object.values(resolvedCredentialValues), ...Object.values(secrets.environment)].map(
+        (value, index) => [`credential-${index}`, value],
+      ),
+    )
+    try {
+      await this.#collectArtifacts(
+        current,
+        provider,
+        runtime,
+        scope,
+        undefined,
+        artifactSecretValues,
+      )
+    } finally {
+      for (const name of Object.keys(artifactSecretValues)) artifactSecretValues[name] = ""
+    }
     if (!this.#running) return
     current = this.#store.getRunInternal(initialRun.id)
     if (current === null || isTerminalRunStatus(current.status)) return
@@ -977,7 +1037,7 @@ export class RunExecutor implements ManagedComponent {
   ): Promise<string | null> {
     const values: Record<string, string> = {}
     // Recovery may need to reacquire the durable run's credential boundary;
-    // live execution passes the exact injected values instead.
+    // live execution passes the exact resolved values and issued placeholders.
     let secrets: ResolvedSecretMaterial | null = null
     try {
       signal.throwIfAborted()

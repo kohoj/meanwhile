@@ -148,6 +148,10 @@ describe("telemetry contract", () => {
       provider: "local",
       status: "succeeded",
     })
+    telemetry.metrics.increment("meanwhile.session.outcomes", 1, {
+      provider: "cloudflare",
+      status: "continuity_lost",
+    })
     telemetry.metrics.increment("meanwhile.runtime.provisioning_reconciliation.events", 1, {
       provider: "local",
       status: "reconciled",

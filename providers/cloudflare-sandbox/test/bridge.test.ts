@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test"
-import type { Sandbox } from "@cloudflare/sandbox"
+import { rm } from "node:fs/promises"
 
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -7,6 +7,7 @@ import {
   decodeEventCursor,
   type ExposedEndpoint,
   encodeEventCursor,
+  eventPrefixDigest,
   INITIAL_EVENT_CURSOR,
   MAX_PROCESS_OUTPUT_BYTES,
   type ProcessEventsResponse,
@@ -18,7 +19,12 @@ import {
   type SpawnProcessRequest,
   type WriteFilesRequest,
 } from "../src/protocol"
-import type { BridgeRuntime, CloudflareBridgeEnvironment, ReadRuntimeFile } from "../src/sandbox"
+import type {
+  BridgeRuntime,
+  CloudflareBridgeEnvironment,
+  ReadRuntimeFile,
+  CloudflareRuntimeSandbox as Sandbox,
+} from "../src/sandbox"
 
 mock.module("cloudflare:workers", () => ({
   DurableObject: class {},
@@ -28,15 +34,28 @@ mock.module("cloudflare:workers", () => ({
 
 let createBridgeApp: typeof import("../src/worker").createBridgeApp
 let InMemoryBridgeRegistry: typeof import("../src/worker").InMemoryBridgeRegistry
+let encryptCredentialPayload: typeof import("../src/worker").encryptCredentialPayload
+let decryptCredentialPayload: typeof import("../src/worker").decryptCredentialPayload
+let redactCredentialResponse: typeof import("../src/worker").redactCredentialResponse
+let ContainerProxy: typeof import("../src/worker").ContainerProxy
+let SandboxDurableObject: typeof import("../src/worker").Sandbox
 let CloudflareBridgeRuntime: typeof import("../src/sandbox").CloudflareBridgeRuntime
 let processCompletionMarker: typeof import("../src/sandbox").processCompletionMarker
 let shellJoin: typeof import("../src/sandbox").shellJoin
 
 beforeAll(async () => {
-  ;({ createBridgeApp, InMemoryBridgeRegistry } = await import("../src/worker"))
-  ;({ CloudflareBridgeRuntime, processCompletionMarker, shellJoin } = await import(
-    "../src/sandbox"
-  ))
+  ;({
+    createBridgeApp,
+    InMemoryBridgeRegistry,
+    encryptCredentialPayload,
+    decryptCredentialPayload,
+    redactCredentialResponse,
+    ContainerProxy,
+    Sandbox: SandboxDurableObject,
+  } = await import("../src/worker"))
+  const sandboxModule = await import("../src/sandbox")
+  CloudflareBridgeRuntime = sandboxModule.CloudflareBridgeRuntime
+  ;({ processCompletionMarker, shellJoin } = sandboxModule)
 })
 
 const TOKEN = "test-bridge-token-that-is-at-least-thirty-two-bytes"
@@ -44,6 +63,55 @@ const RUNTIME_ID = "mw-3f390eef-460f-4a08-a067-8fa1bb9dcd21"
 const PROCESS_ID = "mp-e5549e84-bb1d-4b6d-ad1c-dc5313de61f1"
 
 describe("Cloudflare Sandbox bridge", () => {
+  test("returns one deterministic denial without delegating unauthorized egress", async () => {
+    expect(typeof SandboxDurableObject.outbound).toBe("function")
+    expect(Object.keys(SandboxDurableObject.outboundHandlers ?? {}).sort()).toEqual([
+      "__outbound__",
+      "credentialEgress",
+    ])
+
+    const defaultResponse = await SandboxDurableObject.outbound?.(
+      new Request("https://unauthorized.example/path"),
+      {} as CloudflareBridgeEnvironment,
+      {} as Parameters<NonNullable<typeof SandboxDurableObject.outbound>>[2],
+    )
+    const proxy = Object.assign(Object.create(ContainerProxy.prototype), {
+      ctx: { props: { containerId: "container", outboundByHostOverrides: {} } },
+      env: {},
+    }) as InstanceType<typeof ContainerProxy>
+
+    const response = await proxy.fetch(new Request("https://unauthorized.example/path"))
+
+    expect(defaultResponse?.status).toBe(403)
+    expect(response.status).toBe(403)
+    expect(await response.text()).toBe("Outbound destination is not authorized")
+  })
+
+  test("redacts reflected credentials across response stream boundaries", async () => {
+    const secret = "credential-that-must-not-return"
+    const placeholder = "mwcap_v1_safe-placeholder"
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`before ${secret.slice(0, 11)}`))
+        controller.enqueue(new TextEncoder().encode(`${secret.slice(11)} after`))
+        controller.close()
+      },
+    })
+    const response = redactCredentialResponse(
+      new Response(stream, {
+        headers: {
+          "content-length": "999",
+          "x-reflected-credential": secret,
+        },
+      }),
+      [{ placeholder, value: secret }],
+    )
+
+    expect(await response.text()).toBe(`before ${placeholder} after`)
+    expect(response.headers.get("x-reflected-credential")).toBe(placeholder)
+    expect(response.headers.has("content-length")).toBeFalse()
+  })
+
   test("protects every control-plane endpoint with a constant-shape bearer boundary", async () => {
     const fixture = createFixture({ seedRuntime: false })
 
@@ -62,6 +130,10 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(await authenticated.json()).toMatchObject({
       protocolVersion: BRIDGE_PROTOCOL_VERSION,
       sandboxSdkVersion: "0.12.3",
+      capabilities: {
+        networkPolicy: "exact-host-default-deny",
+        credentialMediation: "http-placeholder",
+      },
     })
 
     const incompatible = await fixture.request("/v1/health", {
@@ -74,10 +146,13 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(await errorCode(incompatible)).toBe("BRIDGE_PROTOCOL_UNSUPPORTED")
   })
 
-  test("pins the SDK, image, and RPC transport as one compatibility unit", async () => {
+  test("pins the SDK, image, and HTTP transport as one compatibility unit", async () => {
     const packageManifest = JSON.parse(
       await Bun.file(new URL("../package.json", import.meta.url)).text(),
     ) as { dependencies: Record<string, string>; scripts: Record<string, string> }
+    const stagingScript = await Bun.file(
+      new URL("../../../scripts/stage-cloudflare-runner.ts", import.meta.url),
+    ).text()
     const dockerfile = await Bun.file(new URL("../Dockerfile", import.meta.url)).text()
     const wrangler = await Bun.file(new URL("../wrangler.jsonc", import.meta.url)).text()
     const codexWrapper = await Bun.file(new URL("../image/codex-acp", import.meta.url)).text()
@@ -85,13 +160,19 @@ describe("Cloudflare Sandbox bridge", () => {
     const piRuntimeWrapper = await Bun.file(new URL("../image/pi-runtime", import.meta.url)).text()
 
     expect(packageManifest.dependencies["@cloudflare/sandbox"]).toBe("0.12.3")
-    expect(packageManifest.scripts["runner:stage"]).toContain("--target=bun-linux-x64-baseline")
-    expect(packageManifest.scripts["runner:stage"]).toContain("meanwhile-demo-agent")
-    expect(dockerfile).toContain("FROM docker.io/cloudflare/sandbox:0.12.3")
+    expect(packageManifest.scripts["runner:stage"]).toBe(
+      "bun ../../scripts/stage-cloudflare-runner.ts",
+    )
+    expect(stagingScript).toMatch(/bun-linux-x64-baseline-v\$\{version\}/)
+    expect(stagingScript).toContain("meanwhile-demo-agent")
+    expect(dockerfile).toContain(
+      "FROM docker.io/cloudflare/sandbox:0.12.3@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
+    )
     expect(dockerfile).toContain(".runner/meanwhile-runner /opt/meanwhile/bin/meanwhile-runner")
     expect(dockerfile).toContain(
       ".runner/meanwhile-demo-agent /opt/meanwhile/bin/meanwhile-demo-agent",
     )
+    expect(dockerfile).toContain(".runner/BUN_VERSION /opt/meanwhile/metadata/BUN_VERSION")
     expect(dockerfile).toContain("bun install --frozen-lockfile --production")
     expect(dockerfile).toContain("image/claude-agent-acp /opt/meanwhile/bin/claude-agent-acp")
     expect(dockerfile).toContain("image/codex-acp /opt/meanwhile/bin/codex-acp")
@@ -112,8 +193,185 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(runtimeAgentManifest.dependencies["@openai/codex"]).toBe("0.144.3")
     expect(runtimeAgentManifest.dependencies["pi-acp"]).toBe("0.0.31")
     expect(runtimeAgentManifest.dependencies["@earendil-works/pi-coding-agent"]).toBe("0.80.6")
-    expect(wrangler).toContain('"SANDBOX_TRANSPORT": "rpc"')
+    expect(wrangler).toContain('"SANDBOX_TRANSPORT": "http"')
+    expect(wrangler).toContain('"SANDBOX_INSTANCE_TIMEOUT_MS": "5000"')
+    expect(wrangler).toContain('"SANDBOX_PORT_TIMEOUT_MS": "10000"')
     expect(wrangler).toContain('"instance_type": "standard-1"')
+  })
+
+  test("uses one SDK-owned deterministic default session for the runtime", async () => {
+    let listCalls = 0
+    let writeCalls = 0
+    const commands: string[] = []
+    const lifecycle: string[] = []
+    const sandbox = {
+      async configure(configuration: {
+        keepAlive?: boolean
+        sleepAfter?: string
+        transport?: string
+      }) {
+        lifecycle.push("configure")
+        expect(configuration).toMatchObject({ sleepAfter: "25h", transport: "http" })
+        expect(configuration).not.toHaveProperty("keepAlive")
+      },
+      async setRuntimeLease(value: boolean) {
+        lifecycle.push(`runtime-lease:${value}`)
+      },
+      async listProcesses() {
+        listCalls += 1
+        return []
+      },
+      async exec(command: string) {
+        lifecycle.push("exec")
+        commands.push(command)
+        return { exitCode: 0 }
+      },
+      async writeFile() {
+        writeCalls += 1
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+
+    await runtime.start()
+    await runtime.writeFiles({
+      files: [{ path: "probe.txt", contentBase64: "cHJvYmU=", mode: 0o600 }],
+    })
+
+    expect(listCalls).toBe(1)
+    expect(commands).toHaveLength(5)
+    expect(commands[0]).toBe("/bin/true")
+    expect(writeCalls).toBe(1)
+    expect(lifecycle.slice(0, 3)).toEqual(["configure", "runtime-lease:true", "exec"])
+  })
+
+  test("does not query the process API after the container has stopped", async () => {
+    const lifecycle: string[] = []
+    const sandbox = {
+      async getExposedPorts() {
+        return []
+      },
+      async killAllProcesses() {
+        lifecycle.push("kill-all")
+      },
+      async setRuntimeLease(value: boolean) {
+        lifecycle.push(`runtime-lease:${value}`)
+      },
+      async stop() {
+        lifecycle.push("stop")
+      },
+      async listProcesses() {
+        throw new Error("process API is unavailable after stop")
+      },
+    } as unknown as Sandbox
+
+    expect(await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox).stop()).toMatchObject({
+      state: "stopped",
+      processCount: 0,
+      activeProcessCount: 0,
+    })
+    expect(lifecycle).toEqual(["kill-all", "runtime-lease:false", "stop"])
+  })
+
+  test("destroys a replacement container when its physical placement changes", async () => {
+    let placementId = "placement-a"
+    let destroyed = false
+    const sandbox = {
+      async setContainerTimeouts() {},
+      async exec() {
+        return { exitCode: 0 }
+      },
+      async getContainerPlacementId() {
+        return placementId
+      },
+      async destroy() {
+        destroyed = true
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+
+    await runtime.assertPlacement("placement-a")
+    placementId = "placement-b"
+
+    await expect(runtime.assertPlacement("placement-a")).rejects.toMatchObject({
+      code: "RUNTIME_LOST",
+      details: { replacementDestroyed: true, retryable: false },
+    })
+    expect(destroyed).toBeTrue()
+  })
+
+  test("fails closed when an accepted runtime generation can no longer be proved", async () => {
+    let destroyed = false
+    const sandbox = {
+      async exec() {
+        throw new Error("container unavailable")
+      },
+      async destroy() {
+        destroyed = true
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+
+    await expect(runtime.assertPlacement("placement-a")).rejects.toMatchObject({
+      code: "RUNTIME_LOST",
+      details: { replacementDestroyed: true, retryable: false },
+    })
+    expect(destroyed).toBeTrue()
+  })
+
+  test("rejects a replaced runtime before admitting a workspace mutation", async () => {
+    const runtime = new FakeRuntime()
+    runtime.placement = "replacement"
+    const registry = new InMemoryBridgeRegistry(() => runtime)
+    registry.seed(RUNTIME_ID, "active", "accepted")
+    const app = createBridgeApp({
+      runtimeFactory: () => runtime,
+      registryFactory: () => registry,
+    })
+    const response = await app.request(
+      `https://bridge.test/v1/runtimes/${RUNTIME_ID}/files`,
+      {
+        method: "PUT",
+        headers: { ...authorizationHeader(), "content-type": "application/json" },
+        body: JSON.stringify({
+          files: [{ path: "result.txt", contentBase64: "cmVzdWx0", mode: 0o600 }],
+        }),
+      },
+      { BRIDGE_TOKEN: TOKEN } as CloudflareBridgeEnvironment,
+    )
+
+    expect(response.status).toBe(409)
+    expect(await errorCode(response)).toBe("RUNTIME_LOST")
+    expect(runtime.calls).not.toContain("writeFiles")
+  })
+
+  test("disposes every provider process capability after materializing durable evidence", async () => {
+    let disposed = 0
+    const process = () => ({
+      id: PROCESS_ID,
+      command: "runner",
+      status: "running" as const,
+      startTime: new Date("2026-07-13T00:00:00.000Z"),
+      async getStatus() {
+        return "running" as const
+      },
+      [Symbol.dispose]() {
+        disposed += 1
+      },
+    })
+    const sandbox = {
+      async getProcess() {
+        return process()
+      },
+      async listProcesses() {
+        return [process()]
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+
+    await runtime.inspectProcess(PROCESS_ID)
+    await runtime.inspect()
+
+    expect(disposed).toBe(3)
   })
 
   test("fails closed when the bridge secret is weak or absent", async () => {
@@ -145,6 +403,121 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(second.status).toBe(201)
     expect(await first.json()).toEqual(await second.json())
     expect(fixture.runtime.calls).toEqual([])
+  })
+
+  test("binds a revocable credential placeholder to exact runtime, host, and method policy", async () => {
+    const fixture = createFixture()
+    const leaseId = "98b83669-d7fb-4c7c-98af-3eb6f542fdad"
+    const request = {
+      leaseId,
+      allowedHosts: ["api.example.com"],
+      credentials: [
+        {
+          environmentVariable: "MODEL_API_KEY",
+          host: "api.example.com",
+          methods: ["POST"],
+          value: "real-provider-credential",
+        },
+      ],
+    }
+    const attach = () =>
+      fixture.request(`/v1/runtimes/${RUNTIME_ID}/credential-leases`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify(request),
+      })
+
+    const first = await attach()
+    const second = await attach()
+    expect(first.status).toBe(201)
+    expect(second.status).toBe(201)
+    const firstBody = await first.text()
+    expect(firstBody).toBe(await second.text())
+    expect(firstBody).not.toContain("real-provider-credential")
+    expect(JSON.parse(firstBody)).toMatchObject({
+      credentialLease: {
+        version: BRIDGE_PROTOCOL_VERSION,
+        id: leaseId,
+        runtimeId: RUNTIME_ID,
+        environment: { MODEL_API_KEY: expect.stringMatching(/^mwcap_test_/) },
+      },
+    })
+
+    const conflict = await fixture.request(`/v1/runtimes/${RUNTIME_ID}/credential-leases`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        ...request,
+        credentials: [{ ...request.credentials[0], methods: ["GET"] }],
+      }),
+    })
+    expect(conflict.status).toBe(409)
+    expect(await errorCode(conflict)).toBe("CREDENTIAL_LEASE_CONFLICT")
+
+    const revoke = () =>
+      fixture.request(`/v1/runtimes/${RUNTIME_ID}/credential-leases/${leaseId}`, {
+        method: "DELETE",
+        headers: authorizationHeader(),
+      })
+    expect((await revoke()).status).toBe(200)
+    expect((await revoke()).status).toBe(200)
+    expect(fixture.runtime.calls).toEqual([
+      "configureCredentialLease",
+      "configureCredentialLease",
+      "clearCredentialLease",
+    ])
+  })
+
+  test("encrypts credential lease material at rest with lease-bound authenticated data", async () => {
+    const leaseId = "98b83669-d7fb-4c7c-98af-3eb6f542fdad"
+    const payload = {
+      allowedHosts: ["api.example.com"],
+      credentials: [
+        {
+          environmentVariable: "MODEL_API_KEY",
+          host: "api.example.com",
+          methods: ["POST"],
+          placeholder: "mwcap_v1_placeholder",
+          value: "real-provider-credential",
+        },
+      ],
+    }
+    const encrypted = await encryptCredentialPayload(TOKEN, leaseId, payload)
+    expect(JSON.stringify(encrypted)).not.toContain("real-provider-credential")
+    expect(
+      await decryptCredentialPayload(TOKEN, leaseId, encrypted.iv, encrypted.ciphertext),
+    ).toEqual(payload)
+    await expect(
+      decryptCredentialPayload(
+        TOKEN,
+        "3c048fb4-6432-4aa6-8df7-f138ff9fd226",
+        encrypted.iv,
+        encrypted.ciphertext,
+      ),
+    ).rejects.toBeInstanceOf(Error)
+  })
+
+  test("installs outbound handlers before enabling the exact-host allowlist", async () => {
+    const calls: string[] = []
+    const sandbox = {
+      async setOutboundByHosts() {
+        calls.push("handlers:set")
+      },
+      async setAllowedHosts(hosts: readonly string[]) {
+        calls.push(`hosts:${hosts.join(",")}`)
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+    const request = {
+      leaseId: "3f390eef-460f-4a08-a067-8fa1bb9dcd21",
+      allowedHosts: ["api.example.com"],
+      credentials: [],
+    }
+
+    await runtime.configureCredentialLease(request)
+    await runtime.clearCredentialLease()
+
+    expect(calls).toEqual(["handlers:set", "hosts:api.example.com", "hosts:", "handlers:set"])
   })
 
   test("validates paths before the provider sees them", async () => {
@@ -208,14 +581,18 @@ describe("Cloudflare Sandbox bridge", () => {
     }
   })
 
-  test("frames both streams without terminating the provider's managing shell", async () => {
+  test("uses stderr as completion authority without terminating the provider shell", async () => {
     const fixture = createSdkFixture()
     const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox)
-    await runtime.spawn(PROCESS_ID, {
-      operationId: PROCESS_ID.slice(3),
-      argv: ["/bin/sh", "-c", "printf stdout; printf stderr >&2; exit 7"],
-      input: "closed",
-    })
+    await runtime.spawn(
+      PROCESS_ID,
+      {
+        operationId: PROCESS_ID.slice(3),
+        argv: ["/bin/sh", "-c", "printf stdout; printf stderr >&2; exit 7"],
+        input: "closed",
+      },
+      "initial",
+    )
 
     const process = Bun.spawn(
       [
@@ -236,8 +613,8 @@ describe("Cloudflare Sandbox bridge", () => {
     const marker = processCompletionMarker(PROCESS_ID)
 
     expect(exitCode).toBe(7)
-    expect(stdout).toBe(`stdout\n${marker}\nmanager-alive`)
-    expect(stderr).toBe(`stderr\n${marker}\n`)
+    expect(stdout).toBe(`stdout\n${marker}7__\nmanager-alive`)
+    expect(stderr).toBe(`stderr\n${marker}7__\n`)
   })
 
   test("binds idempotent process identity to the complete secret-safe specification", async () => {
@@ -258,7 +635,15 @@ describe("Cloudflare Sandbox bridge", () => {
       })
 
     expect((await spawn(request)).status).toBe(201)
+    const evidenceDeadline = await fixture.registry.getProcessEvidenceDeadline(
+      RUNTIME_ID,
+      PROCESS_ID,
+    )
     expect((await spawn(request)).status).toBe(201)
+    expect(await fixture.registry.getProcessEvidenceDeadline(RUNTIME_ID, PROCESS_ID)).toBe(
+      evidenceDeadline,
+    )
+    expect(evidenceDeadline).not.toBeNull()
     const conflict = await spawn({
       ...request,
       env: { AGENT_TOKEN: "secret-value-two" },
@@ -270,6 +655,64 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(text).not.toContain("secret-value-one")
     expect(text).not.toContain("secret-value-two")
     expect(fixture.runtime.calls.filter((call) => call === "spawn")).toHaveLength(2)
+  })
+
+  test("durably destroys a runtime when failed admission cannot remove staged input", async () => {
+    const fixture = createFixture()
+    fixture.runtime.spawnError = new BridgeError(
+      "STAGING_CLEANUP_FAILED",
+      "The staged process input could not be removed.",
+      502,
+      { retryable: false, runtimeDestroyRequired: true },
+    )
+
+    const response = await fixture.request(`/v1/runtimes/${RUNTIME_ID}/processes`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        operationId: PROCESS_ID.slice(3),
+        argv: ["meanwhile-runner"],
+        stdin: "private prompt",
+      }),
+    })
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "STAGING_CLEANUP_FAILED",
+        details: { retryable: false, runtimeDestroyed: true },
+      },
+    })
+    expect(fixture.runtime.calls).toContain("destroy")
+    expect(
+      (
+        await fixture.request(`/v1/runtimes/${RUNTIME_ID}`, {
+          headers: authorizationHeader(),
+        })
+      ).status,
+    ).toBe(200)
+    expect(await fixture.registry.inspect(RUNTIME_ID)).toMatchObject({ state: "destroyed" })
+  })
+
+  test("persists one immutable terminal process result outside the sandbox", async () => {
+    const fixture = createFixture()
+    const spawn = await fixture.request(`/v1/runtimes/${RUNTIME_ID}/processes`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        operationId: PROCESS_ID.slice(3),
+        argv: ["meanwhile-runner"],
+      }),
+    })
+    expect(spawn.status).toBe(201)
+
+    const wait = () =>
+      fixture.request(`/v1/runtimes/${RUNTIME_ID}/processes/${PROCESS_ID}/wait?timeoutMs=1000`, {
+        headers: authorizationHeader(),
+      })
+    expect((await wait()).status).toBe(200)
+    expect((await wait()).status).toBe(200)
+    expect(fixture.runtime.calls.filter((call) => call === "wait")).toHaveLength(1)
   })
 
   test("binds each process-input sequence before forwarding it to the sandbox", async () => {
@@ -297,14 +740,257 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(fixture.runtime.calls.filter((call) => call === "send")).toHaveLength(2)
   })
 
-  test("uses a component-wise replay cursor without duplicating stream data", () => {
-    const encoded = encodeEventCursor({ stdoutOffset: 12, stderrOffset: 7, terminalSeen: true })
+  test("uses a self-verifying component-wise replay cursor", async () => {
+    const encoded = encodeEventCursor({
+      stdoutOffset: 12,
+      stderrOffset: 7,
+      terminalSeen: true,
+      stdoutDigest: await eventPrefixDigest("stdout-data!"),
+      stderrDigest: await eventPrefixDigest("stderr!"),
+    })
     expect(decodeEventCursor(encoded)).toEqual({
       stdoutOffset: 12,
       stderrOffset: 7,
       terminalSeen: true,
+      stdoutDigest: await eventPrefixDigest("stdout-data!"),
+      stderrDigest: await eventPrefixDigest("stderr!"),
     })
     expect(() => decodeEventCursor("v1.-1.0.0")).toThrow(BridgeError)
+  })
+
+  test("recovers one terminal execution from retained logs after the SDK drops its process row", async () => {
+    let startCount = 0
+    const sandbox = {
+      async setRuntimeLease() {},
+      async getProcess() {
+        return null
+      },
+      async getProcessLogs() {
+        const frame = completionFrame(PROCESS_ID, 7)
+        return {
+          stdout: "runner-output",
+          stderr: `runner-diagnostic${frame}`,
+          processId: PROCESS_ID,
+        }
+      },
+      async exists() {
+        return { exists: false }
+      },
+      async startProcess() {
+        startCount += 1
+        throw new Error("a recovered execution must never be started again")
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
+    const known = processSnapshot("running")
+
+    expect(
+      await runtime.spawn(PROCESS_ID, spawnRequest("private prompt"), "reconcile", known),
+    ).toMatchObject({
+      status: "failed",
+      exitCode: 7,
+      startedAt: known.startedAt,
+    })
+    expect(await runtime.wait(PROCESS_ID, 1_000, known)).toMatchObject({
+      status: "failed",
+      exitCode: 7,
+    })
+    const replay = await runtime.events(PROCESS_ID, INITIAL_EVENT_CURSOR, 1_024, known)
+    expect(
+      replay.events.map((event) =>
+        event.type === "output" ? `${event.stream}:${event.data}` : `exit:${event.exitCode}`,
+      ),
+    ).toEqual(["stdout:runner-output", "stderr:runner-diagnostic", "exit:7"])
+    expect(startCount).toBe(0)
+  })
+
+  test("recovers retained terminal evidence when the SDK exit stream loses the process race", async () => {
+    const process = {
+      id: PROCESS_ID,
+      command: "runner",
+      status: "running" as const,
+      startTime: new Date("2026-07-13T00:00:00.000Z"),
+      async getStatus() {
+        return "running" as const
+      },
+      async waitForExit() {
+        const error = new Error("provider-private missing process")
+        error.name = "ProcessNotFoundError"
+        throw error
+      },
+    }
+    const sandbox = {
+      async getProcess() {
+        return process
+      },
+      async getProcessLogs() {
+        const frame = completionFrame(PROCESS_ID)
+        return {
+          stdout: "session-closed",
+          stderr: frame,
+          processId: PROCESS_ID,
+        }
+      },
+    } as unknown as Sandbox
+
+    expect(
+      await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).wait(
+        PROCESS_ID,
+        1_000,
+        processSnapshot("running"),
+      ),
+    ).toMatchObject({ status: "completed", exitCode: 0 })
+  })
+
+  test("recognizes a provider wait timeout after Worker error serialization", async () => {
+    const process = {
+      id: PROCESS_ID,
+      command: "runner",
+      status: "running" as const,
+      startTime: new Date("2026-07-13T00:00:00.000Z"),
+      async getStatus() {
+        return "running" as const
+      },
+      async waitForExit() {
+        const error = new Error("provider-private timeout")
+        error.name = "ProcessReadyTimeoutError"
+        throw error
+      },
+    }
+    const sandbox = {
+      async getProcess() {
+        return process
+      },
+    } as unknown as Sandbox
+
+    expect(
+      await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox).wait(PROCESS_ID, 5_000),
+    ).toMatchObject({ status: "running" })
+  })
+
+  test("keeps durable running state while retained-log publication catches up", async () => {
+    let logReads = 0
+    const sandbox = {
+      async getProcess() {
+        return null
+      },
+      async getProcessLogs() {
+        logReads += 1
+        if (logReads < 4) {
+          const error = new Error("provider-private evidence pending")
+          error.name = "ProcessNotFoundError"
+          throw error
+        }
+        const frame = completionFrame(PROCESS_ID)
+        return { stdout: "complete", stderr: frame, processId: PROCESS_ID }
+      },
+    } as unknown as Sandbox
+
+    const known = processSnapshot("running")
+    expect(
+      await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).inspectProcess(
+        PROCESS_ID,
+        known,
+      ),
+    ).toBe(known)
+    for (let poll = 0; poll < 2; poll += 1) {
+      expect(
+        await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).events(
+          PROCESS_ID,
+          INITIAL_EVENT_CURSOR,
+          1_024,
+          known,
+        ),
+      ).toMatchObject({ events: [], nextCursor: INITIAL_EVENT_CURSOR })
+    }
+    const replay = await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).events(
+      PROCESS_ID,
+      INITIAL_EVENT_CURSOR,
+      1_024,
+      known,
+    )
+
+    expect(
+      replay.events.map((event) => (event.type === "output" ? event.data : event.type)),
+    ).toEqual(["complete", "exit"])
+    expect(logReads).toBe(4)
+  })
+
+  test("starts only the initial reservation when retained logs prove no earlier execution exists", async () => {
+    let startCount = 0
+    let logReadCount = 0
+    const sandbox = {
+      async setRuntimeLease() {},
+      async getProcess() {
+        return null
+      },
+      async getProcessLogs() {
+        logReadCount += 1
+        const error = new Error("provider-private missing process")
+        error.name = "ProcessNotFoundError"
+        throw error
+      },
+      async startProcess() {
+        startCount += 1
+        return {
+          id: PROCESS_ID,
+          command: "runner",
+          status: "running" as const,
+          startTime: new Date("2026-07-13T00:00:00.000Z"),
+          async getStatus() {
+            return "running" as const
+          },
+        }
+      },
+    } as unknown as Sandbox
+
+    expect(
+      await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).spawn(
+        PROCESS_ID,
+        {
+          operationId: PROCESS_ID.slice(3),
+          argv: ["meanwhile-runner"],
+          input: "closed",
+        },
+        "initial",
+        processSnapshot("starting"),
+      ),
+    ).toMatchObject({ status: "running" })
+    expect(startCount).toBe(1)
+    expect(logReadCount).toBe(1)
+  })
+
+  test("never repeats an ambiguous process admission without provider evidence", async () => {
+    let startCount = 0
+    const sandbox = {
+      async setRuntimeLease() {},
+      async getProcess() {
+        return null
+      },
+      async getProcessLogs() {
+        const error = new Error("provider-private missing process")
+        error.name = "ProcessNotFoundError"
+        throw error
+      },
+      async startProcess() {
+        startCount += 1
+        throw new Error("an exact admission retry must not execute again")
+      },
+    } as unknown as Sandbox
+
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).spawn(
+        PROCESS_ID,
+        spawnRequest("private prompt"),
+        "reconcile",
+        processSnapshot("starting"),
+        new Date(Date.now() + 60_000).toISOString(),
+      ),
+    ).rejects.toMatchObject({
+      code: "PROCESS_ADMISSION_PENDING",
+      details: { retryable: true },
+    })
+    expect(startCount).toBe(0)
   })
 
   test("replays stdout and stderr exactly once and emits one terminal marker", async () => {
@@ -328,7 +1014,7 @@ describe("Cloudflare Sandbox bridge", () => {
       },
       async getProcessLogs() {
         const marker = status === "completed" ? completionFrame(PROCESS_ID) : ""
-        return { stdout: `${stdout}${marker}`, stderr: `${stderr}${marker}`, processId: PROCESS_ID }
+        return { stdout, stderr: `${stderr}${marker}`, processId: PROCESS_ID }
       },
     } as unknown as Sandbox
     const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
@@ -337,7 +1023,11 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(
       first.events.map((event) => (event.type === "output" ? event.data : event.type)),
     ).toEqual(["abc", "x"])
-    expect(first.nextCursor).toBe("v2.3.1.0")
+    expect(decodeEventCursor(first.nextCursor)).toMatchObject({
+      stdoutOffset: 3,
+      stderrOffset: 1,
+      terminalSeen: false,
+    })
 
     stdout = "abcdef"
     stderr = "xyz"
@@ -346,13 +1036,186 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(
       second.events.map((event) => (event.type === "output" ? event.data : event.type)),
     ).toEqual(["def", "yz", "exit"])
-    expect(second.nextCursor).toBe("v2.6.3.1")
+    expect(decodeEventCursor(second.nextCursor)).toMatchObject({
+      stdoutOffset: 6,
+      stderrOffset: 3,
+      terminalSeen: true,
+    })
 
     const third = await runtime.events(PROCESS_ID, second.nextCursor, 10)
     expect(third.events).toEqual([])
-    await expect(runtime.events(PROCESS_ID, "v2.99.0.0", 10)).rejects.toMatchObject({
+    const futureCursor = encodeEventCursor({
+      stdoutOffset: 99,
+      stderrOffset: 0,
+      terminalSeen: false,
+      stdoutDigest: await eventPrefixDigest(stdout),
+      stderrDigest: await eventPrefixDigest(""),
+    })
+    await expect(runtime.events(PROCESS_ID, futureCursor, 10)).rejects.toMatchObject({
       code: "EVENT_REPLAY_GAP",
     })
+  })
+
+  test("waits for retained-log publication and rejects a rewritten cursor prefix", async () => {
+    const process = {
+      id: PROCESS_ID,
+      command: "runner",
+      status: "running" as const,
+      startTime: new Date("2026-07-13T00:00:00.000Z"),
+      async getStatus() {
+        return "running" as const
+      },
+    }
+    const initialSandbox = {
+      async getProcess() {
+        return process
+      },
+      async getProcessLogs() {
+        return { stdout: "abc", stderr: "", processId: PROCESS_ID }
+      },
+    } as unknown as Sandbox
+    const first = await new CloudflareBridgeRuntime(
+      RUNTIME_ID,
+      initialSandbox,
+      async () => {},
+    ).events(PROCESS_ID, INITIAL_EVENT_CURSOR, 3)
+
+    let reads = 0
+    const delayedSandbox = {
+      async getProcess() {
+        return process
+      },
+      async getProcessLogs() {
+        reads += 1
+        return {
+          stdout: reads < 3 ? "a" : "abcdef",
+          stderr: "",
+          processId: PROCESS_ID,
+        }
+      },
+    } as unknown as Sandbox
+    const resumed = await new CloudflareBridgeRuntime(
+      RUNTIME_ID,
+      delayedSandbox,
+      async () => {},
+    ).events(PROCESS_ID, first.nextCursor, 3)
+
+    expect(resumed.events).toContainEqual(expect.objectContaining({ data: "def" }))
+    expect(reads).toBe(3)
+
+    const rewrittenSandbox = {
+      async getProcess() {
+        return process
+      },
+      async getProcessLogs() {
+        return { stdout: "abXdef", stderr: "", processId: PROCESS_ID }
+      },
+    } as unknown as Sandbox
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, rewrittenSandbox, async () => {}).events(
+        PROCESS_ID,
+        first.nextCursor,
+        3,
+      ),
+    ).rejects.toMatchObject({ code: "EVENT_REPLAY_GAP", details: { recoverable: false } })
+  })
+
+  test("bounds missing-process reconciliation by the admitted evidence deadline", async () => {
+    const sandbox = {
+      async getProcess() {
+        return null
+      },
+      async getProcessLogs() {
+        return { stdout: "", stderr: "", processId: PROCESS_ID }
+      },
+    } as unknown as Sandbox
+    const deadline = "2000-01-01T00:00:00.000Z"
+    const known = processSnapshot("running")
+
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).inspectProcess(
+        PROCESS_ID,
+        known,
+        deadline,
+      ),
+    ).rejects.toMatchObject({ code: "PROCESS_LOST", details: { retryable: false } })
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).events(
+        PROCESS_ID,
+        INITIAL_EVENT_CURSOR,
+        1_024,
+        known,
+        deadline,
+      ),
+    ).rejects.toMatchObject({ code: "PROCESS_LOST", details: { retryable: false } })
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).wait(
+        PROCESS_ID,
+        1_000,
+        known,
+        deadline,
+      ),
+    ).rejects.toMatchObject({ code: "PROCESS_LOST", details: { retryable: false } })
+  })
+
+  test("never abandons an admitted provider evidence read when its request budget expires", async () => {
+    let now = Date.now()
+    let getProcessCalls = 0
+    let providerCallSettled = false
+    let releaseProviderCall: (() => void) | undefined
+    const providerCall = new Promise<void>((resolve) => {
+      releaseProviderCall = resolve
+    })
+    const sandbox = {
+      async getProcess() {
+        getProcessCalls += 1
+        await providerCall
+        now += 10_001
+        providerCallSettled = true
+        return null
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(
+      RUNTIME_ID,
+      sandbox,
+      async () => {},
+      () => now,
+    )
+    const known = processSnapshot("running")
+
+    const replay = runtime.events(
+      PROCESS_ID,
+      INITIAL_EVENT_CURSOR,
+      1_024,
+      known,
+      new Date(now + 60_000).toISOString(),
+    )
+    await Promise.resolve()
+    expect(providerCallSettled).toBeFalse()
+    releaseProviderCall?.()
+    await expect(replay).rejects.toMatchObject({
+      code: "PROCESS_EVIDENCE_PENDING",
+      details: { retryable: true },
+    })
+    expect(providerCallSettled).toBeTrue()
+
+    now = Date.now()
+    const expiredSandbox = {
+      async getProcess() {
+        getProcessCalls += 1
+        now += 10_001
+        return null
+      },
+    } as unknown as Sandbox
+    await expect(
+      new CloudflareBridgeRuntime(
+        RUNTIME_ID,
+        expiredSandbox,
+        async () => {},
+        () => now,
+      ).events(PROCESS_ID, INITIAL_EVENT_CURSOR, 1_024, known, new Date(now + 5_000).toISOString()),
+    ).rejects.toMatchObject({ code: "PROCESS_LOST", details: { retryable: false } })
+    expect(getProcessCalls).toBe(2)
   })
 
   test("reads final process output only after observing terminal state", async () => {
@@ -377,7 +1240,7 @@ describe("Cloudflare Sandbox bridge", () => {
       async getProcessLogs() {
         const marker = completionFrame(PROCESS_ID)
         return {
-          stdout: terminalObserved ? `final-runner-frame\n${marker}` : "stale-prefix\n",
+          stdout: terminalObserved ? "final-runner-frame\n" : "stale-prefix\n",
           stderr: terminalObserved ? marker : "",
           processId: PROCESS_ID,
         }
@@ -395,7 +1258,7 @@ describe("Cloudflare Sandbox bridge", () => {
     ).toEqual(["final-runner-frame\n", "exit"])
   })
 
-  test("waits for explicit terminal output closure beyond an earlier quiet window", async () => {
+  test("waits for stable output after the stderr completion frame", async () => {
     let status: "running" | "completed" = "running"
     let logReads = 0
     const process = {
@@ -418,9 +1281,10 @@ describe("Cloudflare Sandbox bridge", () => {
       async getProcessLogs() {
         logReads += 1
         const complete = status === "completed" && logReads >= 16
+        const stdoutComplete = status === "completed" && logReads >= 17
         const marker = complete ? completionFrame(PROCESS_ID) : ""
         return {
-          stdout: complete ? `${prefix}${terminal}${marker}` : prefix,
+          stdout: stdoutComplete ? `${prefix}${terminal}` : prefix,
           stderr: marker,
           processId: PROCESS_ID,
         }
@@ -438,7 +1302,7 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(
       second.events.map((event) => (event.type === "output" ? event.data : event.type)),
     ).toEqual([terminal, "exit"])
-    expect(logReads).toBeGreaterThanOrEqual(16)
+    expect(logReads).toBeGreaterThanOrEqual(19)
   })
 
   test("fails retryably instead of publishing an exit for incomplete terminal output", async () => {
@@ -473,14 +1337,8 @@ describe("Cloudflare Sandbox bridge", () => {
       status: 503,
       details: {
         retryable: true,
-        stdout: {
-          bytes: 15,
-          markerSeen: false,
-          precededByLineBreak: false,
-          suffixCodeUnits: null,
-          suffixContainsOnlyLineBreaks: null,
-        },
-        stderr: {
+        stdoutBytes: 15,
+        completion: {
           bytes: 0,
           markerSeen: false,
           precededByLineBreak: false,
@@ -510,7 +1368,7 @@ describe("Cloudflare Sandbox bridge", () => {
       },
       async getProcessLogs() {
         const marker = status === "completed" ? completionFrame(PROCESS_ID) : ""
-        return { stdout: `${stdout}${marker}`, stderr: marker, processId: PROCESS_ID }
+        return { stdout, stderr: marker, processId: PROCESS_ID }
       },
     } as unknown as Sandbox
     const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {})
@@ -530,35 +1388,108 @@ describe("Cloudflare Sandbox bridge", () => {
     })
   })
 
-  test("stages initial stdin outside the workspace and always deletes it", async () => {
+  test("hands staged stdin through process-owned redirection before admitting the process", async () => {
     const fixture = createSdkFixture()
     const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox)
 
-    await runtime.spawn(PROCESS_ID, spawnRequest("private prompt\n"))
+    await runtime.spawn(
+      PROCESS_ID,
+      {
+        ...spawnRequest("private prompt\n"),
+        argv: ["/bin/sh", "-c", "IFS= read -r value; /usr/bin/printf '%s' \"$value\""],
+      },
+      "initial",
+    )
 
-    expect(fixture.stdinPath).toMatch(/^\/tmp\/meanwhile-bridge\/[0-9a-f-]{36}\.stdin$/)
+    expect(fixture.stdinPath).toBe(`/tmp/meanwhile-runtime/${PROCESS_ID}.stdin`)
     expect(fixture.stdinPath.startsWith("/workspace/")).toBe(false)
     expect(fixture.stdinContent).toBe("private prompt\n")
-    expect(fixture.command).toContain(` < '${fixture.stdinPath}'`)
+    expect(fixture.command.match(new RegExp(fixture.stdinPath, "g"))).toHaveLength(2)
     expect(
       fixture.command.match(new RegExp(processCompletionMarker(PROCESS_ID), "g")),
     ).toHaveLength(2)
-    expect(fixture.deletedPaths).toEqual([fixture.stdinPath])
+    expect(fixture.deletedPaths).toEqual([])
+
+    const localStdinPath = `/tmp/meanwhile-staged-input-${crypto.randomUUID()}`
+    try {
+      await Bun.write(localStdinPath, fixture.stdinContent)
+      const child = Bun.spawn(
+        ["/bin/sh", "-c", fixture.command.replaceAll(fixture.stdinPath, localStdinPath)],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const [stdout, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        child.exited,
+        new Response(child.stderr).text(),
+      ])
+      expect(exitCode).toBe(0)
+      expect(stdout).toStartWith("private prompt")
+      expect(await Bun.file(localStdinPath).exists()).toBeFalse()
+    } finally {
+      await rm(localStdinPath, { force: true })
+    }
   })
 
-  test("attempts staging cleanup after a failed write and destroys on cleanup failure", async () => {
+  test("an exact spawn retry leaves the process-owned input handoff untouched", async () => {
+    let startCount = 0
+    const process = {
+      id: PROCESS_ID,
+      command: "runner",
+      status: "running" as const,
+      startTime: new Date("2026-07-13T00:00:00.000Z"),
+    }
+    const sandbox = {
+      async setRuntimeLease() {},
+      async getProcess() {
+        return process
+      },
+      async startProcess() {
+        startCount += 1
+        return process
+      },
+    } as unknown as Sandbox
+
+    await new CloudflareBridgeRuntime(RUNTIME_ID, sandbox, async () => {}).spawn(
+      PROCESS_ID,
+      spawnRequest("private prompt\n"),
+      "reconcile",
+      processSnapshot("running"),
+    )
+
+    expect(startCount).toBe(0)
+  })
+
+  test("retries an idempotent staged-input deletion after transient platform interruption", async () => {
+    const fixture = createSdkFixture({ failWrite: true, transientDeleteFailures: 2 })
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox, async () => {})
+
+    await expect(
+      runtime.spawn(PROCESS_ID, spawnRequest("private prompt\n"), "initial"),
+    ).rejects.toThrow("write failed")
+
+    expect(fixture.deletedPaths).toEqual([fixture.stdinPath, fixture.stdinPath, fixture.stdinPath])
+    expect(fixture.destroyCount).toBe(0)
+  })
+
+  test("attempts staging cleanup after a failed write without stealing runtime lifecycle", async () => {
     const writeFailure = createSdkFixture({ failWrite: true })
     const firstRuntime = new CloudflareBridgeRuntime(RUNTIME_ID, writeFailure.sandbox)
-    await expect(firstRuntime.spawn(PROCESS_ID, spawnRequest("input"))).rejects.toThrow(
+    await expect(firstRuntime.spawn(PROCESS_ID, spawnRequest("input"), "initial")).rejects.toThrow(
       "write failed",
     )
     expect(writeFailure.deletedPaths).toEqual([writeFailure.stdinPath])
 
-    const cleanupFailure = createSdkFixture({ failDelete: true })
+    const cleanupFailure = createSdkFixture({ failWrite: true, failDelete: true })
     const secondRuntime = new CloudflareBridgeRuntime(RUNTIME_ID, cleanupFailure.sandbox)
-    const result = secondRuntime.spawn(PROCESS_ID, spawnRequest("input"))
-    await expect(result).rejects.toMatchObject({ code: "STAGING_CLEANUP_FAILED" })
-    expect(cleanupFailure.destroyCount).toBe(1)
+    const result = secondRuntime.spawn(PROCESS_ID, spawnRequest("input"), "initial")
+    await expect(result).rejects.toMatchObject({
+      code: "STAGING_CLEANUP_FAILED",
+      details: { retryable: false, runtimeDestroyRequired: true },
+    })
+    expect(cleanupFailure.destroyCount).toBe(0)
   })
 
   test("verifies workspace writes before and after directory creation without command interpolation", async () => {
@@ -698,6 +1629,35 @@ describe("Cloudflare Sandbox bridge", () => {
     })
   })
 
+  test("streams binary workspace bytes through the provider transport contract", async () => {
+    const fixture = createWorkspaceSdkFixture([0, 0])
+    const file = await new CloudflareBridgeRuntime(RUNTIME_ID, fixture.sandbox).readFile(
+      "result.bin",
+      4,
+    )
+
+    expect(file.size).toBe(4)
+    expect(file.mediaType).toBe("application/octet-stream")
+    expect([...new Uint8Array(await new Response(file.body).arrayBuffer())]).toEqual([
+      ...new TextEncoder().encode("safe"),
+    ])
+    expect(fixture.calls.map((call) => call.type)).toEqual(["exec", "exec", "read"])
+  })
+
+  test("rejects oversized and non-regular workspace reads before opening a file stream", async () => {
+    const oversized = createWorkspaceSdkFixture([0, 0])
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, oversized.sandbox).readFile("result.bin", 3),
+    ).rejects.toMatchObject({ code: "FILE_TOO_LARGE", status: 413 })
+    expect(oversized.readCount).toBe(0)
+
+    const directory = createWorkspaceSdkFixture([0, 45])
+    await expect(
+      new CloudflareBridgeRuntime(RUNTIME_ID, directory.sandbox).readFile("result", 4),
+    ).rejects.toMatchObject({ code: "NOT_REGULAR_FILE", status: 409 })
+    expect(directory.readCount).toBe(0)
+  })
+
   test("returns binary file streams with defensive response headers", async () => {
     const fixture = createFixture()
     const response = await fixture.request(`/v1/runtimes/${RUNTIME_ID}/file?path=result.bin`, {
@@ -709,6 +1669,38 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(response.headers.get("cache-control")).toBe("private, no-store")
     expect(response.headers.get("x-content-type-options")).toBe("nosniff")
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([0, 1, 2, 255]))
+  })
+
+  test("binds custom-domain port exposure to the authenticated Worker origin", async () => {
+    const fixture = createFixture()
+    const response = await fixture.request(`/v1/runtimes/${RUNTIME_ID}/ports/3001/expose`, {
+      method: "POST",
+      headers: authorizationHeader(),
+    })
+
+    expect(response.status).toBe(201)
+    expect(fixture.runtime.exposedHostname).toBe("bridge.test")
+    expect(await response.json()).toMatchObject({
+      endpoint: { port: 3_001, url: "https://example.test" },
+    })
+  })
+
+  test("rejects workers.dev exposure before invoking the provider preview API", async () => {
+    let exposeCalls = 0
+    const sandbox = {
+      async exposePort() {
+        exposeCalls += 1
+        return { port: 3_001, url: "https://unexpected.example", name: undefined }
+      },
+    } as unknown as Sandbox
+    const runtime = new CloudflareBridgeRuntime(RUNTIME_ID, sandbox)
+
+    await expect(runtime.expose(3_001, "bridge.workers.dev")).rejects.toMatchObject({
+      code: "PORT_EXPOSURE_REQUIRES_CUSTOM_DOMAIN",
+      status: 409,
+      details: { retryable: false },
+    })
+    expect(exposeCalls).toBe(0)
   })
 
   test("normalizes provider failures without returning the provider message", async () => {
@@ -724,6 +1716,26 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(response.status).toBe(502)
     expect(text).not.toContain("do-not-return-this")
     expect(JSON.parse(text).error.code).toBe("PROVIDER_OPERATION_FAILED")
+  })
+
+  test("returns a Durable Object interruption to a fresh idempotent provider request", async () => {
+    const fixture = createFixture()
+    fixture.runtime.startError = Object.assign(new Error("provider-private interruption"), {
+      name: "OperationInterruptedError",
+    })
+
+    const response = await fixture.request(`/v1/runtimes/${RUNTIME_ID}/start`, {
+      method: "POST",
+      headers: authorizationHeader(),
+    })
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "PROVIDER_OPERATION_FAILED",
+        details: { retryable: true },
+      },
+    })
   })
 
   test("keeps stop and destroy idempotent without repeating provider destruction", async () => {
@@ -762,8 +1774,12 @@ describe("Cloudflare Sandbox bridge", () => {
 
 class FakeRuntime implements BridgeRuntime {
   readonly calls: string[] = []
+  placement: string | null = null
+  placementChecks = 0
   spawnRequest?: SpawnProcessRequest
+  spawnError?: Error
   startError?: Error
+  exposedHostname?: string
 
   async start(): Promise<RuntimeSnapshot> {
     this.calls.push("start")
@@ -786,9 +1802,30 @@ class FakeRuntime implements BridgeRuntime {
     return runtimeSnapshot("destroyed")
   }
 
-  async spawn(_processId: string, request: SpawnProcessRequest): Promise<ProcessSnapshot> {
+  async placementId(): Promise<string | null> {
+    return this.placement
+  }
+
+  async assertPlacement(expected: string | null): Promise<void> {
+    this.placementChecks += 1
+    if (this.placement !== expected) {
+      throw new BridgeError(
+        "RUNTIME_LOST",
+        "The provider replaced the physical runtime generation.",
+        409,
+        { retryable: false },
+      )
+    }
+  }
+
+  async spawn(
+    _processId: string,
+    request: SpawnProcessRequest,
+    _admission: "initial" | "reconcile",
+  ): Promise<ProcessSnapshot> {
     this.calls.push("spawn")
     this.spawnRequest = request
+    if (this.spawnError) throw this.spawnError
     return processSnapshot("running")
   }
 
@@ -834,13 +1871,22 @@ class FakeRuntime implements BridgeRuntime {
     }
   }
 
-  async expose(port: number): Promise<ExposedEndpoint> {
+  async expose(port: number, hostname: string): Promise<ExposedEndpoint> {
     this.calls.push("expose")
-    return { port, url: "https://example.trycloudflare.com", expiresOnRuntimeStop: true }
+    this.exposedHostname = hostname
+    return { port, url: "https://example.test", expiresOnRuntimeStop: true }
   }
 
   async unexpose(): Promise<void> {
     this.calls.push("unexpose")
+  }
+
+  async configureCredentialLease(): Promise<void> {
+    this.calls.push("configureCredentialLease")
+  }
+
+  async clearCredentialLease(): Promise<void> {
+    this.calls.push("clearCredentialLease")
   }
 }
 
@@ -858,6 +1904,7 @@ function createFixture(options: { token?: string; seedRuntime?: boolean } = {}) 
 
   return {
     runtime,
+    registry,
     request: (path: string, init?: RequestInit) =>
       app.request(`https://bridge.test${path}`, init, environment),
   }
@@ -881,8 +1928,8 @@ function processSnapshot(status: ProcessSnapshot["status"]): ProcessSnapshot {
   }
 }
 
-function completionFrame(processId: string): string {
-  return `\n${processCompletionMarker(processId)}\n`
+function completionFrame(processId: string, exitCode = 0): string {
+  return `\n${processCompletionMarker(processId)}${exitCode}__\n`
 }
 
 function authorizationHeader(): HeadersInit {
@@ -910,16 +1957,19 @@ function spawnRequest(stdin: string): SpawnProcessRequest {
   }
 }
 
-function createSdkFixture(options: { failWrite?: boolean; failDelete?: boolean } = {}) {
+function createSdkFixture(
+  options: { failWrite?: boolean; failDelete?: boolean; transientDeleteFailures?: number } = {},
+) {
   let stdinPath = ""
   let stdinContent = ""
   let command = ""
   let staged = false
   let destroyCount = 0
+  let transientDeleteFailures = options.transientDeleteFailures ?? 0
   const deletedPaths: string[] = []
 
   const sandbox = {
-    async setKeepAlive() {},
+    async setRuntimeLease() {},
     async getProcess() {
       return null
     },
@@ -948,6 +1998,10 @@ function createSdkFixture(options: { failWrite?: boolean; failDelete?: boolean }
     async deleteFile(path: string) {
       deletedPaths.push(path)
       if (options.failDelete) throw new Error("delete failed")
+      if (transientDeleteFailures > 0) {
+        transientDeleteFailures -= 1
+        throw Object.assign(new Error("platform connection lost"), { retryable: true })
+      }
       staged = false
     },
     async destroy() {
@@ -1005,7 +2059,7 @@ function createWorkspaceSdkFixture(exitCodes: readonly number[]) {
       return {
         success: exitCode === 0,
         exitCode,
-        stdout: "",
+        stdout: command.includes("stat -c %s") && exitCode === 0 ? "4\n" : "",
         stderr: "provider-private diagnostic",
         command,
         duration: 1,
@@ -1019,14 +2073,10 @@ function createWorkspaceSdkFixture(exitCodes: readonly number[]) {
       calls.push({ type: "write" })
       writeCount += 1
     },
-    async readFile() {
+    async readFileStream() {
       calls.push({ type: "read" })
       readCount += 1
-      return {
-        content: new Blob(["safe"]).stream(),
-        size: 4,
-        mimeType: "text/plain",
-      }
+      return fileSseStream(new TextEncoder().encode("safe"), "text/plain")
     },
     async listFiles() {
       calls.push({ type: "list" })
@@ -1049,4 +2099,20 @@ function createWorkspaceSdkFixture(exitCodes: readonly number[]) {
       return writeCount
     },
   }
+}
+
+function fileSseStream(bytes: Uint8Array, mimeType: string): ReadableStream<Uint8Array> {
+  const binary = String.fromCharCode(...bytes)
+  const events = [
+    {
+      type: "metadata",
+      mimeType,
+      size: bytes.byteLength,
+      isBinary: true,
+      encoding: "base64",
+    },
+    { type: "chunk", data: btoa(binary) },
+    { type: "complete", bytesRead: bytes.byteLength },
+  ]
+  return new Blob(events.map((event) => `data: ${JSON.stringify(event)}\n\n`)).stream()
 }

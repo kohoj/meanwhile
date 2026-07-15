@@ -155,7 +155,7 @@ class CapturingRunner extends RunnerSessionController {
       processId: input.processId,
       argv: ["meanwhile-runner"],
       cwd: relativePath("."),
-      env: input.secretEnvironment,
+      env: input.credentialEnvironment,
       timeoutMs: input.timeoutMs,
     })
   }
@@ -194,7 +194,10 @@ function runService(
     },
     agentIntents: catalog,
     secretReferences: secretResolver(),
-    providerNames: { has: (name) => name === "mock" },
+    providerNames: {
+      has: (name) => name === "mock",
+      supportsCredentialMediation: () => false,
+    },
     executionProvenance,
     defaultProvider: "mock",
   })
@@ -251,7 +254,8 @@ async function writeCatalog(path: string, executable: string, terminal: boolean)
           workingDirectory: "workspace",
           capabilities: { filesystem: true, terminal },
           envNames: [],
-          secretEnvNames: [],
+          networkPolicy: { allowedHosts: [] },
+          credentials: [],
         },
       },
     }),

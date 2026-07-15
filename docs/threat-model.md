@@ -10,7 +10,7 @@ Meanwhile aims to provide:
 
 1. **Owner isolation** — one authenticated owner cannot discover, read, cancel, interrupt, deploy, or fetch evidence/artifacts from another owner's resources.
 2. **Control-plane integrity** — workload code cannot choose durable run/session/turn state, forge authorization, supply provider handles, or reach the database directly.
-3. **Credential minimization** — credentials enter only the operation or process that needs them and known values do not become durable output.
+3. **Credential minimization** — agent source credentials remain behind a trusted, revocable egress boundary; setup/deployment values enter only their trusted operation; no value or placeholder becomes durable output.
 4. **Remote workload isolation** — untrusted code runs in a provider isolation boundary, not in the control-plane process.
 5. **Artifact integrity** — captured output is declared, bounded, traversal-safe, immutable, content-addressed, and owner-scoped.
 6. **Deployment integrity** — deployment promotes an authorized immutable source; it never executes from an arbitrary host or live runtime path.
@@ -22,17 +22,17 @@ Meanwhile aims to provide:
 The initial architecture does not claim to:
 
 - make the local provider a sandbox;
-- hide a credential from an agent process that must use it;
-- prevent that agent from transforming or exfiltrating an intentionally supplied credential;
+- make an explicitly authorized model/API destination trustworthy;
+- prevent an agent from exfiltrating workspace data to an explicitly allowed destination;
 - defend against a malicious root/operator on the control-plane host;
 - defend against compromise of the selected cloud provider's isolation boundary;
-- provide arbitrary outbound-network policy or destination allowlisting unless a provider explicitly implements it;
+- provide portable outbound-network policy on providers that do not implement the mediation contract;
 - guarantee availability against unlimited workload, storage, bandwidth, or provider-billing abuse;
 - make a runner file, Unix user, environment variable, or same-sandbox process a security boundary;
 - provide horizontal multi-writer database isolation;
 - prove third-party agent, package, container-image, or model-provider supply-chain integrity merely by pinning a version.
 
-Use short-lived, least-privilege credentials and a provider with network policy when these residual risks matter.
+Use short-lived, least-privilege source credentials and narrow exact-host/method grants when these residual risks matter.
 
 ## Assets
 
@@ -76,6 +76,10 @@ trusted control plane ───── SQLite / ArtifactStore
     │ authenticated versioned provider request
 ────┼──────── provider bridge boundary ────────────────
     ▼
+trusted credential broker ── encrypted lease state
+    │ opaque placeholder + default-deny exact-host egress
+────┼──────── sandbox isolation boundary ──────────────
+    ▼
 remote sandbox
     ├── meanwhile-runner
     └── ACP agent + repository code       untrusted
@@ -91,7 +95,7 @@ immutable artifact
 untrusted HTML / script / media
 ```
 
-The runner and agent share one runtime. Unless a provider proves otherwise, code in that sandbox can observe its filesystem, processes, network, and injected environment. The runner is a protocol and lifecycle boundary, not a confidentiality boundary.
+The runner and agent share one runtime. Code in that sandbox can observe its filesystem, processes, and environment, including opaque capability placeholders. The runner is a protocol and lifecycle boundary, not a confidentiality boundary. For Cloudflare, outbound network is separately mediated in the trusted Worker/Container boundary.
 
 ## Assumptions
 
@@ -102,7 +106,7 @@ The runner and agent share one runtime. Unless a provider proves otherwise, code
 - The Cloudflare bridge authenticates every request and rejects incompatible protocol versions.
 - API, runner, provider bridge, exact database schema, and artifact format versions are deployed as one tested release unit.
 - The control-plane clock is sufficiently accurate for persisted deadline instants, token expiry, and audit ordering. Sandbox clocks are untrusted; runner duration uses a relative monotonic budget and provider timestamps do not order durable evidence.
-- Exact known secret values are available to the redactor before any corresponding output is consumed.
+- Exact known secret values and issued placeholders are available to the redactor before any corresponding output is consumed.
 - Operators do not run untrusted workloads through the local provider.
 
 If an assumption is false, the associated guarantee is invalid; fail closed where it is observable.
@@ -152,14 +156,14 @@ Artifact capture is not a general recursive copy. The collector reads only decla
 
 | Threat | Control | Residual risk |
 | --- | --- | --- |
-| Persist resolved value | Store only `secretRefs`; bind resolution to a durable resource identity; keep exact injected values in the live redaction/artifact-scan boundary; await local material release | Process/runtime memory and provider internals can observe injected values; release does not revoke credentials in surviving compute |
-| Leak through logs/errors/audit/telemetry | Runner redaction plus an independent control-plane redactor retained across the full observation lifetime; recovery material must include prior injected values; safe structured errors; forbidden telemetry fields | Unknown, transformed, fragmented, or encoded values may pass; a resolver that drops prior redaction material violates the recovery contract |
+| Persist resolved value | Store only `secretRefs`; bind resolution and lease attachment to durable resource identities; keep values encrypted in trusted broker state; expose placeholders only; await local material release and durable revocation | Trusted control-plane/provider compromise can observe source credentials |
+| Leak through logs/errors/audit/telemetry | Runner redaction plus an independent control-plane redactor covering source values and placeholders across the full observation lifetime; safe structured errors; forbidden telemetry fields | Unknown, fragmented, or encoded sensitive data may pass; a broken provider boundary can violate the guarantee |
 | Leak control-plane/provider credential to workload | Provider, bridge, artifact-store, and deploy credentials stay outside agent runtime | Adapter implementation defects can violate the boundary |
 | Cross-tenant environment lookup | Process-environment catalog is bootstrap-owner only, deny-by-default, target-bound, and reserves platform names | Additional tenants require a tenant secret-manager adapter; this catalog is intentionally not one |
 | Repository credential confused deputy | Environment resolver rejects checkout credentials; a future broker must bind owner, repository host, and lifetime | Private checkout is unavailable until that stronger boundary exists |
-| Model key exfiltration | Per-run short-lived least-privilege key or credential broker where supported | A static key injected into the agent is fully accessible to it |
+| Model key exfiltration | Secret-bearing admission requires `RuntimeCredentialBroker`; agent receives only a revocable placeholder; exact host/method substitution and response stream redaction occur in trusted outbound handling; all other egress is denied | The authorized destination can receive workspace data, transform or otherwise disclose credentials, or itself be compromised; source credentials may still be long-lived |
 
-Secret redaction is defense in depth, not an isolation mechanism. Never market “not visible in logs” as “not visible to the agent.”
+Secret redaction is defense in depth. The credential guarantee comes from the broker/egress boundary, not string replacement.
 
 ### Runtime provider and bridge
 
@@ -170,7 +174,7 @@ Secret redaction is defense in depth, not an isolation mechanism. Never market �
 | Conflicting process-input retry | Each process sequence binds once to one secret-safe command fingerprint; exact retry is idempotent and conflicting reuse fails closed | Durable bridge-state compromise bypasses the binding |
 | Provider SDK leaks business logic | SDK types confined to adapter/bridge; core contract is provider-neutral | Adapter remains trusted code and needs review |
 | Sleep mistaken for cleanup | Explicit idempotent destroy; cleanup state and audit evidence | Provider-side asynchronous deletion may lag acknowledgement |
-| Sandbox peer reads runner files/secrets | Do not rely on same-sandbox process/file separation; minimize injected values | Workload can inspect anything provider exposes inside that sandbox |
+| Sandbox peer reads runner files/placeholders | Do not rely on same-sandbox process/file separation; expose only revocable opaque placeholders | Workload can use an active placeholder through its exact authorized destination until revocation |
 | Orphaned billable compute | Persist handles before further work, durable cleanup, reconciliation, backlog metrics, operator runbook | Lost acknowledgement or provider outage can delay destruction |
 
 Control-plane policy may branch on declared capabilities, never provider name. A provider must state inability to replay or recover rather than fabricate it.
@@ -226,19 +230,20 @@ Use it only for:
 - the no-account demo with trusted fixtures;
 - trusted local development.
 
-Do not expose a local-provider-enabled control plane to untrusted tenants. Stronger local isolation belongs in a container/VM runtime provider that passes the same contract and has an independently reviewed threat model.
+Do not expose a local-provider-enabled control plane to untrusted tenants. Secret-bearing agent runs and sessions are rejected on local because it has no mediation boundary. Stronger local isolation belongs in a container/VM runtime provider that passes the same contracts and has an independently reviewed threat model.
 
 ## Cloudflare-specific boundary
 
 Processes inside one Cloudflare Sandbox share a sandbox security context, including filesystem, processes, and network according to the provider model. Therefore:
 
 - the runner cannot keep a same-sandbox “protected journal” from a malicious agent;
-- an injected model credential must be considered visible to sandbox code;
+- broker placeholders are visible to sandbox code, but source credential values remain encrypted behind the Worker/Durable Object boundary;
+- agent-phase egress is default-deny and limited to exact host/method grants; redirects cannot widen it;
 - provider/account credentials remain in the control plane or bridge;
 - provider-owned process replay is a recovery facility, not a trusted signature of agent intent;
 - the session mailbox is a delivery mechanism, not a confidentiality boundary; the workload may observe same-sandbox files;
 - the bridge durably reserves a command sequence/fingerprint before mailbox publication because the pinned SDK has no ongoing stdin primitive;
-- explicit Sandbox destruction is required after terminalization;
+- durable credential revocation is required after terminalization and before explicit Sandbox destruction;
 - bridge and container versions are deployed and tested as one compatibility unit.
 
 Cloudflare isolation protects the control-plane host from the sandbox; it does not isolate one process inside the sandbox from another.
@@ -303,7 +308,7 @@ Update this model before shipping any of the following:
 - horizontal writers or a shared database;
 - material expansion of public artifact download, log export, or audit query semantics;
 - object storage, external log storage, or deduplication across owners;
-- outbound network policy or credential broker;
+- changes to outbound network policy or credential mediation;
 - a new runtime provider, deployment target, or preview mode;
 - persistent runtime reuse between runs;
 - user-supplied container images or runner binaries;
