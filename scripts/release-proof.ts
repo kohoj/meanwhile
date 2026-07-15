@@ -7,6 +7,7 @@ import { Meanwhile, MeanwhileError } from "../src/client"
 import type { AppConfig } from "../src/config"
 import { backupDataRoot, restoreDataRoot, verifyDataBackup } from "../src/data-root"
 import { initializeInstrumentation } from "../src/instrumentation"
+import type { Store } from "../src/persistence/store"
 import type { TelemetryHealthSnapshot } from "../src/telemetry"
 import { sessionTimelineFromEvents } from "../src/timeline"
 import { SERVICE_VERSION } from "../src/version"
@@ -15,6 +16,12 @@ import {
   agentCatalog,
   prepareCloudflareAgentToolchain,
 } from "./agent-toolchains"
+import {
+  createReleaseProofReceipt,
+  type ReleaseProofPayload,
+  releaseProofClass,
+  writeReleaseProofReceipt,
+} from "./release-proof-receipt"
 
 type ProofProvider = "local" | "cloudflare"
 type ProofAgent = "demo" | "codex" | "claude-code" | "pi"
@@ -23,6 +30,7 @@ interface PreparedProofAgent {
   readonly type: ProofAgent
   readonly adapter: string
   readonly runtime: string
+  readonly authenticationEvidence: string
   readonly catalogPath: string
   readonly environment: Readonly<Record<string, string>>
   readonly secretReferences: Readonly<Record<string, string>>
@@ -77,40 +85,55 @@ class ProofError extends Error {
   }
 }
 
-const provider = selectedProvider(process.argv.slice(2))
-const proofAgentType = selectedProofAgent(process.argv.slice(2))
-const requireProvenance = process.argv.includes("--require-provenance")
 const providerReadyTimeoutMs = 120_000
 const providerReadyPollMs = 500
-const root = await mkdtemp(join(tmpdir(), "meanwhile-release-proof-"))
-const dataDir = join(root, "data")
-const backupDir = join(root, "backup")
-const runnerPath = resolve("dist/meanwhile-runner")
-const proofAgent = await prepareProofAgent(proofAgentType, provider, root)
-const catalogPath = proofAgent.catalogPath
-const key = await issueApiKey()
-const previewPort = await reservePort()
-const privateValues = [
-  key.key,
-  Bun.env["CLOUDFLARE_BRIDGE_TOKEN"],
-  ...proofAgent.secretValues,
-].filter((value): value is string => value !== undefined && value.length > 0)
-const telemetryCollector = startProofTelemetryCollector(privateValues)
-const config = proofConfig({
-  provider,
-  dataDir,
-  runnerPath,
-  catalogPath,
-  previewPort,
-  telemetryEndpoint: telemetryCollector.endpoint,
-  key: key.key,
-  secretSourceCatalog: Object.keys(proofAgent.secretReferences),
-})
+let root: string | null = null
+let dataDir: string | null = null
+let proofAgent: PreparedProofAgent | null = null
+let telemetryCollector: ProofTelemetryCollector | null = null
 let running: RunningInstance | null = null
 
 try {
-  if (requireProvenance && provider === "cloudflare") assertRemoteProvenance(config)
+  const proofArguments = process.argv.slice(2)
+  const provider = selectedProvider(proofArguments)
+  const proofAgentType = selectedProofAgent(proofArguments)
+  const requireProvenance = proofArguments.includes("--require-provenance")
+  const requireClean = proofArguments.includes("--require-clean")
+  const receiptPath = selectedReceiptPath(proofArguments)
+  const proofStartedAt = new Date().toISOString()
   const revision = await repositoryRevision()
+  if (requireClean && revision.dirty) {
+    throw new ProofError(
+      "WORKTREE_NOT_CLEAN",
+      "Release proof requires a clean worktree when --require-clean is set",
+    )
+  }
+  root = await mkdtemp(join(tmpdir(), "meanwhile-release-proof-"))
+  dataDir = join(root, "data")
+  const backupDir = join(root, "backup")
+  const runnerPath = resolve("dist/meanwhile-runner")
+  proofAgent = await prepareProofAgent(proofAgentType, provider, root)
+  assertProofAgentCredentialIntent(proofAgent)
+  const catalogPath = proofAgent.catalogPath
+  const key = await issueApiKey()
+  const previewPort = await reservePort()
+  const privateValues = [
+    key.key,
+    Bun.env["CLOUDFLARE_BRIDGE_TOKEN"],
+    ...proofAgent.secretValues,
+  ].filter((value): value is string => value !== undefined && value.length > 0)
+  telemetryCollector = startProofTelemetryCollector(privateValues)
+  const config = proofConfig({
+    provider,
+    dataDir,
+    runnerPath,
+    catalogPath,
+    previewPort,
+    telemetryEndpoint: telemetryCollector.endpoint,
+    key: key.key,
+    secretSourceCatalog: Object.keys(proofAgent.secretReferences),
+  })
+  if (requireProvenance && provider === "cloudflare") assertRemoteProvenance(config)
   const roundTripToken = sha256(
     new TextEncoder().encode(
       `meanwhile:${provider}:${proofAgent.type}:${revision.commit}:round-trip`,
@@ -171,16 +194,26 @@ try {
     )
   }
   if (agentResponse.trim().length === 0) {
-    throw new ProofError("ACP_ROUND_TRIP_FAILED", "The durable ACP response was empty")
+    throw new ProofError("ACP_ROUND_TRIP_FAILED", "The durable ACP response was empty", {
+      eventTypes: logs.items.map(({ eventType }) => eventType),
+      updateKinds: logs.items.flatMap((log) => runnerUpdateKind(log.data)),
+      updateShapes: logs.items.flatMap((log) => runnerUpdateShape(log.data)),
+      diagnostics: logs.items
+        .filter(({ stream }) => stream === "stderr")
+        .map(({ eventType, data }) => ({ eventType, data: data.slice(0, 2_000) })),
+    })
   }
 
   const statusHistory = running.application.store
     .listRunStatusEvents(run.ownerId, run.id)
     .map(({ toStatus }) => toStatus)
-  if (
-    JSON.stringify(statusHistory) !==
-    JSON.stringify(["queued", "provisioning", "running", "succeeded"])
-  ) {
+  const expectedStatusHistory: ["queued", "provisioning", "running", "succeeded"] = [
+    "queued",
+    "provisioning",
+    "running",
+    "succeeded",
+  ]
+  if (JSON.stringify(statusHistory) !== JSON.stringify(expectedStatusHistory)) {
     throw new ProofError("RUN_STATUS_HISTORY_INVALID", "Durable run status history is incomplete", {
       statusHistory,
     })
@@ -479,6 +512,13 @@ try {
   const restoredAudit = await running.client.audit.list({ resourceId: runId, limit: 100 })
   const restoredSession = await running.client.sessions.get(sessionId)
   const restoredTurns = await running.client.sessions.turns(sessionId, { limit: 100 })
+  const credentialBoundary = credentialBoundaryEvidence(
+    proofAgent,
+    provider,
+    running.application.store,
+    runId,
+    sessionId,
+  )
   await assertPreview(deploymentUrl, previewText)
   if (
     restoredRun.status !== "succeeded" ||
@@ -494,20 +534,31 @@ try {
   await running.close()
   running = null
 
-  const result = {
-    proof: "meanwhile-release",
-    status: "succeeded",
+  const runnerDigest = run.executionProvenance.runnerDigest
+  if (runnerDigest === null) {
+    throw new ProofError(
+      "RELEASE_PROVENANCE_INCOMPLETE",
+      "Release proof requires a measured or operator-asserted runner digest",
+    )
+  }
+  const receipt = createReleaseProofReceipt({
+    proofClass: releaseProofClass(provider, proofAgent.type),
+    startedAt: proofStartedAt,
+    finishedAt: new Date().toISOString(),
     provider,
     agent: {
       type: proofAgent.type,
       adapter: proofAgent.adapter,
       runtime: proofAgent.runtime,
-      realModel: proofAgent.type !== "demo",
+      authenticationEvidence: proofAgent.authenticationEvidence,
+      executionEvidence:
+        proofAgent.type === "demo" ? "deterministic-fixture" : "credentialed-live-agent",
+      modelIdentityEvidence: proofAgent.type === "demo" ? "not-applicable" : "not-attested",
     },
     revision,
     provenance: {
       digest: provenanceDigest,
-      runnerDigest: run.executionProvenance.runnerDigest,
+      runnerDigest,
       runtimeImageReference: run.executionProvenance.provider.runtimeImageReference,
       runtimeImageDigest: run.executionProvenance.provider.runtimeImageDigest,
       bridgeProtocolVersion: run.executionProvenance.provider.bridgeProtocolVersion,
@@ -516,17 +567,13 @@ try {
         (provider === "local" ||
           (run.executionProvenance.provider.runtimeImageReference !== null &&
             run.executionProvenance.provider.runtimeImageDigest !== null)),
-      runnerDigestAuthority:
-        provider === "local"
-          ? "measured-local-file"
-          : run.executionProvenance.runnerDigest === null
-            ? "unavailable"
-            : "operator-asserted",
+      runnerDigestAuthority: provider === "local" ? "measured-local-file" : "operator-asserted",
       runtimeImageDigestAuthority:
         run.executionProvenance.provider.runtimeImageDigest === null
           ? "unavailable"
           : "operator-asserted-platform-evidence",
     },
+    credentialBoundary,
     roundTrip: {
       promptDigest: sha256(new TextEncoder().encode(prompt)),
       responseDigest: sha256(new TextEncoder().encode(agentResponse)),
@@ -547,7 +594,7 @@ try {
     telemetry,
     run: {
       id: runId,
-      statusHistory,
+      statusHistory: expectedStatusHistory,
       runnerSequence: runnerSession.runnerSequence,
       logs: logs.items.length,
       cleanupAuditId: cleanupAudit.id,
@@ -557,7 +604,13 @@ try {
       digest: artifact.digest,
       files: artifactDetail.entries.length,
     },
-    deployment: { id: deploymentId, url: deploymentUrl, previewVerifiedAfterRestart: true },
+    deployment: {
+      id: deploymentId,
+      target: "local-static",
+      previewBoundary: "control-plane-local-static",
+      url: deploymentUrl,
+      previewVerifiedAfterRestart: true,
+    },
     persistence: {
       restartVerified: true,
       restoreVerified: true,
@@ -571,8 +624,16 @@ try {
       deployments: backup.deployments.length,
       verified: true,
     },
+  })
+  const serializedReceipt = `${JSON.stringify(receipt, null, 2)}\n`
+  if (privateValues.some((value) => serializedReceipt.includes(value))) {
+    throw new ProofError(
+      "PROOF_RECEIPT_PRIVATE_VALUE",
+      "Release proof receipt contains private input",
+    )
   }
-  await Bun.write(Bun.stdout, `${JSON.stringify(result, null, 2)}\n`)
+  if (receiptPath !== null) await writeReleaseProofReceipt(receiptPath, receipt)
+  await Bun.write(Bun.stdout, serializedReceipt)
 } catch (error) {
   const normalized = normalizeProofError(error)
   await Bun.write(
@@ -582,10 +643,10 @@ try {
   process.exitCode = 1
 } finally {
   await running?.close().catch(() => undefined)
-  await telemetryCollector.close().catch(() => undefined)
-  proofAgent.restore()
-  await rm(root, { recursive: true, force: true })
-  await rm(`${dataDir}.lock`, { recursive: true, force: true })
+  await telemetryCollector?.close().catch(() => undefined)
+  proofAgent?.restore()
+  if (root !== null) await rm(root, { recursive: true, force: true })
+  if (dataDir !== null) await rm(`${dataDir}.lock`, { recursive: true, force: true })
 }
 
 async function waitForProviderReady(client: Meanwhile, provider: ProofProvider): Promise<void> {
@@ -736,6 +797,43 @@ function agentResponseText(
     }
   }
   return chunks.join("")
+}
+
+function runnerUpdateKind(data: string): string[] {
+  let payload: unknown
+  try {
+    payload = JSON.parse(data)
+  } catch {
+    return []
+  }
+  if (!isRecord(payload) || !isRecord(payload["update"])) return []
+  const kind = payload["update"]["sessionUpdate"]
+  return typeof kind === "string" ? [kind] : []
+}
+
+function runnerUpdateShape(data: string): object[] {
+  let payload: unknown
+  try {
+    payload = JSON.parse(data)
+  } catch {
+    return []
+  }
+  if (!isRecord(payload) || !isRecord(payload["update"])) return []
+  const update = payload["update"]
+  const content = update["content"]
+  return [
+    {
+      truncated: payload["truncated"],
+      updateKeys: Object.keys(update),
+      sessionUpdate: update["sessionUpdate"],
+      contentType: isRecord(content) ? content["type"] : typeof content,
+      contentKeys: isRecord(content) ? Object.keys(content) : [],
+      textBytes:
+        isRecord(content) && typeof content["text"] === "string"
+          ? new TextEncoder().encode(content["text"]).byteLength
+          : null,
+    },
+  ]
 }
 
 async function assertExpectedNotFound(meanwhile: Meanwhile): Promise<void> {
@@ -1022,6 +1120,79 @@ function selectedProofAgent(arguments_: readonly string[]): ProofAgent {
   return value
 }
 
+function selectedReceiptPath(arguments_: readonly string[]): string | null {
+  const options = arguments_.filter((argument) => argument.startsWith("--output="))
+  if (options.length > 1) {
+    throw new ProofError("INVALID_ARGUMENT", "Release proof accepts one output path")
+  }
+  const value = options[0]?.slice("--output=".length)
+  if (value === undefined) return null
+  if (value.length === 0) {
+    throw new ProofError("INVALID_ARGUMENT", "Release proof output path must not be empty")
+  }
+  return resolve(value)
+}
+
+function assertProofAgentCredentialIntent(agent: PreparedProofAgent): void {
+  if (agent.type === "demo") return
+  const referenceNames = Object.keys(agent.secretReferences)
+  if (
+    referenceNames.length === 0 ||
+    agent.secretValues.length === 0 ||
+    referenceNames.length !== agent.secretValues.length
+  ) {
+    throw new ProofError(
+      "LIVE_AGENT_CREDENTIAL_EVIDENCE_MISSING",
+      "Live-agent proof requires one resolved value for every credential reference",
+    )
+  }
+}
+
+function credentialBoundaryEvidence(
+  agent: PreparedProofAgent,
+  provider: ProofProvider,
+  store: Pick<Store, "getCredentialLeaseInternal">,
+  runId: string,
+  sessionId: string,
+): ReleaseProofPayload["credentialBoundary"] {
+  if (agent.type === "demo") {
+    return {
+      mode: "not-required",
+      runLeaseId: null,
+      sessionLeaseId: null,
+      runLeaseRevoked: null,
+      sessionLeaseRevoked: null,
+      sourceValuesAbsent: true,
+    }
+  }
+
+  const runLease = store.getCredentialLeaseInternal("run", runId)
+  const sessionLease = store.getCredentialLeaseInternal("session", sessionId)
+  if (
+    runLease === null ||
+    sessionLease === null ||
+    runLease.provider !== provider ||
+    sessionLease.provider !== provider ||
+    runLease.status !== "revoked" ||
+    sessionLease.status !== "revoked" ||
+    runLease.revokedAt === null ||
+    sessionLease.revokedAt === null
+  ) {
+    throw new ProofError(
+      "LIVE_AGENT_CREDENTIAL_EVIDENCE_MISSING",
+      "Live-agent proof requires restored revoked credential leases for the run and session",
+    )
+  }
+  return {
+    mode: "brokered",
+    runLeaseId: runLease.id,
+    sessionLeaseId: sessionLease.id,
+    runLeaseRevoked: true,
+    sessionLeaseRevoked: true,
+    sourceValuesAbsent: true,
+  }
+}
+
 async function prepareProofAgent(
   type: ProofAgent,
   provider: ProofProvider,
@@ -1033,6 +1204,7 @@ async function prepareProofAgent(
       type,
       adapter: "meanwhile-demo-agent",
       runtime: `bun@${Bun.version}`,
+      authenticationEvidence: "not-required",
       catalogPath: resolve("config/agents.json"),
       environment: { FIXTURE_OUTPUT_PATH: "site/index.html" },
       secretReferences: {},
@@ -1073,6 +1245,7 @@ async function prepareProofAgent(
     type,
     adapter: toolchain.adapter,
     runtime: toolchain.runtime,
+    authenticationEvidence: toolchain.authenticationEvidence,
     catalogPath,
     environment: toolchain.environment,
     secretReferences: toolchain.secretReferences,
@@ -1116,5 +1289,17 @@ function normalizeProofError(error: unknown): ProofError {
   if (error instanceof AgentToolchainError) return new ProofError(error.code, error.message)
   if (error instanceof MeanwhileError)
     return new ProofError(error.code, error.message, error.details)
-  return new ProofError("RELEASE_PROOF_FAILED", "Release proof failed")
+  return new ProofError("RELEASE_PROOF_FAILED", "Release proof failed", {
+    causeType: error instanceof Error ? error.name : typeof error,
+    source: proofErrorSource(error),
+  })
+}
+
+function proofErrorSource(error: unknown): string | null {
+  if (!(error instanceof Error) || error.stack === undefined) return null
+  for (const frame of error.stack.split("\n").slice(1)) {
+    const match = frame.match(/(?:^|[/\\])([^/\\]+\.(?:ts|js)):(\d+):(\d+)/)
+    if (match !== null) return `${match[1]}:${match[2]}:${match[3]}`
+  }
+  return null
 }

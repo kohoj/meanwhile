@@ -312,7 +312,7 @@ bun run demo
 bun run proof:release
 ```
 
-Credential-bearing real-agent proofs run only through the Cloudflare brokered-egress path. The agent receives a revocable placeholder, the bridge substitutes the real credential only on an exact host/method grant, stream-redacts exact values from the upstream response, and denies all other agent-phase egress. `proof:release:cloudflare:codex` requires API-key authentication; ChatGPT session tokens are deliberately not injected because the Codex client must parse them locally. Claude file credentials and metadata-service authentication are likewise rejected instead of being represented as safe.
+Credential-bearing live-agent proofs run only through the Cloudflare brokered-egress path. The agent receives a revocable placeholder, the bridge substitutes the source credential only on an exact host/method grant, stream-redacts exact values from the upstream response, and denies all other agent-phase egress. `proof:release:cloudflare:codex` requires API-key authentication; ChatGPT session tokens are deliberately not injected because the Codex client must parse them locally. Claude file credentials and metadata-service authentication are likewise rejected instead of being represented as safe.
 
 ## Runtime providers
 
@@ -343,11 +343,11 @@ interface RuntimeProvider {
 }
 ```
 
-`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, digest-pinned base image, standalone runner's Bun runtime, and bundled ACP toolchains are pinned as one compatibility unit; the root `packageManager` is the single Bun-version source and Cloudflare types remain inside the provider package. The reference image proves Codex, Claude Code, and Pi through exact adapter/runtime pairs. Production operators can derive smaller agent-profile images from the same contract without changing the control plane. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor. The bridge durably reserves each process before spawn, records its immutable terminal result outside the sandbox, and appends an exit-code closure frame to both streams. If the SDK removes an exited process from `getProcess()`, the bridge recovers that same execution through retained `getProcessLogs()` evidence; it withholds the irreversible exit cursor until both matching frames are visible, so neither an admission retry nor an eventually consistent terminal read can duplicate work or discard a delayed tail.
+`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, digest-pinned base image, standalone runner's Bun runtime, and bundled ACP toolchains are pinned as one compatibility unit; the root `packageManager` is the single Bun-version source and Cloudflare types remain inside the provider package. The image gate proves that the exact Codex, Claude Code, and Pi adapter/runtime executables are installed and bootable; only a successful credentialed live-agent receipt on the same clean revision proves an end-to-end agent path. Production operators can derive smaller agent-profile images from the same contract without changing the control plane. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor. The bridge durably reserves each process before spawn, records its immutable terminal result outside the sandbox, and appends an exit-code closure frame to both streams. If the SDK removes an exited process from `getProcess()`, the bridge recovers that same execution through retained `getProcessLogs()` evidence; it withholds the irreversible exit cursor until both matching frames are visible, so neither an admission retry nor an eventually consistent terminal read can duplicate work or discard a delayed tail.
 
 The pinned Sandbox SDK does not expose ongoing stdin after process creation. Meanwhile therefore does not claim generic interactive process I/O: the bridge durably binds each `(process, sequence)` to one secret-safe command fingerprint, then publishes a validated command to a provider-private mailbox. Exact retries are harmless; conflicting reuse fails closed. This is a capability-gated runner command transport, not remote ACP, a PTY, or a second control plane.
 
-The shipped Cloudflare image uses `standard-1` deliberately: a real Claude coding-agent process exceeded the `lite` class's 256 MiB limit. Deterministic bridge checks can fit smaller compute, but the supported live-agent proof must use a class sized for the agent toolchain. Runtime destruction remains the cost boundary.
+The shipped Cloudflare image uses `standard-1` deliberately: a credentialed Claude coding-agent process observed during image sizing exceeded the `lite` class's 256 MiB limit. That observation informs capacity; it is not current-revision release evidence. Deterministic bridge checks can fit smaller compute, but the supported live-agent proof must use a class sized for the agent toolchain. Runtime destruction remains the cost boundary.
 
 Configure the deployed bridge in the control plane:
 
@@ -366,9 +366,10 @@ Then verify it explicitly—remote mutation is never triggered merely because cr
 bun run cloudflare:check
 bun run test:live:cloudflare
 bun run proof:release:cloudflare          # deterministic ACP compatibility proof
-bun run proof:release:cloudflare:codex    # real Codex generation → SDK download → deploy → URL
-bun run proof:release:cloudflare:claude   # same proof through Claude Code
-bun run proof:release:cloudflare:pi       # same proof through Pi
+bun run proof:release:cloudflare:codex    # credentialed Codex agent → artifact → deploy → URL
+bun run proof:release:cloudflare:claude   # same live-agent proof through Claude Code
+bun run proof:release:cloudflare:pi       # same live-agent proof through Pi
+bun run proof:verify -- .proof/cloudflare-codex.json
 ```
 
 To add Daytona, Fly Machines, Modal, or another backend, implement `RuntimeProvider`, declare truthful capabilities, and pass the shared provider contract plus a real-account lifecycle proof. The run executor contains no provider-name branches. See [Provider contract](docs/provider-contract.md).
@@ -487,28 +488,34 @@ bun run proof:release               # semantic round trip, telemetry, restart, b
 bun run cloudflare:check            # bridge package and protocol contract
 bun run test:live:cloudflare        # explicit real-account lifecycle
 bun run proof:release:cloudflare    # deterministic remote compatibility proof
-bun run proof:release:cloudflare:codex  # real Codex, durable session, artifact/deploy
-bun run proof:release:cloudflare:claude # real Claude Code, same complete evidence
-bun run proof:release:cloudflare:pi     # real Pi, same complete evidence
+bun run proof:release:cloudflare:codex  # credentialed live Codex agent
+bun run proof:release:cloudflare:claude # credentialed live Claude Code agent
+bun run proof:release:cloudflare:pi     # credentialed live Pi agent
+bun run proof:verify -- .proof/cloudflare-codex.json
 ```
 
-The release proof sends a revision-bound token through ACP, structurally verifies the durable response, downloads immutable agent output through the public SDK, deploys those bytes through the SDK, and fetches the returned URL. It also validates OTLP trace and metric semantics, correlated structured logs, byte-scans the live data root and backup for exact private values, verifies exact status and replay evidence, destroys the runtime, restarts, restores into an empty data root, and boots again successfully.
+Every release-proof command rebuilds the standalone runner and demo agent first; it never accepts a prior `dist/` directory as an implicit prerequisite.
 
-`proof:release:cloudflare` isolates provider/control-plane compatibility with the deterministic ACP fixture. The agent-specific commands are acceptance proofs for real work: each agent receives the task inside Cloudflare Sandbox, creates `site/index.html`, preserves one ACP identity across two turns and a control-plane restart, and exposes the captured output only through immutable storage and the public SDK. A health response, skipped account test, lifecycle-only check, or deterministic response is never described as real-model proof.
+The release proof sends a revision-bound token through ACP, structurally verifies the durable response, downloads immutable agent output through the public SDK, deploys those bytes through the SDK to the explicit `local-static` target, and fetches the returned control-plane preview URL. It also validates OTLP trace and metric semantics, correlated structured logs, byte-scans the live data root and backup for exact private values, verifies exact status and replay evidence, destroys the runtime, restarts, restores into an empty data root, and boots again successfully.
 
-Cloudflare proof admission does not treat `wrangler deploy` completion or another HTTP client as bridge readiness. It waits within a fixed budget for the authenticated production Bun `RuntimeProvider.health()` path, then starts lifecycle work. Health proves protocol availability, not hidden compute creation; the first Sandbox start remains an idempotent, deadline-bounded provider mutation and absorbs Cloudflare-classified transient container rollout errors through bounded backoff.
+Every command atomically writes a versioned, self-verifying receipt under `.proof/`. Receipts classify evidence as `local-control-plane`, `remote-provider-compatibility`, or `remote-live-agent`; bind the Git commit and dirty state; distinguish deterministic fixtures from credentialed agents; require restored revoked run/session credential leases for live agents; identify `local-static` as the deployment boundary; and state that exact downstream model identity is not attested. `bun run proof:verify -- <receipt> --require-clean --commit=<sha>` verifies its schema, evidence digest, cleanliness, and revision. The manual `Remote proof` GitHub workflow additionally runs the real provider lifecycle, requires a clean checkout, uploads the receipt, and signs its artifact provenance with GitHub's Sigstore-backed attestation service.
+
+`proof:release:cloudflare` isolates provider/control-plane compatibility with the deterministic ACP fixture. The agent-specific commands are credentialed live-agent acceptance proofs: each selected ACP toolchain receives the task inside Cloudflare Sandbox, creates `site/index.html`, preserves one ACP identity across two turns and a control-plane restart, and exposes the captured output only through immutable storage and the public SDK. This proves the configured agent path, not a cryptographically attested model identity. A health response, skipped account test, lifecycle-only check, image version check, or deterministic response is never described as equivalent evidence.
+
+Cloudflare proof admission does not treat `wrangler deploy` completion or another HTTP client as bridge readiness. A deployment workflow first waits on Cloudflare's container-application state until every declared instance is healthy and none are starting, scheduling, or failed, then waits within a fixed budget for the authenticated production Bun `RuntimeProvider.health()` path. Health proves protocol availability, not hidden compute creation; the first Sandbox start remains an idempotent, deadline-bounded provider mutation and absorbs Cloudflare-classified transient transport errors through bounded backoff. Accepting a physical runtime while the container application is still provisioning is invalid because the rollout may replace that generation.
 
 The deterministic suite separately covers owner isolation, lifecycle transitions, run/session replay, cross-turn ACP continuity, conflict policy, interrupt, timeout, artifacts, cancellation, concurrent idempotency, deployment audit, secret redaction, restart reconciliation, cleanup safety, provider replacement, and persistence.
 
 ## Production status
 
-Meanwhile `v0.1.1` is the current public release baseline. The complete credential-free local product path and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful run of the corresponding current command is evidence for that revision. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
+Meanwhile `v0.1.1` is the current public release baseline. The complete credential-free local product path and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
-Durable sessions on this branch are proven end to end through both runtime adapters, including one ACP identity across turns, interrupt, timeout, event replay, cleanup, and control-plane restart. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these are operator/platform provenance assertions rather than remote attestation.
+The deterministic suite proves interrupt, per-turn timeout, replay, and cleanup semantics against replaceable providers. Local release evidence proves the complete host-process product path. Cloudflare release evidence proves one ACP identity across two turns, event replay, cleanup, and control-plane restart on real remote compute; the separate live lifecycle test proves remote hard termination and credential mediation. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these remain operator/platform assertions rather than remote attestation.
 
 Before broad multi-tenant production use, the project still needs:
 
-- signed release attestations and automated package publication;
+- automated package publication tied to verified release receipts;
+- a Pi ACP adapter that propagates an internal model/RPC failure as prompt failure. The exact pinned `pi-acp@0.0.31` currently maps its internal `error` result to ACP `end_turn`; Meanwhile's semantic proof rejects the resulting empty response and publishes no receipt, but that path is not accepted as passed until the adapter boundary is corrected and a clean `remote-live-agent` receipt succeeds;
 - continuous real-account verification for every released remote-provider revision;
 - owner quotas and request rate limits beyond the implemented process-level admission bounds;
 - a lease-capable shared database for horizontal control-plane writers;

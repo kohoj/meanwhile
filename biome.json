@@ -1,7 +1,14 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
   "files": {
-    "includes": ["**", "!!dist", "!!coverage", "!!data", "!!providers/cloudflare-sandbox/.wrangler"]
+    "includes": [
+      "**",
+      "!!.proof",
+      "!!dist",
+      "!!coverage",
+      "!!data",
+      "!!providers/cloudflare-sandbox/.wrangler"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -39,7 +39,7 @@ import {
 import { RunExecutor } from "../../src/services/run-executor"
 import { RunService } from "../../src/services/run-service"
 import { WorkspacePreparer } from "../../src/services/workspace-preparer"
-import { StructuredLogger } from "../../src/telemetry"
+import { StructuredLogger, Telemetry } from "../../src/telemetry"
 import {
   permissiveTestAgentIntents,
   TEST_AGENT_CATALOG_DIGEST,
@@ -122,7 +122,7 @@ describe("durable runner terminal evidence", () => {
       },
       async cancel() {},
     }
-    const fixture = await createFixture({ provider, runner, secrets })
+    const fixture = await createFixture({ provider, runner, secrets, telemetry: true })
     const run = createRun(
       fixture.store,
       { secretRefs: { [AGENT_SECRET]: `env://${AGENT_SECRET}` } },
@@ -526,6 +526,7 @@ async function createFixture(input: {
   secret?: string
   secrets?: SecretResolver
   workspaceFiles?: readonly { path: string; content: Uint8Array }[]
+  telemetry?: boolean
 }): Promise<Fixture> {
   const directory = await mkdtemp(join(tmpdir(), "meanwhile-terminal-evidence-"))
   directories.push(directory)
@@ -568,6 +569,15 @@ async function createFixture(input: {
       serviceVersion: "0.1.0",
       sink: { write: (line) => operationalLogs.push(line) },
     }),
+    ...(input.telemetry === true
+      ? {
+          telemetry: new Telemetry({
+            serviceName: "meanwhile-terminal-test",
+            serviceVersion: "0.1.0",
+            sink: { write: (line) => operationalLogs.push(line) },
+          }),
+        }
+      : {}),
     concurrency: 1,
     pollMs: 60_000,
   })

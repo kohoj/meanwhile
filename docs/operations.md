@@ -217,7 +217,7 @@ Never manually delete database runtime rows to silence the backlog. Diagnose pro
 
 ## Cloudflare bridge operations
 
-The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and real-agent toolchains are pinned as one compatibility unit. The reference image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the proven coding-agent process set. A production deployment may derive smaller agent-profile images while preserving the same adapter and provenance contract.
+The bridge is a separate deployment boundary running in Cloudflare `workerd` and Sandbox containers. Its provider SDK, custom container image, standalone Bun runner, and live-agent toolchains are pinned as one compatibility unit. The reference image runs as `standard-1`: `lite` is useful for deterministic bridge checks but its 256 MiB memory limit is below the observed coding-agent process set. A production deployment may derive smaller agent-profile images while preserving the same adapter and provenance contract.
 
 The pinned SDK has no ongoing process-stdin primitive. Durable sessions therefore use a bridge-owned sequential mailbox: Durable Object state binds each `(process, sequence)` to one command fingerprint before sandbox publication. Treat mailbox support as a versioned provider capability, not generic shell input or remote ACP.
 
@@ -235,17 +235,23 @@ Before enabling it in the control plane:
 1. configure a high-entropy `BRIDGE_TOKEN` secret binding in the Cloudflare deployment;
 2. deploy the exact bridge and container image revision tested together;
 3. set `CLOUDFLARE_BRIDGE_URL` to that deployment's URL and set control-plane `CLOUDFLARE_BRIDGE_TOKEN` to the same secret value stored under bridge binding `BRIDGE_TOKEN`;
-4. after a deploy or secret rotation, poll the authenticated `/v1/health` boundary until the expected bridge protocol is stable; a successful Wrangler mutation is not edge readiness, and a fixed sleep is not evidence;
+4. after a deploy, poll Cloudflare's container-application state until all declared instances are healthy and none are starting, scheduling, or failed; then poll the authenticated `/v1/health` boundary until the expected bridge protocol is stable. A successful Wrangler mutation is neither container-rollout nor edge readiness, and a fixed sleep is not evidence. Do not admit a runtime while the application is still provisioning because the rollout may replace an already observed physical generation;
 5. record `CLOUDFLARE_RUNNER_DIGEST` plus the matching `CLOUDFLARE_RUNTIME_IMAGE_REFERENCE` and `CLOUDFLARE_RUNTIME_IMAGE_DIGEST`; absent evidence remains `null` rather than being guessed;
 6. run `doctor` and the mock-bridge integration tests;
 7. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
 8. run `bun run proof:release:cloudflare` to prove the deterministic ACP/provider compatibility path with complete configured provenance;
-9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require real generation, two-turn continuity across control-plane restart, SDK artifact download, SDK deployment, URL verification, OTLP telemetry, cleanup, backup/restore, and second boot for every bundled toolchain;
-10. inspect Cloudflare for leaked test resources.
+9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require credentialed generation, two-turn continuity across control-plane restart, SDK artifact download, SDK `local-static` deployment, URL verification, OTLP telemetry, cleanup, backup/restore, and second boot for every bundled toolchain;
+10. verify each generated receipt with `bun run proof:verify -- <receipt> --require-clean --commit=<sha>`; an installed toolchain or configured command is not execution evidence;
+11. for release evidence, run the explicit `Remote proof` GitHub workflow on the release revision. Configure bridge URL, runner/image provenance, and region as repository variables; configure the bridge token and relevant agent credential as repository secrets. The workflow repeats the real provider lifecycle, rejects dirty or mismatched evidence, retains the receipt, and signs its artifact provenance;
+12. inspect Cloudflare for leaked test resources.
 
-The live provider test also proves the native security path: source credential absent from process environment, exact allowed-host substitution, durable revocation, and default-deny egress after revocation. Real-agent proofs accept only credential shapes that remain opaque to the client. Codex therefore requires an API key; ChatGPT session tokens, Claude file credentials, and metadata-service authority are rejected instead of being injected into the sandbox.
+Every release-proof command rebuilds both standalone runtime executables before admission. A proof therefore never depends on an untracked `dist/` left by another command.
 
-Wrangler upload completion is not bridge readiness. The live test and release proofs use the same authenticated Bun `RuntimeProvider.health()` transport as production and wait within a fixed budget before beginning lifecycle assertions. Health proves bridge protocol availability, not compute materialization: a newly bound container application may still return a provider-classified transient error on its first Sandbox start. The Cloudflare adapter retries that idempotent mutation with bounded backoff under the run's provisioning deadline. A different client or an arbitrary delay is not accepted as readiness evidence.
+Each agent command is an independent gate. Failure produces no receipt and cannot be inferred away from another agent's result. The exact pinned `pi-acp@0.0.31` currently maps an internal Pi prompt error to ACP `end_turn`; the release proof still fails on the empty semantic response and missing artifact, so Pi is not a proven live-agent path until that adapter propagates failure correctly and a clean current-revision receipt passes.
+
+The live provider test also proves the native security path: source credential absent from process environment, exact allowed-host substitution, durable revocation, and default-deny egress after revocation. Live-agent proofs accept only credential shapes that remain opaque to the client. Codex therefore requires an API key; ChatGPT session tokens, Claude file credentials, and metadata-service authority are rejected instead of being injected into the sandbox. A successful live-agent receipt proves the configured agent path and generated artifact; it records exact downstream model identity as `not-attested`.
+
+Wrangler upload completion is not bridge readiness. Deployment automation owns container-application rollout convergence; the live test and release proofs then use the same authenticated Bun `RuntimeProvider.health()` transport as production and wait within a fixed budget before beginning lifecycle assertions. Health proves bridge protocol availability, not compute materialization. The Cloudflare adapter retries a provider-classified transient first Sandbox start with bounded backoff under the run's provisioning deadline, but it correctly fails closed with `RUNTIME_LOST` if the platform replaces a physical generation after acceptance. A different client or an arbitrary delay is not accepted as readiness evidence.
 
 The configured runner digest and matching custom-image reference/digest are operator/platform assertions used to pin execution identity. A base-image tag is never paired with a custom-image digest. These values are not presented as cryptographic runtime attestation; unavailable platform evidence stays `null` in ordinary runs.
 
@@ -330,8 +336,8 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 - [ ] Every configured ACP agent is pinned and catalog-validated.
 - [ ] Local provider is disabled for untrusted tenants.
 - [ ] Remote provider shared contract and live lifecycle tests pass.
-- [ ] Any provider admitting durable sessions has a live proof for ordered input, replay, reconnect, interrupt, close, and cleanup on the exact bridge/image revision.
-- [ ] The release proof passes on the exact revision, including telemetry export and backup restore; remote release requires complete configured runner/image provenance.
+- [ ] Any provider admitting durable sessions has evidence for ordered input, replay, reconnect, interrupt, close, and cleanup on the exact bridge/image revision; deterministic contract evidence and live-provider evidence are listed separately rather than merged.
+- [ ] The release receipt verifies as clean and matches the exact revision, including telemetry export and backup restore; remote release requires complete configured runner/image provenance and retained signed artifact provenance.
 - [ ] Bridge credentials are scoped, stored outside images, and rotatable.
 - [ ] Both cleanup backlogs, run/session queue latency, run/turn outcomes, continuity loss, and storage capacity are monitored.
 - [ ] OTLP compatibility is proven under Bun before export is enabled.

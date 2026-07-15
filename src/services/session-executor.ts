@@ -224,6 +224,7 @@ export class SessionExecutor implements ManagedComponent {
     let session = this.#store.getAgentSessionInternal(sessionId)
     if (!session) return
     const rawProvider = this.#providers.get(session.provider)
+    const credentialBroker = this.#providers.credentialBroker(session.provider)
     const provider =
       scope === undefined
         ? rawProvider
@@ -343,7 +344,8 @@ export class SessionExecutor implements ManagedComponent {
         resourceId: session.id,
         runtimeId: session.runtimeId,
         runtime,
-        provider,
+        providerName: provider.name,
+        credentialBroker,
         agentSpec: session.agentSpec,
         secrets: resolvedAgentSecrets,
         at: this.#now(),

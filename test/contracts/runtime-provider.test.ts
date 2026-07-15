@@ -272,6 +272,8 @@ describe("RuntimeProviderRegistry", () => {
     const registry = new RuntimeProviderRegistry([provider, second])
 
     expect(registry.get("z-provider")).toBe(provider)
+    expect(registry.credentialBroker("z-provider")).toBe(provider)
+    expect(registry.supportsCredentialMediation("z-provider")).toBeTrue()
     expect(registry.list().map(({ name }) => name)).toEqual(["a-provider", "z-provider"])
     expect(() => registry.get("missing")).toThrow(
       expect.objectContaining({ code: "PROVIDER_NOT_FOUND" }),

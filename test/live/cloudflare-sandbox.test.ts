@@ -273,11 +273,11 @@ liveTest(
       const credentialLease = await provider.attach({
         leaseId: credentialLeaseId,
         runtime,
-        allowedHosts: ["httpbin.org"],
+        allowedHosts: ["httpbingo.org"],
         credentials: [
           {
             environmentVariable: "LIVE_PROVIDER_TOKEN",
-            host: "httpbin.org",
+            host: "httpbingo.org",
             methods: ["POST"],
             value: credentialValue,
           },
@@ -290,7 +290,7 @@ liveTest(
         argv: [
           "bun",
           "-e",
-          "const value=process.env.LIVE_PROVIDER_TOKEN;if(!value?.startsWith('mwcap_v1_'))process.exit(41);const response=await fetch('https://httpbin.org/anything',{method:'POST',headers:{authorization:'Bearer '+value},body:'proof'});console.log(JSON.stringify(await response.json()))",
+          "const value=process.env.LIVE_PROVIDER_TOKEN;if(!value?.startsWith('mwcap_v1_'))process.exit(41);const response=await fetch('https://httpbingo.org/anything',{method:'POST',headers:{authorization:'Bearer '+value},body:'proof'});const body=await response.text();if(!response.ok){console.error('credential-origin-status='+response.status);process.exit(42)};console.log(body)",
         ],
         cwd: relativePath("."),
         env: credentialLease.environment,

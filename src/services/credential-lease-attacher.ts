@@ -5,12 +5,12 @@ import {
   credentialGrants,
   credentialLeaseHandle,
   credentialPolicyDigest,
-  runtimeCredentialBroker,
+  type RuntimeCredentialBroker,
 } from "../credentials"
 import type { AgentLaunchSnapshot, AuditRecord, JsonObject } from "../domain"
 import { AppError } from "../errors"
 import type { Store } from "../persistence/store"
-import type { RuntimeHandle, RuntimeProvider } from "../providers/runtime-provider"
+import type { RuntimeHandle } from "../providers/runtime-provider"
 import { type ResolvedSecretMaterial, SecretRedactor } from "../secrets"
 
 export interface AttachAgentCredentialInput {
@@ -19,7 +19,8 @@ export interface AttachAgentCredentialInput {
   readonly resourceId: string
   readonly runtimeId: string
   readonly runtime: RuntimeHandle
-  readonly provider: RuntimeProvider
+  readonly providerName: string
+  readonly credentialBroker: RuntimeCredentialBroker | null
   readonly agentSpec: AgentLaunchSnapshot
   readonly secrets: ResolvedSecretMaterial
   readonly at: string
@@ -33,14 +34,14 @@ export async function attachAgentCredentialLease(
   store: Pick<Store, "ensureCredentialLease" | "materializeCredentialLease">,
   input: AttachAgentCredentialInput,
 ): Promise<ResolvedSecretMaterial> {
-  const broker = runtimeCredentialBroker(input.provider)
+  const broker = input.credentialBroker
   if (broker === null) {
     if (Object.keys(input.secrets.environment).length > 0) {
       throw new AppError({
         code: "PROVIDER_CAPABILITY_UNAVAILABLE",
         status: 422,
         message: "Runtime provider cannot keep agent credentials outside the runtime",
-        details: { provider: input.provider.name, capability: "credentialMediation" },
+        details: { provider: input.providerName, capability: "credentialMediation" },
       })
     }
     return input.secrets
@@ -65,7 +66,7 @@ export async function attachAgentCredentialLease(
     resourceId: input.resourceId,
     runtimeId: input.runtimeId,
     runtimeHandle: jsonObject(input.runtime),
-    provider: input.provider.name,
+    provider: input.providerName,
     policyDigest,
     at: input.at,
   })
@@ -97,7 +98,7 @@ export async function attachAgentCredentialLease(
   if (
     attached.handle.kind !== "credential_lease" ||
     attached.handle.version !== CREDENTIAL_LEASE_HANDLE_VERSION ||
-    attached.handle.provider !== input.provider.name ||
+    attached.handle.provider !== input.providerName ||
     typeof attached.handle.opaque !== "string"
   ) {
     throw new AppError({
@@ -107,7 +108,7 @@ export async function attachAgentCredentialLease(
   }
   let normalizedHandle: CredentialLeaseHandle
   try {
-    normalizedHandle = credentialLeaseHandle(input.provider.name, attached.handle.opaque)
+    normalizedHandle = credentialLeaseHandle(input.providerName, attached.handle.opaque)
   } catch (cause) {
     throw new AppError({
       code: "PROVIDER_PROTOCOL_ERROR",
@@ -201,7 +202,7 @@ const attachAudit = (
     resourceType: input.resourceType,
     resourceId: input.resourceId,
     runtimeId: input.runtimeId,
-    provider: input.provider.name,
+    provider: input.providerName,
     allowedHosts: [...allowedHosts],
     credentialNames: Object.keys(input.secrets.environment).sort(),
   },

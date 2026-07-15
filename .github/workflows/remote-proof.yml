@@ -1,0 +1,105 @@
+name: Remote proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: Proof class and bundled ACP toolchain
+        required: true
+        default: demo
+        type: choice
+        options:
+          - demo
+          - codex
+          - claude-code
+          - pi
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-proof-${{ github.sha }}-${{ inputs.agent }}
+  cancel-in-progress: false
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      CLOUDFLARE_BRIDGE_URL: ${{ vars.CLOUDFLARE_BRIDGE_URL || secrets.CLOUDFLARE_BRIDGE_URL }}
+      CLOUDFLARE_BRIDGE_TOKEN: ${{ secrets.CLOUDFLARE_BRIDGE_TOKEN }}
+      CLOUDFLARE_RUNNER_DIGEST: ${{ vars.CLOUDFLARE_RUNNER_DIGEST }}
+      CLOUDFLARE_RUNTIME_IMAGE_REFERENCE: ${{ vars.CLOUDFLARE_RUNTIME_IMAGE_REFERENCE }}
+      CLOUDFLARE_RUNTIME_IMAGE_DIGEST: ${{ vars.CLOUDFLARE_RUNTIME_IMAGE_DIGEST }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run runtime:build
+
+      - name: Prove the real Cloudflare provider lifecycle
+        run: bun run test:live:cloudflare
+
+      - name: Select receipt path
+        id: receipt
+        shell: bash
+        run: echo "path=${RUNNER_TEMP}/meanwhile-${GITHUB_SHA}-${{ inputs.agent }}.json" >> "$GITHUB_OUTPUT"
+
+      - name: Produce clean revision-bound release evidence
+        env:
+          OPENAI_API_KEY: ${{ inputs.agent == 'codex' && secrets.OPENAI_API_KEY || '' }}
+          AWS_BEARER_TOKEN_BEDROCK: ${{ inputs.agent == 'pi' && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
+          AWS_REGION: ${{ inputs.agent == 'pi' && vars.AWS_REGION || '' }}
+          CLAUDE_ANTHROPIC_API_KEY: ${{ inputs.agent == 'claude-code' && secrets.ANTHROPIC_API_KEY || '' }}
+          CLAUDE_AWS_BEARER_TOKEN_BEDROCK: ${{ inputs.agent == 'claude-code' && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
+          CLAUDE_AWS_REGION: ${{ inputs.agent == 'claude-code' && vars.AWS_REGION || '' }}
+        shell: bash
+        run: |
+          if [[ "${{ inputs.agent }}" == "claude-code" ]]; then
+            trap 'rm -f "$HOME/.claude/settings.json"' EXIT
+            bun -e 'import { mkdir } from "node:fs/promises";
+            import { join } from "node:path";
+            const anthropic = Bun.env.CLAUDE_ANTHROPIC_API_KEY;
+            const bedrock = Bun.env.CLAUDE_AWS_BEARER_TOKEN_BEDROCK;
+            const region = Bun.env.CLAUDE_AWS_REGION;
+            const env = anthropic
+              ? { ANTHROPIC_API_KEY: anthropic }
+              : bedrock && region
+                ? { CLAUDE_CODE_USE_BEDROCK: "1", AWS_BEARER_TOKEN_BEDROCK: bedrock, AWS_REGION: region }
+                : null;
+            if (!env) throw new Error("Claude proof requires ANTHROPIC_API_KEY or Bedrock bearer token plus region");
+            const directory = join(Bun.env.HOME, ".claude");
+            await mkdir(directory, { recursive: true });
+            await Bun.write(join(directory, "settings.json"), JSON.stringify({ env }));'
+          fi
+          bun scripts/release-proof.ts
+            --provider=cloudflare \
+            --agent=${{ inputs.agent }} \
+            --require-provenance \
+            --require-clean \
+            --output=${{ steps.receipt.outputs.path }}
+
+      - name: Verify receipt contract and revision
+        run: >-
+          bun scripts/verify-release-proof.ts
+          ${{ steps.receipt.outputs.path }}
+          --require-clean
+          --commit=${GITHUB_SHA}
+
+      - name: Sign GitHub artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.receipt.outputs.path }}
+
+      - name: Retain release evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: meanwhile-proof-${{ inputs.agent }}-${{ github.sha }}
+          path: ${{ steps.receipt.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90

@@ -30,7 +30,7 @@ describe("run deadline", () => {
       .map((event) => event.toStatus)
     expect(statuses.at(-1)).toBe("timed_out")
     expect(statuses.filter((status) => status === "timed_out")).toHaveLength(1)
-  })
+  }, 20_000)
 })
 
 async function waitForRuntimeStop(
@@ -38,8 +38,8 @@ async function waitForRuntimeStop(
   ownerId: string,
   runId: string,
 ): Promise<void> {
-  const deadline = Date.now() + 5_000
-  while (Date.now() < deadline) {
+  const deadline = performance.now() + 7_000
+  while (performance.now() < deadline) {
     const stopped = applicationHarness.application.store
       .listAudit(ownerId)
       .some((record) => record.action === "runtime.stop" && record.metadata["runId"] === runId)

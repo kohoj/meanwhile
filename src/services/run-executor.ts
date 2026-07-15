@@ -338,6 +338,7 @@ export class RunExecutor implements ManagedComponent {
   async #provisionOrReconnect(run: Run, scope?: TelemetryScope): Promise<void> {
     this.#assertRunning()
     const baseProvider = this.#providers.get(run.provider)
+    const credentialBroker = this.#providers.credentialBroker(run.provider)
     assertProviderProvenance(run.executionProvenance, baseProvider)
     const provider =
       scope === undefined
@@ -498,7 +499,8 @@ export class RunExecutor implements ManagedComponent {
           resourceId: run.id,
           runtimeId: runtimeRecord.id,
           runtime,
-          provider,
+          providerName: provider.name,
+          credentialBroker,
           agentSpec: run.agentSpec,
           secrets: resolvedSecrets,
           at: this.#now(),
@@ -597,7 +599,8 @@ export class RunExecutor implements ManagedComponent {
         resourceId: run.id,
         runtimeId: runtimeRecord.id,
         runtime,
-        provider,
+        providerName: provider.name,
+        credentialBroker,
         agentSpec: run.agentSpec,
         secrets: resolvedRecoverySecrets,
         at: this.#now(),

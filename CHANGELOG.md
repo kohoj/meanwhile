@@ -12,6 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A common resource-bound `SecretResolver` material contract with awaited local zeroization, without coupling executors to the bootstrap environment resolver or conflating observation cleanup with credential revocation.
 - A provider-neutral `RuntimeCredentialBroker` boundary with durable per-run/session leases, opaque agent placeholders, exact host/method policy, restart-safe attachment, and bounded audited revocation before runtime destruction.
 - Cloudflare live and release proofs now wait on bounded production-transport provider readiness, while idempotent lifecycle mutations absorb provider-classified container rollout transients without wall-clock readiness assumptions.
+- Release-proof commands now rebuild their standalone runtime executables through one explicit execution entry, so a clean checkout cannot accidentally rely on stale or missing `dist/` state.
 - Durable run/session runtime-provisioning intents and one-shot process-launch intents that close allocation/spawn-before-handle-persistence crash windows through exact-id provider reconciliation.
 - Durable `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent` resources across SQLite, HTTP/OpenAPI, the typed SDK, and CLI, preserving one ACP context across ordered prompts.
 - Explicit turn conflict policies (`reject`, `enqueue`, `interrupt_and_send`), independent session/turn idempotency, per-turn deadlines, interruption without continuity loss, idempotent close, and durable session-runtime cleanup.
@@ -20,6 +21,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Restart reconciliation for live interactive sessions, including provider/runner replay, exact evidence deduplication, undispatched command recovery, and explicit `continuity_lost` semantics.
 - Session telemetry for durable queue/active/runtime/cleanup state and bounded turn outcomes, plus owner-isolation, secret-redaction, timeout, replay, cleanup, and restart tests.
 - Exact Codex, Claude Code, and Pi ACP/runtime pairs in the Cloudflare compatibility image, with brokered remote release-proof commands.
+- Versioned release-proof receipts with explicit local, remote-compatibility, and credentialed live-agent classes; canonical evidence digests; exact revision and dirty-state binding; restored run/session credential-lease revocation for live agents; atomic local retention; independent verification; and a manual real-account workflow that retains the receipt and signs its GitHub artifact provenance.
 
 ### Changed
 
@@ -34,9 +36,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Run and session admission are independently configurable; restart reconciliation always supervises already-live sessions, while session cleanup retains a separate bounded lane.
 - Session and turn history use keyset/cursor pagination, turns have a direct read route, and the SDK provides direct turn waits, explicit session-status waits, and replay-safe retry across temporary API unavailability.
 - API-key usage timestamps coalesce repeated authenticated reads into at most one durable write per minute.
+- Release evidence no longer derives a `realModel` assertion from the selected agent. Receipts identify deterministic versus credentialed execution, name `local-static` as the deployment boundary, and record downstream model identity as unattested.
 
 ### Fixed
 
+- Runtime-provider observation no longer erases the sibling credential-broker boundary: executors resolve compute and credential mediation independently from the provider registry, with a telemetry-enabled brokered-secret regression.
+- Release-proof admission and preflight failures now emit the same structured error envelope as execution failures, while empty agent responses include only secret-safe event and payload-shape diagnostics instead of false success or an unstructured stack.
+- The live Cloudflare credential-origin check now uses a status-validated echo response rather than assuming a third-party JSON body, so an upstream gateway failure remains structured evidence instead of a parser exception.
+- The end-to-end timeout test now waits for durable `runtime.stop` evidence under a test-local budget that covers the product's five-second termination grace, instead of racing Bun's five-second default harness timeout under parallel load.
 - Local POSIX process-group hard termination is now a single idempotent lifecycle operation, eliminating the macOS race where exit observation attempted a second group kill; process-tree tests synchronize on a validated ready PID instead of a 25 ms output assumption.
 - Run terminal races now use an explicit two-phase runner path: terminal-frame acceptance atomically reserves the runner result before artifact capture, then the sole public terminal-status transaction commits status, events, audit, terminal log, and cleanup eligibility together. Cancellation, timeout, and control-plane failure lose to an existing reservation; late terminal frames remain diagnostic.
 - Recovery now fails closed on the impossible split state of a terminal log without its atomic runner-session reservation instead of reconstructing lifecycle authority from logs.
@@ -60,7 +67,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - Secret-bearing run/session admission now fails on providers without credential mediation. Cloudflare agent processes receive only revocable placeholders; real values remain encrypted in trusted bridge state and are substituted only for exact authorized destinations and methods under default-deny egress.
 - Cloudflare installs deny-all outbound interception before container startup, so SDK-managed HTTPS certificate material is present even before a credential lease and exact-host handlers remain the only egress overrides.
-- Local real-agent credential commands were removed because the local provider is not a credential boundary; the deterministic no-account local demo remains the complete local path.
+- Local credentialed-agent commands were removed because the local provider is not a credential boundary; the deterministic no-account local demo remains the complete local path.
 - Session prompts and resolved credentials stay out of process argv, runner specs, provider handles, telemetry, and durable evidence; the control plane retains an independent operation-scoped redactor through spawn/reconnect and redacts agent-controlled fields before SQLite accepts session output.
 - Cloudflare reserves each process-input sequence against a secret-safe fingerprint before sandbox delivery; exact retries are harmless and conflicting reuse fails closed.
 - Structured Codex login material is split into individually redacted secret values and reconstructed only inside the short-lived wrapper process instead of crossing the runner boundary as one opaque JSON credential.
@@ -69,13 +76,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
-- A pinned Claude ACP toolchain in the Cloudflare custom image and `proof:release:cloudflare:claude`, which requires real remote model generation, public-SDK artifact download, public-SDK deployment, URL verification, telemetry, cleanup, restart, backup, restore, and second boot.
+- A pinned Claude ACP toolchain in the Cloudflare custom image and `proof:release:cloudflare:claude`, which requires credentialed remote agent generation, public-SDK artifact download, public-SDK deployment, URL verification, telemetry, cleanup, restart, backup, restore, and second boot without claiming an attested downstream model identity.
 - Matching custom-image reference support in execution provenance, configuration, release evidence, and documentation.
 
 ### Changed
 
 - The supported Cloudflare live-agent image now uses `standard-1`; the smaller `lite` class remains unsuitable for the proven Claude ACP process set.
-- The deterministic Cloudflare proof is explicitly classified as provider/control-plane compatibility evidence rather than real-model acceptance.
+- The deterministic Cloudflare proof is explicitly classified as provider/control-plane compatibility evidence rather than credentialed live-agent acceptance.
 - Agent working-directory policy now resolves explicitly to the provider workspace root instead of relying on an omitted runner default.
 
 ### Fixed
