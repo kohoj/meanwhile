@@ -1,0 +1,60 @@
+name: Bug report
+description: A reproducible defect in Meanwhile's behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. For a **security vulnerability**, do not use this form —
+        follow [SECURITY.md](https://github.com/kohoj/meanwhile/blob/main/SECURITY.md)
+        and use GitHub's private "Report a vulnerability" form instead. Never include
+        real secrets, tokens, customer data, or unredacted logs here; replace them with
+        deterministic placeholders.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observed behavior, and the user- or operator-visible consequence.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: The behavior you expected instead, and the invariant you believe it violates.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and inputs. A failing test or a minimal script is ideal.
+      placeholder: |
+        1. bunx @kohoz/meanwhile serve
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >-
+        Relevant structured error envelope (with `code`), run/session status,
+        or redacted log lines. Do not paste secrets, provider bodies, or raw prompts.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version / revision
+      description: Package version, or the exact Git commit if running from source.
+      placeholder: "@kohoz/meanwhile 0.1.1, or commit abc1234"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Bun version, and provider (local / cloudflare).
+      placeholder: "macOS 15, Bun 1.3.13, provider=local"
+    validations:
+      required: true

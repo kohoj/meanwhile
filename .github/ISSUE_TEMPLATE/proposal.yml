@@ -1,0 +1,51 @@
+name: Change or extension proposal
+description: Propose a new provider, deploy target, CLI capability, or other change
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Meanwhile favors small, ownership-complete changes. Before proposing an
+        abstraction or framework, describe the concrete user-visible problem.
+        See [CONTRIBUTING.md](https://github.com/kohoj/meanwhile/blob/main/CONTRIBUTING.md#where-to-start)
+        for the green / yellow / red map of where changes are easy versus invariant-critical.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the map does this touch?
+      options:
+        - Green — new RuntimeProvider
+        - Green — new DeployAdapter
+        - Green — CLI / timeline projection / docs / tests
+        - Yellow — API, artifacts, or deployment surface
+        - Red — run/session executor, store/schema, auth/secrets/credentials, provenance
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: User-visible problem
+      description: What can't someone do today, and what is the consequence?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: >-
+        The smallest boundary that can own the fix. For a Red-area change, describe
+        the current controlling code path and the invariant involved, per CONTRIBUTING.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: How completion will be proven
+      description: >-
+        The test or proof that establishes it works. A new provider/adapter needs the
+        shared contract suite plus a real credential-gated lifecycle proof — a mock
+        only proves replaceability.
+    validations:
+      required: true

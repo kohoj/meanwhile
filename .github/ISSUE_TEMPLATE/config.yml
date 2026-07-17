@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/kohoj/meanwhile/security/advisories/new
+    about: Report privately via GitHub's advisory form. Never open a public issue with exploit details — see SECURITY.md.
+  - name: Question or idea
+    url: https://github.com/kohoj/meanwhile/discussions
+    about: For open-ended questions and early ideas, start a discussion instead of an issue.

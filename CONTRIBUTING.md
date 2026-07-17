@@ -79,6 +79,34 @@ Prefer finishing the deepest dependency your change needs before adding its cons
 
 Do not build a fake higher layer over an unimplemented lower contract to create visible progress.
 
+## Where to start
+
+Meanwhile is a correctness-critical control plane: much of its value is in invariants that are invisible until a rare failure. Some areas are built to be extended by new contributors; others own an invariant that a well-meaning change can silently break. This map tells you which is which. It does not gate you — it tells you how much review and proof a change needs before it can land.
+
+**Green — extension points, a good first contribution.** These add capability behind an existing contract without touching control-plane state. A mock proves replaceability; a real credential-gated proof proves the integration (see below).
+
+- A new `RuntimeProvider` (Daytona, Fly Machines, Modal, …) behind `docs/provider-contract.md`. The run executor has no provider-name branches, so a new backend is additive.
+- A new `DeployAdapter` target over an immutable source.
+- CLI ergonomics in `src/cli.ts` (a presentation layer over the public client) and its tests.
+- `src/timeline.ts` projections — pure functions from durable events to presentation shapes; the delegator's board on the roadmap is built here.
+- Documentation, examples, and tests that assert an existing invariant more thoroughly.
+
+**Yellow — allowed, but read the boundary doc first and expect a threat-model review.** These touch an authorization-, secret-, or output-facing surface.
+
+- `src/api/` routes and the `src/api/contracts.ts` Zod boundary (validation, serialization, OpenAPI).
+- `src/services/artifact-collector.ts` and artifact capture (path traversal, size bounds, immutability).
+- `src/services/deployment-executor.ts` (ambiguous-success reconciliation, source resolution).
+
+**Red — core invariants; open an issue and design the change with a maintainer before writing code.** A subtle regression here corrupts durable state, leaks a secret, or loses work, and it will not show up in a green test run. These are not off-limits, but they are never a first PR.
+
+- `src/services/run-executor.ts` — the only owner of run-state transitions.
+- `src/services/session-executor.ts` — the only owner of session/turn execution, continuity, and reconciliation.
+- `src/persistence/store.ts` and `src/persistence/schema.ts` — the only SQL layer and the single current schema (no upgrade/backfill path).
+- `src/auth.ts`, `src/secrets.ts`, `src/credentials.ts` — identity, secret redaction, and the brokered agent-credential boundary.
+- `src/provenance.ts` — immutable execution identity and drift detection.
+
+If you are unsure which color a file is, `AGENTS.md` §13 lists what each file owns, and the [Architecture](docs/architecture.md) ownership map shows what each layer must never own. When in doubt, open an issue describing the user-visible problem before changing a Red file.
+
 ## Quality gate
 
 Before requesting review, run:
