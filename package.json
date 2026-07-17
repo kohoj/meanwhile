@@ -1,5 +1,5 @@
 {
-  "name": "@kohoj/meanwhile",
+  "name": "@kohoz/meanwhile",
   "version": "0.1.1",
   "description": "The trusted system for work you delegate to AI agents: run any ACP coding agent in an isolated runtime with durable, recoverable, auditable, credential-mediated execution.",
   "type": "module",
@@ -39,7 +39,7 @@
     "./workspace": "./src/workspace.ts"
   },
   "bin": {
-    "meanwhile": "./src/cli.ts"
+    "meanwhile": "src/cli.ts"
   },
   "scripts": {
     "predev": "bun run runtime:build",
