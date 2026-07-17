@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Published as the `@kohoz/meanwhile` package with a `meanwhile serve` command that starts the control plane on this host, so `bunx @kohoz/meanwhile serve` runs it without a clone. The standalone runner is compiled once on first start when the default runner path is absent, since the binary is neither committed nor publishable and dependency install scripts are blocked by default; a caller-provided runner path is never rebuilt.
 - Owner-scoped request idempotency for deployment admission across HTTP/OpenAPI, SDK, CLI, service, and SQLite, with canonical immutable-intent hashing and atomic create audit evidence.
 - A common resource-bound `SecretResolver` material contract with awaited local zeroization, without coupling executors to the bootstrap environment resolver or conflating observation cleanup with credential revocation.
 - A provider-neutral `RuntimeCredentialBroker` boundary with durable per-run/session leases, opaque agent placeholders, exact host/method policy, restart-safe attachment, and bounded audited revocation before runtime destruction.

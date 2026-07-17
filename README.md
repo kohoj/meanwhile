@@ -48,6 +48,19 @@ Interactive work adds four concepts without weakening those boundaries:
 
 Requires macOS or Linux, [Bun 1.3.13+](https://bun.sh/), and Git. Every Meanwhile application, CLI, demo, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The local provider needs no cloud account, but it is **not a security sandbox**.
 
+The fastest way to start the control plane, without cloning anything, is the published package. The standalone runner is compiled once on first start:
+
+```console
+# `key generate` prints JSON; keep the key it returns and export it.
+bunx @kohoz/meanwhile key generate
+export MEANWHILE_API_KEY="mwk_..."
+bunx @kohoz/meanwhile serve
+```
+
+The API starts at `http://127.0.0.1:7331`; local previews use the separate origin `http://127.0.0.1:7332`. Point the client or CLI at it with the same `MEANWHILE_API_KEY`.
+
+To work on Meanwhile itself, run it from a clone instead:
+
 ```console
 bun install
 cp .env.example .env
@@ -57,7 +70,7 @@ bun run doctor
 bun run dev
 ```
 
-The API starts at `http://127.0.0.1:7331`; local previews use the separate origin `http://127.0.0.1:7332`. Startup initializes the exact current SQLite schema on an empty database and rejects every non-matching database before readiness. OpenAPI is available at `/openapi.json`.
+Startup initializes the exact current SQLite schema on an empty database and rejects every non-matching database before readiness. OpenAPI is available at `/openapi.json`.
 
 To exercise the complete no-account path in one command:
 
@@ -69,10 +82,10 @@ That command creates a run, follows logs, captures an artifact, deploys it throu
 
 ## One run, end to end
 
-The typed client is the canonical programmatic interface. It uses Web `fetch`, `AbortSignal`, streams, and the same Zod contracts as the HTTP API. Pin the exact source revision from a Bun client project; `v0.1.1` is the current tagged baseline, while durable sessions remain in `Unreleased` until the next compatibility tag:
+The typed client is the canonical programmatic interface. It uses Web `fetch`, `AbortSignal`, streams, and the same Zod contracts as the HTTP API. Add it to a Bun client project from npm; `0.1.1` is the current published baseline, while durable sessions remain in `Unreleased` until the next compatibility tag:
 
 ```console
-bun add github:kohoj/meanwhile#<commit-or-tag>
+bun add @kohoz/meanwhile
 ```
 
 The example below assumes the Codex ACP entry described under [Agent execution](#agent-execution) is installed in the selected runtime.

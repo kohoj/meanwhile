@@ -131,6 +131,8 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
   }
 
   switch (command) {
+    case "serve":
+      return await serve(rest)
     case "run":
       await createRun(rest, context)
       return 0
@@ -181,6 +183,25 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
     default:
       throw argumentError("Unknown command", { command })
   }
+}
+
+async function serve(args: readonly string[]): Promise<number> {
+  parseArguments(args, {}).requireNoPositionals()
+  // Dynamically imported so every non-serve command (and the test harness that
+  // drives runCli) never loads the server, its telemetry, or Bun.serve.
+  const { startServer } = await import("./server")
+  const { stop } = await startServer()
+  // startServer installs its own SIGINT/SIGTERM handlers that stop the server
+  // and set process.exitCode. Hold the command open until that shutdown runs,
+  // so `meanwhile serve` behaves as a long-lived foreground process.
+  await new Promise<void>((resolveServe) => {
+    const onSignal = () => {
+      void stop().finally(resolveServe)
+    }
+    process.once("SIGINT", onSignal)
+    process.once("SIGTERM", onSignal)
+  })
+  return 0
 }
 
 async function createRun(args: readonly string[], context: CliContext): Promise<void> {
@@ -1334,6 +1355,7 @@ function fileSinkWriter(file: Bun.BunFile): Write {
 const HELP = `Meanwhile ${SERVICE_VERSION} — run any ACP coding agent in any isolated runtime.
 
 Usage:
+  meanwhile serve                       Start the control plane on this host
   meanwhile run (--repo URL | --files DIR) --agent NAME [options] -- TASK
   meanwhile list [--limit N] [--before CURSOR]
   meanwhile get RUN_ID
@@ -1386,7 +1408,10 @@ Deployment options:
   --secret NAME=env://VAR     Deployment secret reference; repeatable
   --idempotency-key KEY       Required safe retry identity
 
-API commands read MEANWHILE_URL (default ${DEFAULT_URL}) and MEANWHILE_API_KEY.
+The 'serve' command starts the control plane on this host, reading MEANWHILE_*
+configuration (MEANWHILE_API_KEY is required; generate one with 'meanwhile key
+generate'). Every other command is a client that reads MEANWHILE_URL (default
+${DEFAULT_URL}) and MEANWHILE_API_KEY to reach a running control plane.
 The local provider executes on this host and is not a security sandbox.
 `
 
