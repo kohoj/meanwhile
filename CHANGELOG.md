@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Pending release evidence
+
+- The `remote-live-agent` path is not asserted for this revision. A `pi-acp@0.0.31` boundary maps an internal model/RPC `error` to ACP `end_turn`; the semantic proof rejects the resulting empty response and publishes no receipt, so the Pi live-agent path is not accepted until the adapter is corrected and a clean receipt succeeds. Credentialed Codex and Claude Code paths likewise require a clean `remote-live-agent` receipt on the released revision before they are claimed for it.
+
+## [0.1.2] - 2026-07-18
+
+Evidence scope: this release carries the durable control-plane, session, credential-broker, and packaging work below, each behind `local-control-plane` and deterministic `remote-provider-compatibility` proofs. It does **not** assert any `remote-live-agent` conclusion — those remain per-revision receipts, and the Pi path is known-open (see Unreleased).
+
 ### Added
 
 - Published as the `@kohoz/meanwhile` package with a `meanwhile serve` command that starts the control plane on this host, so `bunx @kohoz/meanwhile serve` runs it without a clone. The standalone runner is compiled once on first start when the default runner path is absent, since the binary is neither committed nor publishable and dependency install scripts are blocked by default; a caller-provided runner path is never rebuilt.

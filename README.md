@@ -12,7 +12,7 @@ You hand a task to an AI agent. Then what? You want to know it finished, see wha
 
 Meanwhile is the durable layer under the agent, not another agent. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose.
 
-> **Status:** the durable core, local runtime, and Cloudflare runtime ship today (`v0.1.1`). A read-only board where a whole team — teammates, leads, the people who *asked* for the work — can watch delegated tasks close, wait, or recover is the [next milestone](#roadmap), not a current feature. This README does not describe it as shipped.
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime ship today (`v0.1.2`). A read-only board where a whole team — teammates, leads, the people who *asked* for the work — can watch delegated tasks close, wait, or recover is the [next milestone](#roadmap), not a current feature. This README does not describe it as shipped.
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -82,7 +82,7 @@ That command creates a run, follows logs, captures an artifact, deploys it throu
 
 ## One run, end to end
 
-The typed client is the canonical programmatic interface. It uses Web `fetch`, `AbortSignal`, streams, and the same Zod contracts as the HTTP API. Add it to a Bun client project from npm; `0.1.1` is the current published baseline, while durable sessions remain in `Unreleased` until the next compatibility tag:
+The typed client is the canonical programmatic interface. It uses Web `fetch`, `AbortSignal`, streams, and the same Zod contracts as the HTTP API. Add it to a Bun client project from npm; `0.1.2` is the current published baseline, and durable sessions ship in it behind local and deterministic proofs, while credentialed `remote-live-agent` conclusions remain per-revision receipts (see the changelog):
 
 ```console
 bun add @kohoz/meanwhile
@@ -508,7 +508,7 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 ## Production status
 
-Meanwhile `v0.1.1` is the current public release baseline. The complete credential-free local product path and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
+Meanwhile `v0.1.2` is the current public release baseline. The complete credential-free local product path, durable sessions, and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
 The deterministic suite proves interrupt, per-turn timeout, replay, and cleanup semantics against replaceable providers. Local release evidence proves the complete host-process product path. Cloudflare release evidence proves one ACP identity across two turns, event replay, cleanup, and control-plane restart on real remote compute; the separate live lifecycle test proves remote hard termination and credential mediation. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these remain operator/platform assertions rather than remote attestation.
 
@@ -530,7 +530,7 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 
 Meanwhile's direction is to be the durable, trustworthy layer *under* agent work — the thing an application, a team, or the person who requested the work can rely on — rather than another agent or another agent console. Concretely:
 
-- **Shipped (`v0.1.1`).** The durable control plane, the credential-free local runtime, and the packaged Cloudflare runtime, each behind the release proofs described above.
+- **Shipped (`v0.1.2`).** The durable control plane, durable sessions and turns, the credential-free local runtime, and the packaged Cloudflare runtime, each behind the release proofs described above.
 - **Next — a delegator's view.** A read-only, evidence-driven board that answers one question for everyone who has a stake in a task, not just the person who launched it: *is it done, is it waiting on someone, or is the system recovering it?* It is a projection over the durable event stream already exposed by `runs.followEvents()` / `sessions.followEvents()` — a view, never a second control plane, and never a way to mutate a run.
 - **Then — shared execution intelligence.** Letting one task safely reuse what an earlier task discovered, under the same owner isolation and content-addressed evidence rules, so isolation and shared learning stop being mutually exclusive.
 - **Then — an open contract.** Hardening the typed client and OpenAPI surface so other tools (boards, IDEs, chat entry points) can run on Meanwhile's durable, credential-mediating, auditable core instead of rebuilding it.
