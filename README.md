@@ -1,6 +1,6 @@
 # Meanwhile
 
-**Durable infrastructure for agent work.**
+**The trusted system for work you delegate to AI agents.**
 
 [![CI](https://github.com/kohoj/meanwhile/actions/workflows/ci.yml/badge.svg)](https://github.com/kohoj/meanwhile/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun_1.3.13-black)](https://bun.sh/)
@@ -8,9 +8,11 @@
 
 > Agents and machines are replaceable. Intent and evidence are not.
 
-Meanwhile gives agent work a portable identity. A `Run` carries one task to immutable output. An `AgentSession` keeps one ACP context alive across ordered `Turn`s. Both compose an [ACP](https://agentclientprotocol.com/) agent, a runtime, and policy; both survive control-plane restarts without exposing provider machinery.
+You hand a task to an AI agent. Then what? You want to know it finished, see what it did, trust it didn't leak a secret or lose your work — without babysitting a terminal. That gap between *delegating* work and *trusting* the result is what Meanwhile closes.
 
-Use a run for a fix, repository change, evaluation, or release. Use a session when a person or upstream agent needs to inspect, redirect, interrupt, and continue the same agent context. Promote only immutable run output.
+Meanwhile is the durable layer under the agent, not another agent. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose.
+
+> **Status:** the durable core, local runtime, and Cloudflare runtime ship today (`v0.1.1`). A read-only board where a whole team — teammates, leads, the people who *asked* for the work — can watch delegated tasks close, wait, or recover is the [next milestone](#roadmap), not a current feature. This README does not describe it as shipped.
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -510,6 +512,17 @@ Before broad multi-tenant production use, the project still needs:
 - provider-neutral suspend/resume semantics before idle sessions can release compute without closing ACP continuity.
 
 These are evolution triggers, not reasons to add distributed machinery to the current single-writer core.
+
+## Roadmap
+
+Meanwhile's direction is to be the durable, trustworthy layer *under* agent work — the thing an application, a team, or the person who requested the work can rely on — rather than another agent or another agent console. Concretely:
+
+- **Shipped (`v0.1.1`).** The durable control plane, the credential-free local runtime, and the packaged Cloudflare runtime, each behind the release proofs described above.
+- **Next — a delegator's view.** A read-only, evidence-driven board that answers one question for everyone who has a stake in a task, not just the person who launched it: *is it done, is it waiting on someone, or is the system recovering it?* It is a projection over the durable event stream already exposed by `runs.followEvents()` / `sessions.followEvents()` — a view, never a second control plane, and never a way to mutate a run.
+- **Then — shared execution intelligence.** Letting one task safely reuse what an earlier task discovered, under the same owner isolation and content-addressed evidence rules, so isolation and shared learning stop being mutually exclusive.
+- **Then — an open contract.** Hardening the typed client and OpenAPI surface so other tools (boards, IDEs, chat entry points) can run on Meanwhile's durable, credential-mediating, auditable core instead of rebuilding it.
+
+Only the *Shipped* line is release evidence. Everything below it is intent, and this document will not describe those items as implemented until their own proofs exist.
 
 ## Documentation
 
