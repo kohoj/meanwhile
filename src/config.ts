@@ -14,6 +14,9 @@ const providerName = z
   .regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/)
   .max(64)
 
+/** Default relative location of the compiled standalone runner executable. */
+export const DEFAULT_RUNNER_PATH = "./dist/meanwhile-runner"
+
 const environmentSchema = z.object({
   MEANWHILE_HOST: z.string().min(1).default("127.0.0.1"),
   MEANWHILE_PORT: z.coerce.number().int().min(1).max(65_535).default(7331),
@@ -22,7 +25,7 @@ const environmentSchema = z.object({
   MEANWHILE_PREVIEW_PUBLIC_URL: z.url().optional(),
   MEANWHILE_DATA_DIR: z.string().min(1).default("./data"),
   MEANWHILE_API_KEY: z.string().min(24).optional(),
-  MEANWHILE_RUNNER_PATH: z.string().min(1).default("./dist/meanwhile-runner"),
+  MEANWHILE_RUNNER_PATH: z.string().min(1).default(DEFAULT_RUNNER_PATH),
   MEANWHILE_AGENT_CATALOG: z.string().min(1).default("./config/agents.json"),
   MEANWHILE_DEFAULT_PROVIDER: providerName.default("local"),
   MEANWHILE_RUN_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),

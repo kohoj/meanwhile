@@ -1,14 +1,34 @@
 {
-  "name": "meanwhile",
+  "name": "@kohoj/meanwhile",
   "version": "0.1.1",
-  "description": "The open control plane for running any coding agent in any isolated runtime.",
+  "description": "The trusted system for work you delegate to AI agents: run any ACP coding agent in an isolated runtime with durable, recoverable, auditable, credential-mediated execution.",
   "type": "module",
-  "private": true,
   "license": "Apache-2.0",
   "packageManager": "bun@1.3.13",
   "engines": {
     "bun": ">=1.3.13"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kohoj/meanwhile.git"
+  },
+  "homepage": "https://github.com/kohoj/meanwhile#readme",
+  "bugs": {
+    "url": "https://github.com/kohoj/meanwhile/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "runner",
+    "config",
+    "providers/cloudflare-sandbox/src/protocol.ts",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES"
+  ],
   "workspaces": [
     "providers/cloudflare-sandbox"
   ],

@@ -38,6 +38,7 @@ import { ExecutionProvenanceCatalog, sha256File } from "./provenance"
 import { CloudflareRuntimeProvider } from "./providers/cloudflare-provider"
 import { LocalRuntimeProvider } from "./providers/local-provider"
 import { RuntimeProviderRegistry } from "./providers/registry"
+import { ensureDefaultRunnerBuilt } from "./runner-bootstrap"
 import { EnvironmentSecretResolver } from "./secrets"
 import { ApiKeyService } from "./services/api-key-service"
 import { ArtifactService } from "./services/artifact-service"
@@ -76,6 +77,7 @@ export const createApplication = async (
 ): Promise<MeanwhileApplication> => {
   const { config, instrumentation } = options
   assertLocalProviderPolicy(config)
+  await ensureDefaultRunnerBuilt(config.runnerPath)
   const localRunnerDigest = await sha256File(config.runnerPath)
   const providers = [
     new LocalRuntimeProvider({
