@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+/* Design tokens — "control-room calm": dark, low-chroma, color spent only on
+   status. Continuous with the launch demo video's palette. */
+@theme {
+  --color-bg: #0a0e14;
+  --color-panel: #111722;
+  --color-card: #161d2b;
+  --color-border: #232c3d;
+  --color-text: #e6edf3;
+  --color-dim: #7d8998;
+  --color-faint: #4a5568;
+  --color-running: #4b9fff;
+  --color-waiting: #f0b429;
+  --color-recovering: #f0b429;
+  --color-ok: #3fb950;
+  --color-bad: #f85149;
+  --color-accent: #7c72ff;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: Inter, -apple-system, system-ui, sans-serif;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

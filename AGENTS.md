@@ -586,6 +586,7 @@ src/providers/registry.ts         explicit provider resolution
 src/providers/local-provider.ts   complete local implementation
 src/providers/cloudflare-provider.ts bridge client adapter
 providers/cloudflare-sandbox/     isolated Cloudflare package
+board/                            isolated read-only delegator board (own React stack; consumes the public client, never the kernel)
 
 src/artifacts/                    immutable storage contract + local store
 src/artifacts/workspace-bundle.ts uploaded immutable workspace input

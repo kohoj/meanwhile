@@ -30,7 +30,8 @@
     "THIRD_PARTY_NOTICES"
   ],
   "workspaces": [
-    "providers/cloudflare-sandbox"
+    "providers/cloudflare-sandbox",
+    "board"
   ],
   "exports": {
     ".": "./src/client.ts",
@@ -69,6 +70,9 @@
     "runner:build": "bun build runner/main.ts --compile --minify --outfile dist/meanwhile-runner",
     "demo-agent:build": "bun build test/fixtures/acp-agent.ts --compile --minify --outfile dist/meanwhile-demo-agent",
     "runtime:build": "bun run runner:build && bun run demo-agent:build",
+    "board:check": "bun run --cwd board check",
+    "board:build": "bun run --cwd board build",
+    "board:dev": "bun run --cwd board build && bun run --cwd board dev",
     "cloudflare:check": "bun run --cwd providers/cloudflare-sandbox check",
     "cloudflare:dev": "bun scripts/stage-cloudflare-runner.ts && bun run --cwd providers/cloudflare-sandbox dev:staged",
     "cloudflare:deploy": "bun scripts/stage-cloudflare-runner.ts && bun run --cwd providers/cloudflare-sandbox deploy:staged",

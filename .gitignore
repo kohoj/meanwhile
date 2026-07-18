@@ -14,3 +14,5 @@ data/
 *.db-wal
 .wrangler/
 providers/cloudflare-sandbox/.dev.vars
+board/dist/
+board/node_modules/

@@ -5,6 +5,7 @@
       "**",
       "!!.proof",
       "!!dist",
+      "!!board",
       "!!coverage",
       "!!data",
       "!!providers/cloudflare-sandbox/.wrangler"
