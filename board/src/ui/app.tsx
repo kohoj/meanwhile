@@ -1,181 +1,171 @@
 import { AnimatePresence, motion } from "motion/react";
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import useSWR from "swr";
 import { type BoardRow, connectStream, useBoard } from "./store";
 import "./styles.css";
 
-// ── Status vocabulary ──────────────────────────────────────────────────────
-// Each bucket carries a color AND a glyph AND a label — color is never the sole
-// signal (accessibility). Buckets are ordered by "needs your attention first".
-const BUCKETS = [
-  { key: "waiting", label: "Waiting on you", tone: "var(--color-waiting)" },
-  { key: "recovering", label: "Recovering", tone: "var(--color-recovering)" },
-  { key: "running", label: "Running", tone: "var(--color-running)" },
-  { key: "closed", label: "Closed", tone: "var(--color-ink-3)" },
-] as const;
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const EASE = [0.22, 1, 0.36, 1] as const;
 
-const STATUS_TONE: Record<string, string> = {
-  running: "var(--color-running)",
-  provisioning: "var(--color-running)",
-  queued: "var(--color-ink-3)",
-  idle: "var(--color-waiting)",
-  closing: "var(--color-running)",
-  continuity_lost: "var(--color-recovering)",
-  succeeded: "var(--color-ok)",
-  closed: "var(--color-ok)",
-  failed: "var(--color-bad)",
-  cancelled: "var(--color-ink-3)",
-  timed_out: "var(--color-bad)",
+// Plain-words relative time for the trust anchor — never a raw timestamp.
+const ago = (iso: string | null): string | null => {
+  if (!iso) return null;
+  const diff = Date.now() - Date.parse(iso);
+  if (Number.isNaN(diff) || diff < 0) return null;
+  const m = Math.round(diff / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
 };
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
-
-const bucketFor = (kind: string, status: string): string => {
+// ── Read-side classification. Only two things "need a human": a pending
+// decision (waiting) or a break (crash). Everything else is background.
+type Class = "wait" | "crash" | "running" | "done";
+const classify = (kind: string, status: string): Class => {
   if (kind === "run") {
-    if (["succeeded", "failed", "cancelled", "timed_out"].includes(status)) return "closed";
+    if (status === "failed" || status === "timed_out") return "crash";
+    if (status === "succeeded" || status === "cancelled") return "done";
     return "running";
   }
-  if (status === "continuity_lost") return "recovering";
-  if (["closed", "failed"].includes(status)) return "closed";
-  if (status === "idle") return "waiting";
+  if (status === "continuity_lost" || status === "failed") return "crash";
+  if (status === "closed") return "done";
+  if (status === "idle") return "wait";
   return "running";
 };
-
-const rowBucket = (row: BoardRow): string => {
-  const live = useBoard.getState().liveStatus[`${row.kind}:${row.id}`];
-  return live ? bucketFor(row.kind, live) : row.bucket;
+const NEEDS_HUMAN = (c: Class) => c === "wait" || c === "crash";
+const TONE: Record<Class, string> = {
+  wait: "var(--color-wait)",
+  crash: "var(--color-crash)",
+  running: "var(--color-ink-3)",
+  done: "var(--color-ink-4)",
 };
 
-// ── Status dot ──────────────────────────────────────────────────────────────
-// A live task's dot breathes; a settled one is still. Only opacity animates.
-const Dot: React.FC<{ status: string; live: boolean }> = ({ status, live }) => {
-  const tone = STATUS_TONE[status] ?? "var(--color-ink-3)";
-  return (
-    <span className="relative inline-flex size-2.5 items-center justify-center">
-      {live ? (
-        <motion.span
-          className="absolute inline-flex size-2.5 rounded-full"
-          style={{ backgroundColor: tone }}
-          animate={{ opacity: [0.35, 0.15, 0.35] }}
-          transition={{ duration: 2, repeat: Number.POSITIVE_INFINITY, ease: "easeInOut" }}
-        />
-      ) : null}
-      <span className="inline-flex size-1.5 rounded-full" style={{ backgroundColor: tone }} />
-    </span>
-  );
-};
+const useLiveStatus = (row: BoardRow) =>
+  useBoard((s) => s.liveStatus[`${row.kind}:${row.id}`]) ?? row.status;
 
-// ── Task card ─────────────────────────────────────────────────────────────
-const Card: React.FC<{ row: BoardRow; index: number; onOpen: () => void }> = ({
-  row,
-  index,
-  onOpen,
-}) => {
-  const liveStatus = useBoard((s) => s.liveStatus[`${row.kind}:${row.id}`]);
-  const status = liveStatus ?? row.status;
-  const tone = STATUS_TONE[status] ?? "var(--color-ink-3)";
+// ── The one item that needs you: stated with weight, and with evidence. ──────
+const Demand: React.FC<{ row: BoardRow; onOpen: () => void }> = ({ row, onOpen }) => {
+  const status = useLiveStatus(row);
+  const cls = classify(row.kind, status);
+  const tone = TONE[cls];
   return (
     <motion.button
       type="button"
       onClick={onOpen}
-      initial={{ opacity: 0, y: 6 }}
+      layout="position"
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -4 }}
-      transition={{ duration: 0.18, ease: "easeOut", delay: Math.min(index * 0.04, 0.24) }}
-      whileTap={{ scale: 0.99 }}
-      className="group flex w-full items-center gap-4 rounded-xl bg-[var(--color-surface)] p-4 text-left shadow-[var(--shadow-card)] ring-1 ring-inset ring-[var(--color-line-soft)] transition-shadow duration-150 hover:shadow-[var(--shadow-lift)]"
+      exit={{ opacity: 0, y: -6 }}
+      transition={{ duration: 0.24, ease: EASE }}
+      className="group block w-full rounded-2xl bg-[var(--color-raise)] p-6 text-left transition-transform duration-150 active:scale-[0.995]"
     >
-      <span
-        aria-hidden
-        className="h-9 w-0.5 shrink-0 rounded-full"
-        style={{ backgroundColor: tone }}
-      />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[15px] font-medium text-pretty text-[var(--color-ink)]">
-          {row.title || row.id}
+      <div className="flex items-center gap-2.5">
+        <span
+          className="size-2 rounded-full"
+          style={{ backgroundColor: tone, animation: "breathe 1.9s ease-in-out infinite" }}
+        />
+        <span
+          className="font-[var(--font-mono)] text-[11px] uppercase tracking-[0.1em]"
+          style={{ color: tone }}
+        >
+          {cls === "crash" ? "broke · holding" : "waiting on you"}
         </span>
-        <span className="mt-1 block truncate font-[var(--font-mono)] text-xs text-[var(--color-ink-3)]">
-          {row.kind} · {row.agentType}
-        </span>
-      </span>
-      <span className="flex shrink-0 items-center gap-2">
-        <Dot status={status} live={row.live} />
-        <span className="tnum font-[var(--font-mono)] text-xs text-[var(--color-ink-2)]">
-          {status}
-        </span>
-      </span>
+      </div>
+      <div className="mt-3 text-pretty text-[19px] font-medium leading-snug text-[var(--color-ink)]">
+        {row.title || row.id}
+      </div>
+      <div className="mt-3 font-[var(--font-mono)] text-[12px] text-[var(--color-ink-3)]">
+        {row.agentType} · {status} · open to see where →
+      </div>
     </motion.button>
   );
 };
 
-// ── Task detail ─────────────────────────────────────────────────────────────
+// ── Background inventory: near-invisible proof-of-existence, opt-in to read. ──
+const QuietRow: React.FC<{ row: BoardRow; onOpen: () => void }> = ({ row, onOpen }) => {
+  const status = useLiveStatus(row);
+  const cls = classify(row.kind, status);
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left transition-colors duration-150 hover:bg-[var(--color-raise)]"
+    >
+      <span className="size-1 rounded-full" style={{ backgroundColor: TONE[cls] }} />
+      <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--color-ink-3)]">
+        {row.title || row.id}
+      </span>
+      <span className="tnum shrink-0 font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
+        {status}
+      </span>
+    </button>
+  );
+};
+
+// ── Detail — a focused reading of the agent's evidence. ──────────────────────
 const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose }) => {
   const runTl = useBoard((s) => s.runTimelines[row.id]);
   const sessTl = useBoard((s) => s.sessionTimelines[row.id]);
   const loadHistory = useBoard((s) => s.loadHistory);
   const messages = row.kind === "run" ? runTl?.messages : sessTl?.messages;
+  const status = useLiveStatus(row);
   const [loading, setLoading] = useState(!messages);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  // A task fan-in never followed (typically closed) has no live timeline —
-  // fetch its full history on open.
   useEffect(() => {
     let alive = true;
     if (!messages || messages.length === 0) {
       setLoading(true);
       loadHistory(row.kind, row.id).finally(() => alive && setLoading(false));
-    } else {
-      setLoading(false);
-    }
+    } else setLoading(false);
     return () => {
       alive = false;
     };
   }, [row.kind, row.id, loadHistory, messages]);
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.15, ease: "easeOut" }}
+      transition={{ duration: 0.16 }}
       onClick={onClose}
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6"
+      className="fixed inset-0 z-[var(--z-backdrop)] flex items-end justify-center bg-black/60 p-4 sm:items-center sm:p-6"
     >
       <motion.div
         role="dialog"
         aria-modal
-        initial={{ opacity: 0, scale: 0.97, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.98, y: 6 }}
-        transition={{ duration: 0.18, ease: "easeOut" }}
+        initial={{ opacity: 0, y: 16, scale: 0.99 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 12 }}
+        transition={{ duration: 0.22, ease: EASE }}
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[80dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-[var(--color-surface)] shadow-[var(--shadow-modal)] ring-1 ring-inset ring-[var(--color-line)]"
+        className="z-[var(--z-modal)] flex max-h-[82dvh] w-full max-w-lg flex-col overflow-hidden rounded-3xl bg-[var(--color-raise)] shadow-[var(--shadow-modal)]"
       >
-        <header className="border-b border-[var(--color-line-soft)] p-6">
-          <h2 className="text-lg font-semibold text-balance text-[var(--color-ink)]">
+        <header className="px-7 pb-4 pt-6">
+          <h2 className="text-balance text-[17px] font-semibold leading-snug text-[var(--color-ink)]">
             {row.title || row.id}
           </h2>
-          <p className="mt-1.5 font-[var(--font-mono)] text-xs text-[var(--color-ink-3)]">
-            {row.kind} · {row.agentType} · credentials shown as{" "}
-            <span className="text-[var(--color-ink-2)]">mwk_••••••</span>
+          <p className="mt-1.5 font-[var(--font-mono)] text-[11px] text-[var(--color-ink-3)]">
+            {row.kind} · {row.agentType} · {status}
           </p>
         </header>
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto px-7 pb-3">
           {messages && messages.length > 0 ? (
-            <ol className="flex flex-col gap-4">
+            <ol className="flex flex-col gap-5">
               {messages.map((m) => (
-                <li
-                  key={`${m.role}:${m.id}`}
-                  className="border-l-2 border-[var(--color-line)] pl-3.5"
-                >
-                  <span className="font-[var(--font-mono)] text-[11px] uppercase tracking-wide text-[var(--color-ink-3)]">
+                <li key={`${m.role}:${m.id}`}>
+                  <div className="mb-1 font-[var(--font-mono)] text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
                     {m.role}
-                  </span>
+                  </div>
                   <p
-                    className={`mt-0.5 text-sm text-pretty ${m.role === "thought" ? "text-[var(--color-ink-3)] italic" : "text-[var(--color-ink)]"}`}
+                    className={`text-pretty text-[14px] leading-relaxed ${m.role === "thought" ? "italic text-[var(--color-ink-3)]" : "text-[var(--color-ink-2)]"}`}
                   >
                     {m.text}
                   </p>
@@ -183,26 +173,24 @@ const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose
               ))}
             </ol>
           ) : loading ? (
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-5">
               {[0, 1, 2].map((i) => (
-                <div key={i} className="flex flex-col gap-1.5 border-l-2 border-[var(--color-line)] pl-3.5">
-                  <div className="h-2.5 w-16 animate-pulse rounded bg-[var(--color-surface-2)]" />
-                  <div className="h-3.5 w-3/4 animate-pulse rounded bg-[var(--color-surface-2)]" />
+                <div key={i} className="flex flex-col gap-2">
+                  <div className="h-2 w-12 animate-pulse rounded bg-[var(--color-hair)]" />
+                  <div className="h-3 w-11/12 animate-pulse rounded bg-[var(--color-hair)]" />
+                  <div className="h-3 w-3/5 animate-pulse rounded bg-[var(--color-hair)]" />
                 </div>
               ))}
             </div>
           ) : (
-            <div className="flex flex-col items-center gap-2 py-14 text-center">
-              <p className="text-sm text-[var(--color-ink-2)]">No output recorded</p>
-              <p className="text-xs text-[var(--color-ink-3)]">
-                This task didn't emit any agent messages.
-              </p>
-            </div>
+            <p className="py-16 text-center text-[13px] text-[var(--color-ink-3)]">
+              No agent output was recorded.
+            </p>
           )}
         </div>
-        <footer className="border-t border-[var(--color-line-soft)] px-6 py-3.5">
-          <span className="text-xs text-[var(--color-ink-3)]">
-            Read-only — you can watch delegated work here, not steer it. Comments coming soon.
+        <footer className="px-7 pb-6 pt-3">
+          <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
+            watching only · credentials never leave the runtime · esc to close
           </span>
         </footer>
       </motion.div>
@@ -210,84 +198,139 @@ const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose
   );
 };
 
-// ── Board ───────────────────────────────────────────────────────────────────
 const App: React.FC = () => {
-  const { data, isLoading } = useSWR<{ rows: BoardRow[]; capped: boolean }>("/board", fetcher, {
-    refreshInterval: 5000,
-  });
+  const { data, isLoading } = useSWR<{ rows: BoardRow[]; lastClosedAt: string | null }>(
+    "/board",
+    fetcher,
+    { refreshInterval: 5000 },
+  );
+  const liveStatus = useBoard((s) => s.liveStatus);
   const [open, setOpen] = useState<BoardRow | null>(null);
+  const [showQuiet, setShowQuiet] = useState(false);
   useEffect(() => connectStream(), []);
+
   const rows = data?.rows ?? [];
-  const activeCount = rows.filter((r) => r.live).length;
+  const { demands, running, done } = useMemo(() => {
+    const demands: BoardRow[] = [];
+    const running: BoardRow[] = [];
+    const done: BoardRow[] = [];
+    for (const row of rows) {
+      const status = liveStatus[`${row.kind}:${row.id}`] ?? row.status;
+      const c = classify(row.kind, status);
+      if (NEEDS_HUMAN(c)) demands.push(row);
+      else if (c === "running") running.push(row);
+      else done.push(row);
+    }
+    return { demands, running, done };
+    // biome-ignore lint/correctness/useExhaustiveDependencies: liveStatus regroups
+  }, [rows, liveStatus]);
+
+  const calm = demands.length === 0;
+  const quietCount = running.length + done.length;
+  const lastDelivered = ago(data?.lastClosedAt ?? null);
 
   return (
-    <div className="mx-auto min-h-dvh max-w-3xl px-6 py-10">
-      <header className="mb-8">
-        <div className="flex items-baseline gap-3">
-          <span className="font-[var(--font-mono)] text-base font-semibold text-[var(--color-ink)]">
-            meanwhile
-          </span>
-          <span className="font-[var(--font-mono)] text-sm text-[var(--color-ink-3)]">
-            waiting for
-          </span>
-        </div>
-        <p className="mt-1.5 text-sm text-pretty text-[var(--color-ink-2)]">
-          Work you delegated to AI agents.{" "}
-          <span className="tnum text-[var(--color-ink-3)]">{activeCount} active</span>.
-        </p>
-      </header>
+    <div className="mx-auto flex min-h-dvh max-w-xl flex-col px-6 py-14 sm:py-20">
+      {/* Masthead — whisper-quiet; the verdict is the hero, not the brand. */}
+      <div className="mb-14 flex items-center justify-between">
+        <span className="font-[var(--font-mono)] text-[12px] tracking-[0.04em] text-[var(--color-ink-3)]">
+          meanwhile
+        </span>
+        <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
+          waiting for
+        </span>
+      </div>
 
+      {/* ── The Verdict ── */}
       {isLoading ? (
-        <div className="flex flex-col gap-2.5">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="h-[68px] animate-pulse rounded-xl bg-[var(--color-surface)] ring-1 ring-inset ring-[var(--color-line-soft)]"
-            />
-          ))}
-        </div>
-      ) : rows.length === 0 ? (
-        <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-[var(--color-line)] py-20 text-center">
-          <p className="text-sm text-[var(--color-ink-2)]">Nothing delegated yet</p>
-          <p className="text-xs text-[var(--color-ink-3)]">
-            Runs and sessions will appear here as they start.
-          </p>
-        </div>
+        <div className="h-12 w-3/4 animate-pulse rounded-lg bg-[var(--color-raise)]" />
       ) : (
-        <div className="flex flex-col gap-7">
-          {BUCKETS.map((bucket) => {
-            const inBucket = rows.filter((r) => rowBucket(r) === bucket.key);
-            if (inBucket.length === 0) return null;
-            return (
-              <section key={bucket.key}>
-                <div className="mb-2.5 flex items-center gap-2 px-1">
-                  <span className="size-1.5 rounded-full" style={{ backgroundColor: bucket.tone }} />
-                  <h2 className="font-[var(--font-mono)] text-[11px] font-medium uppercase tracking-wide text-[var(--color-ink-2)]">
-                    {bucket.label}
-                  </h2>
-                  <span className="tnum font-[var(--font-mono)] text-[11px] text-[var(--color-ink-3)]">
-                    {inBucket.length}
-                  </span>
-                </div>
-                <div className="flex flex-col gap-2.5">
-                  <AnimatePresence mode="popLayout">
-                    {inBucket.map((row, i) => (
-                      <Card
-                        key={`${row.kind}:${row.id}`}
-                        row={row}
-                        index={i}
-                        onOpen={() => setOpen(row)}
-                      />
-                    ))}
-                  </AnimatePresence>
-                </div>
-              </section>
-            );
-          })}
-        </div>
+        <AnimatePresence mode="wait">
+          {calm ? (
+            <motion.div
+              key="calm"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <h1 className="text-balance text-[34px] font-semibold leading-[1.1] tracking-[-0.02em] text-[var(--color-ink)] sm:text-[40px]">
+                Nothing needs you.
+              </h1>
+              <p className="mt-4 text-[15px] text-[var(--color-ink-3)]">
+                {quietCount === 0
+                  ? "No delegated work yet."
+                  : `${quietCount} ${quietCount === 1 ? "task is" : "tasks are"} handling themselves.`}
+              </p>
+              {/* Trust anchor — "fine" is believable next to recent evidence. */}
+              {lastDelivered ? (
+                <p className="mt-2 font-[var(--font-mono)] text-[12px] text-[var(--color-ink-4)]">
+                  last delivered · {lastDelivered}
+                </p>
+              ) : null}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="alert"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.3 }}
+            >
+              <h1 className="text-balance text-[30px] font-semibold leading-[1.12] tracking-[-0.02em] text-[var(--color-ink)] sm:text-[34px]">
+                <span className="tnum" style={{ color: "var(--color-wait)" }}>
+                  {demands.length}
+                </span>{" "}
+                {demands.length === 1 ? "task needs" : "tasks need"} your call.
+              </h1>
+              <div className="mt-8 flex flex-col gap-3">
+                <AnimatePresence initial={false}>
+                  {demands.map((row) => (
+                    <Demand key={`${row.kind}:${row.id}`} row={row} onOpen={() => setOpen(row)} />
+                  ))}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       )}
 
-      <AnimatePresence>{open ? <Detail row={open} onClose={() => setOpen(null)} /> : null}</AnimatePresence>
+      {/* ── Background inventory — collapsed by default, opt-in to read ── */}
+      {!isLoading && quietCount > 0 ? (
+        <div className="mt-auto pt-16">
+          <button
+            type="button"
+            onClick={() => setShowQuiet((v) => !v)}
+            className="flex items-center gap-2 font-[var(--font-mono)] text-[11px] uppercase tracking-[0.08em] text-[var(--color-ink-4)] transition-colors hover:text-[var(--color-ink-3)]"
+          >
+            <span>{showQuiet ? "▾" : "▸"}</span>
+            <span>
+              {running.length} running · {done.length} closed
+            </span>
+          </button>
+          <AnimatePresence initial={false}>
+            {showQuiet ? (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.24, ease: EASE }}
+                style={{ overflow: "hidden" }}
+              >
+                <div className="mt-3 flex flex-col gap-0.5">
+                  {[...running, ...done].map((row) => (
+                    <QuietRow key={`${row.kind}:${row.id}`} row={row} onOpen={() => setOpen(row)} />
+                  ))}
+                </div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        </div>
+      ) : null}
+
+      <AnimatePresence>
+        {open ? <Detail row={open} onClose={() => setOpen(null)} /> : null}
+      </AnimatePresence>
     </div>
   );
 };

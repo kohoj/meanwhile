@@ -70,10 +70,12 @@ const runRow = (run: Run): BoardRow => ({
   live: isRunActive(run.status),
 });
 
-const sessionRow = (session: AgentSession): BoardRow => ({
+const sessionRow = (session: AgentSession, title?: string): BoardRow => ({
   kind: "session",
+  // A delegator reads the ask, not a UUID. Fall back to plain words describing
+  // the session, never a raw id, when there is no first prompt yet.
   id: session.id,
-  title: session.id,
+  title: title || `An open ${session.agentType} session`,
   agentType: session.agentType,
   status: session.status,
   bucket: sessionBucket(session.status),
@@ -125,15 +127,27 @@ export class BoardServer {
     return this.#asset(url.pathname);
   }
 
+  // A session's title is its first prompt — the human's own words for the ask.
+  async #sessionTitle(id: string): Promise<string | undefined> {
+    try {
+      const page = await this.#client.sessions.turns(id, { limit: 1 });
+      return page.items[0]?.prompt?.slice(0, 120);
+    } catch {
+      return undefined;
+    }
+  }
+
   // ---- read: board snapshot ------------------------------------------------
   async #board(): Promise<Response> {
     const [runs, sessions] = await Promise.all([
       this.#client.runs.list({ limit: 100 }),
       this.#client.sessions.list({ limit: 100 }),
     ]);
-    const rows = [...runs.items.map(runRow), ...sessions.items.map(sessionRow)].sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt),
-    );
+    const sessionTitles = await Promise.all(sessions.items.map((s) => this.#sessionTitle(s.id)));
+    const rows = [
+      ...runs.items.map(runRow),
+      ...sessions.items.map((s, i) => sessionRow(s, sessionTitles[i])),
+    ].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const liveCount = rows.filter((r) => r.live).length;
     const capped = liveCount > this.#maxLive;
     if (capped) {
@@ -142,7 +156,16 @@ export class BoardServer {
           `following the ${this.#maxLive} newest live, the rest refresh on poll`,
       );
     }
-    return new Response(JSON.stringify({ rows, maxLive: this.#maxLive, capped }), {
+    // Trust anchor for the calm state: when did work last close? "Everything is
+    // fine" is more believable next to evidence that the system was recently
+    // doing something.
+    const lastClosedAt =
+      rows
+        .filter((r) => !r.live)
+        .map((r) => r.updatedAt)
+        .sort()
+        .at(-1) ?? null;
+    return new Response(JSON.stringify({ rows, maxLive: this.#maxLive, capped, lastClosedAt }), {
       headers: jsonHeaders(),
     });
   }

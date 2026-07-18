@@ -1,39 +1,34 @@
 @import "tailwindcss";
 
-/* ── Design system ────────────────────────────────────────────────────────
-   "Control-room calm" for anxious delegators: a near-neutral dark canvas where
-   color is spent only on task status. No gradients, no purple. Depth comes from
-   layered shadows, not borders (shadows adapt to any surface). Tuned against
-   the ui-skills baseline (baseline-ui, emil-design-eng, make-interfaces-feel-better).
+/* ── "The Verdict" ─────────────────────────────────────────────────────────
+   One principle, from ISA-101 high-performance HMI: HEALTHY = NO SIGNAL.
+   The resting board is near-empty and colorless — that emptiness IS the "all
+   clear". Color, weight, and motion are rationed to the one thing that needs a
+   human. We deliberately leave the AI-default near-black + neon palette: this
+   is a warm ink room, not a sci-fi dashboard. OKLCH throughout.
 */
 @theme {
-  /* Neutral surface ramp — cool graphite, not tinted blue. */
-  --color-bg: #0b0c0e;
-  --color-surface: #141619;
-  --color-surface-2: #1b1e22;
-  --color-line: #262a30;
-  --color-line-soft: #1f2328;
+  /* Warm ink surface — "a room after the lights are dimmed", not pure black. */
+  --color-bg: oklch(0.17 0.008 60);
+  --color-raise: oklch(0.21 0.009 60);
+  --color-hair: oklch(0.29 0.008 60);
 
-  /* Text ramp. */
-  --color-ink: #f2f4f7;
-  --color-ink-2: #a8b0bd;
-  --color-ink-3: #6b7280;
+  /* Ink ramp, warm-neutral. Resting text lives here — greyscale, no status. */
+  --color-ink: oklch(0.95 0.006 70);
+  --color-ink-2: oklch(0.74 0.008 70);
+  --color-ink-3: oklch(0.55 0.008 70);
+  --color-ink-4: oklch(0.4 0.008 70); /* the near-invisible resting inventory */
 
-  /* Status — the only saturated color in the system. Colorblind-safe hues,
-     each always paired with an icon + label so color is never the sole signal. */
-  --color-running: #3b82f6;
-  --color-waiting: #f59e0b;
-  --color-recovering: #f59e0b;
-  --color-ok: #22c55e;
-  --color-bad: #ef4444;
-  --color-accent: #e2e8f0; /* restrained near-white accent, never purple */
+  /* The ONLY colors in the system — and only "needs you" ever earns one. */
+  --color-wait: oklch(0.76 0.13 70); /* amber: a human decision is pending */
+  --color-crash: oklch(0.62 0.17 35); /* desaturated terracotta: it broke */
+  --color-heal: oklch(0.7 0.1 145); /* muted green: recovering / all-clear tick */
 
   --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+  --shadow-modal: 0 32px 80px oklch(0 0 0 / 0.6), 0 8px 24px oklch(0 0 0 / 0.45);
 
-  /* Layered shadow depth (make-interfaces-feel-better: shadows over borders). */
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 1px rgba(0, 0, 0, 0.2);
-  --shadow-lift: 0 4px 12px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.25);
-  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.55), 0 8px 20px rgba(0, 0, 0, 0.4);
+  --z-backdrop: 40;
+  --z-modal: 50;
 }
 
 html,
@@ -44,26 +39,25 @@ body,
   background: var(--color-bg);
   color: var(--color-ink);
   font-family: Inter, -apple-system, system-ui, sans-serif;
-  /* Crisper text on macOS (make-interfaces-feel-better #8). */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-/* Dynamically-updating numbers never cause layout shift (#9). */
 .tnum {
   font-variant-numeric: tabular-nums;
 }
 
-/* Entrance micro-animation: appear from 0.95 + opacity, never from nothing
-   (emil-design-eng). Compositor props only. */
-@keyframes card-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px) scale(0.98);
-  }
-  to {
+/* The single beacon that breathes — only ever attached to "needs you". */
+@keyframes breathe {
+  0%,
+  100% {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.9);
   }
 }
 
@@ -72,6 +66,7 @@ body,
   *::before,
   *::after {
     animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
 }
