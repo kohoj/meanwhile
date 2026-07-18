@@ -198,8 +198,132 @@ const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose
   );
 };
 
+// ── Delegate — the one thing you can start here. Intent first: the ask is the
+// hero input; agent and repo are secondary. ─────────────────────────────────
+const DelegateDialog: React.FC<{ onClose: () => void; onDone: () => void }> = ({
+  onClose,
+  onDone,
+}) => {
+  const [prompt, setPrompt] = useState("");
+  const [agentType, setAgentType] = useState("demo");
+  const [repo, setRepo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const submit = async () => {
+    if (!prompt.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/delegate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: prompt.trim(), agentType, repo: repo.trim(), kind: "run" }),
+      });
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({ error: "Could not delegate." }));
+        setError(error ?? "Could not delegate.");
+        setBusy(false);
+        return;
+      }
+      onDone();
+    } catch {
+      setError("Could not reach the control plane.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.16 }}
+      onClick={onClose}
+      className="fixed inset-0 z-[var(--z-backdrop)] flex items-end justify-center bg-black/60 p-4 sm:items-center sm:p-6"
+    >
+      <motion.div
+        role="dialog"
+        aria-modal
+        initial={{ opacity: 0, y: 16, scale: 0.99 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 12 }}
+        transition={{ duration: 0.22, ease: EASE }}
+        onClick={(e) => e.stopPropagation()}
+        className="z-[var(--z-modal)] w-full max-w-lg overflow-hidden rounded-3xl bg-[var(--color-raise)] p-7 shadow-[var(--shadow-modal)]"
+      >
+        <h2 className="text-[17px] font-semibold text-[var(--color-ink)]">Delegate work</h2>
+        <p className="mt-1 text-[13px] text-[var(--color-ink-3)]">
+          Describe the task. An agent picks it up; it shows up on your board.
+        </p>
+
+        <textarea
+          autoFocus
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
+          }}
+          rows={3}
+          placeholder="e.g. Fix the failing auth tests and open a PR"
+          className="mt-5 w-full resize-none rounded-xl bg-[var(--color-bg)] p-4 text-[15px] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-1 focus:ring-[var(--color-hair)]"
+        />
+
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+          <label className="flex-1">
+            <span className="font-[var(--font-mono)] text-[11px] uppercase tracking-[0.08em] text-[var(--color-ink-4)]">
+              agent
+            </span>
+            <input
+              value={agentType}
+              onChange={(e) => setAgentType(e.target.value)}
+              className="tnum mt-1 w-full rounded-lg bg-[var(--color-bg)] px-3 py-2 font-[var(--font-mono)] text-[13px] text-[var(--color-ink-2)] focus:outline-none focus:ring-1 focus:ring-[var(--color-hair)]"
+            />
+          </label>
+          <label className="flex-[2]">
+            <span className="font-[var(--font-mono)] text-[11px] uppercase tracking-[0.08em] text-[var(--color-ink-4)]">
+              repository — optional
+            </span>
+            <input
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              placeholder="https://github.com/…"
+              className="mt-1 w-full rounded-lg bg-[var(--color-bg)] px-3 py-2 font-[var(--font-mono)] text-[13px] text-[var(--color-ink-2)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-1 focus:ring-[var(--color-hair)]"
+            />
+          </label>
+        </div>
+
+        {error ? (
+          <p className="mt-4 text-[13px]" style={{ color: "var(--color-crash)" }}>
+            {error}
+          </p>
+        ) : null}
+
+        <div className="mt-6 flex items-center justify-between">
+          <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
+            ⌘↵ to delegate · esc to cancel
+          </span>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!prompt.trim() || busy}
+            className="rounded-lg bg-[var(--color-ink)] px-4 py-2 text-[13px] font-medium text-[var(--color-bg)] transition-opacity duration-150 hover:opacity-90 disabled:opacity-40"
+          >
+            {busy ? "Delegating…" : "Delegate"}
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+};
+
 const App: React.FC = () => {
-  const { data, isLoading } = useSWR<{ rows: BoardRow[]; lastClosedAt: string | null }>(
+  const { data, isLoading, mutate } = useSWR<{ rows: BoardRow[]; lastClosedAt: string | null }>(
     "/board",
     fetcher,
     { refreshInterval: 5000 },
@@ -207,6 +331,7 @@ const App: React.FC = () => {
   const liveStatus = useBoard((s) => s.liveStatus);
   const [open, setOpen] = useState<BoardRow | null>(null);
   const [showQuiet, setShowQuiet] = useState(false);
+  const [delegating, setDelegating] = useState(false);
   useEffect(() => connectStream(), []);
 
   const rows = data?.rows ?? [];
@@ -236,9 +361,13 @@ const App: React.FC = () => {
         <span className="font-[var(--font-mono)] text-[12px] tracking-[0.04em] text-[var(--color-ink-3)]">
           meanwhile
         </span>
-        <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
-          waiting for
-        </span>
+        <button
+          type="button"
+          onClick={() => setDelegating(true)}
+          className="font-[var(--font-mono)] text-[11px] tracking-[0.04em] text-[var(--color-ink-3)] transition-colors duration-150 hover:text-[var(--color-ink)]"
+        >
+          + delegate
+        </button>
       </div>
 
       {/* ── The Verdict ── */}
@@ -330,6 +459,17 @@ const App: React.FC = () => {
 
       <AnimatePresence>
         {open ? <Detail row={open} onClose={() => setOpen(null)} /> : null}
+      </AnimatePresence>
+      <AnimatePresence>
+        {delegating ? (
+          <DelegateDialog
+            onClose={() => setDelegating(false)}
+            onDone={() => {
+              setDelegating(false);
+              mutate();
+            }}
+          />
+        ) : null}
       </AnimatePresence>
     </div>
   );

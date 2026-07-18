@@ -117,6 +117,13 @@ export class BoardServer {
 
   async #handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    // The one write the board allows: DELEGATING new work. It maps to the
+    // client's create* calls only — never cancel, close, interrupt, or delete.
+    // "Read-only for existing work, delegate-only for new work" is enforced by
+    // there being no other mutating path in this file.
+    if (request.method === "POST" && url.pathname === "/delegate") {
+      return this.#delegate(request);
+    }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method Not Allowed", { status: 405, headers: uiHeaders() });
     }
@@ -125,6 +132,64 @@ export class BoardServer {
     const history = url.pathname.match(/^\/task\/(run|session)\/([\w-]+)\/events$/);
     if (history) return this.#history(history[1] as TaskKind, history[2] ?? "", request.signal);
     return this.#asset(url.pathname);
+  }
+
+  // ---- write (the only one): delegate new work ----------------------------
+  // Accepts the delegator's plain intent and maps it to the client's create
+  // calls. It never touches an existing task. Idempotency key is minted here so
+  // a double-submit can't create duplicate work.
+  async #delegate(request: Request): Promise<Response> {
+    let body: { prompt?: string; agentType?: string; kind?: string; repo?: string };
+    try {
+      body = await request.json();
+    } catch {
+      return this.#badRequest("Could not read the request.");
+    }
+    const prompt = (body.prompt ?? "").trim();
+    const agentType = (body.agentType ?? "").trim();
+    if (!prompt) return this.#badRequest("Describe what you want done.");
+    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(agentType)) {
+      return this.#badRequest("Pick an agent.");
+    }
+    const repo = (body.repo ?? "").trim();
+    // A delegator gives intent, not files. Use their repo if provided, else a
+    // minimal placeholder workspace so the agent has somewhere to work.
+    const workspace = repo
+      ? { type: "repository" as const, url: repo, revision: "main" }
+      : {
+          type: "files" as const,
+          files: [{ path: "TASK.md", contentBase64: btoa(prompt), mode: 0o644 }],
+        };
+    const idempotencyKey = crypto.randomUUID();
+    try {
+      if (body.kind === "session") {
+        const s = await this.#client.sessions.create(
+          { workspace, agentType },
+          { idempotencyKey },
+        );
+        await this.#client.sessions.send(s.id, prompt, { idempotencyKey: crypto.randomUUID() });
+        return new Response(JSON.stringify({ kind: "session", id: s.id }), {
+          status: 201,
+          headers: jsonHeaders(),
+        });
+      }
+      const run = await this.#client.runs.create({ workspace, agentType, prompt }, { idempotencyKey });
+      return new Response(JSON.stringify({ kind: "run", id: run.id }), {
+        status: 201,
+        headers: jsonHeaders(),
+      });
+    } catch (error) {
+      // Surface a safe, human message; never the raw provider/kernel error.
+      const code = error instanceof Error ? error.name : "error";
+      return this.#badRequest(`Could not delegate the work (${code}).`);
+    }
+  }
+
+  #badRequest(message: string): Response {
+    return new Response(JSON.stringify({ error: message }), {
+      status: 400,
+      headers: jsonHeaders(),
+    });
   }
 
   // A session's title is its first prompt — the human's own words for the ask.
