@@ -1,28 +1,31 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion } from "motion/react";
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import useSWR from "swr";
 import { type BoardRow, connectStream, useBoard } from "./store";
 import "./styles.css";
 
+// ── Status vocabulary ──────────────────────────────────────────────────────
+// Each bucket carries a color AND a glyph AND a label — color is never the sole
+// signal (accessibility). Buckets are ordered by "needs your attention first".
 const BUCKETS = [
-  { key: "waiting", label: "Waiting on you", color: "var(--color-waiting)", icon: "◷" },
-  { key: "recovering", label: "Recovering", color: "var(--color-recovering)", icon: "↻" },
-  { key: "running", label: "Running", color: "var(--color-running)", icon: "●" },
-  { key: "closed", label: "Closed", color: "var(--color-ok)", icon: "✓" },
+  { key: "waiting", label: "Waiting on you", tone: "var(--color-waiting)" },
+  { key: "recovering", label: "Recovering", tone: "var(--color-recovering)" },
+  { key: "running", label: "Running", tone: "var(--color-running)" },
+  { key: "closed", label: "Closed", tone: "var(--color-ink-3)" },
 ] as const;
 
-const STATUS_COLOR: Record<string, string> = {
+const STATUS_TONE: Record<string, string> = {
   running: "var(--color-running)",
   provisioning: "var(--color-running)",
-  queued: "var(--color-dim)",
+  queued: "var(--color-ink-3)",
   idle: "var(--color-waiting)",
-  recovering: "var(--color-recovering)",
+  closing: "var(--color-running)",
   continuity_lost: "var(--color-recovering)",
   succeeded: "var(--color-ok)",
   closed: "var(--color-ok)",
   failed: "var(--color-bad)",
-  cancelled: "var(--color-dim)",
+  cancelled: "var(--color-ink-3)",
   timed_out: "var(--color-bad)",
 };
 
@@ -39,204 +42,252 @@ const bucketFor = (kind: string, status: string): string => {
   return "running";
 };
 
-// Resolve a row's current bucket, preferring the live SSE status over the
-// snapshot. Not a hook — read directly so it can run inside a filter callback.
 const rowBucket = (row: BoardRow): string => {
   const live = useBoard.getState().liveStatus[`${row.kind}:${row.id}`];
   return live ? bucketFor(row.kind, live) : row.bucket;
 };
 
-const Dot: React.FC<{ status: string; live: boolean }> = ({ status, live }) => (
-  <span
-    style={{
-      display: "inline-block",
-      width: 10,
-      height: 10,
-      borderRadius: 999,
-      background: STATUS_COLOR[status] ?? "var(--color-dim)",
-      boxShadow: live ? `0 0 10px ${STATUS_COLOR[status] ?? "transparent"}` : "none",
-    }}
-  />
-);
+// ── Status dot ──────────────────────────────────────────────────────────────
+// A live task's dot breathes; a settled one is still. Only opacity animates.
+const Dot: React.FC<{ status: string; live: boolean }> = ({ status, live }) => {
+  const tone = STATUS_TONE[status] ?? "var(--color-ink-3)";
+  return (
+    <span className="relative inline-flex size-2.5 items-center justify-center">
+      {live ? (
+        <motion.span
+          className="absolute inline-flex size-2.5 rounded-full"
+          style={{ backgroundColor: tone }}
+          animate={{ opacity: [0.35, 0.15, 0.35] }}
+          transition={{ duration: 2, repeat: Number.POSITIVE_INFINITY, ease: "easeInOut" }}
+        />
+      ) : null}
+      <span className="inline-flex size-1.5 rounded-full" style={{ backgroundColor: tone }} />
+    </span>
+  );
+};
 
-const Card: React.FC<{ row: BoardRow; onOpen: () => void }> = ({ row, onOpen }) => {
+// ── Task card ─────────────────────────────────────────────────────────────
+const Card: React.FC<{ row: BoardRow; index: number; onOpen: () => void }> = ({
+  row,
+  index,
+  onOpen,
+}) => {
   const liveStatus = useBoard((s) => s.liveStatus[`${row.kind}:${row.id}`]);
   const status = liveStatus ?? row.status;
+  const tone = STATUS_TONE[status] ?? "var(--color-ink-3)";
   return (
     <motion.button
-      layout
+      type="button"
       onClick={onOpen}
-      initial={{ opacity: 0, y: 16 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.98 }}
-      transition={{ type: "spring", stiffness: 260, damping: 26 }}
-      style={{
-        textAlign: "left",
-        background: "var(--color-card)",
-        border: "1px solid var(--color-border)",
-        borderRadius: 14,
-        padding: "18px 20px",
-        cursor: "pointer",
-        width: "100%",
-      }}
+      exit={{ opacity: 0, y: -4 }}
+      transition={{ duration: 0.18, ease: "easeOut", delay: Math.min(index * 0.04, 0.24) }}
+      whileTap={{ scale: 0.99 }}
+      className="group flex w-full items-center gap-4 rounded-xl bg-[var(--color-surface)] p-4 text-left shadow-[var(--shadow-card)] ring-1 ring-inset ring-[var(--color-line-soft)] transition-shadow duration-150 hover:shadow-[var(--shadow-lift)]"
     >
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-        <span style={{ fontWeight: 600, fontSize: 16 }}>{row.title || row.id}</span>
-        <span style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
-          <Dot status={status} live={row.live} />
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--color-dim)" }}>
-            {status}
-          </span>
+      <span
+        aria-hidden
+        className="h-9 w-0.5 shrink-0 rounded-full"
+        style={{ backgroundColor: tone }}
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[15px] font-medium text-pretty text-[var(--color-ink)]">
+          {row.title || row.id}
         </span>
-      </div>
-      <div
-        style={{ marginTop: 8, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--color-faint)" }}
-      >
-        {row.kind} · {row.agentType}
-      </div>
+        <span className="mt-1 block truncate font-[var(--font-mono)] text-xs text-[var(--color-ink-3)]">
+          {row.kind} · {row.agentType}
+        </span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2">
+        <Dot status={status} live={row.live} />
+        <span className="tnum font-[var(--font-mono)] text-xs text-[var(--color-ink-2)]">
+          {status}
+        </span>
+      </span>
     </motion.button>
   );
 };
 
+// ── Task detail ─────────────────────────────────────────────────────────────
 const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose }) => {
   const runTl = useBoard((s) => s.runTimelines[row.id]);
   const sessTl = useBoard((s) => s.sessionTimelines[row.id]);
+  const loadHistory = useBoard((s) => s.loadHistory);
   const messages = row.kind === "run" ? runTl?.messages : sessTl?.messages;
+  const [loading, setLoading] = useState(!messages);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  // A task fan-in never followed (typically closed) has no live timeline —
+  // fetch its full history on open.
+  useEffect(() => {
+    let alive = true;
+    if (!messages || messages.length === 0) {
+      setLoading(true);
+      loadHistory(row.kind, row.id).finally(() => alive && setLoading(false));
+    } else {
+      setLoading(false);
+    }
+    return () => {
+      alive = false;
+    };
+  }, [row.kind, row.id, loadHistory, messages]);
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
+      transition={{ duration: 0.15, ease: "easeOut" }}
       onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        padding: 40,
-      }}
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6"
     >
       <motion.div
-        initial={{ scale: 0.96, y: 12 }}
-        animate={{ scale: 1, y: 0 }}
-        exit={{ scale: 0.96, opacity: 0 }}
+        role="dialog"
+        aria-modal
+        initial={{ opacity: 0, scale: 0.97, y: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.98, y: 6 }}
+        transition={{ duration: 0.18, ease: "easeOut" }}
         onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "var(--color-panel)",
-          border: "1px solid var(--color-border)",
-          borderRadius: 16,
-          width: "min(820px, 100%)",
-          maxHeight: "80vh",
-          overflow: "auto",
-          padding: 28,
-        }}
+        className="flex max-h-[80dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-[var(--color-surface)] shadow-[var(--shadow-modal)] ring-1 ring-inset ring-[var(--color-line)]"
       >
-        <div style={{ fontSize: 20, fontWeight: 700 }}>{row.title || row.id}</div>
-        <div
-          style={{ marginTop: 6, fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--color-dim)" }}
-        >
-          {row.kind} · {row.agentType} · credentials shown as{" "}
-          <span style={{ color: "var(--color-accent)" }}>mwk_••••••</span>
-        </div>
-        <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+        <header className="border-b border-[var(--color-line-soft)] p-6">
+          <h2 className="text-lg font-semibold text-balance text-[var(--color-ink)]">
+            {row.title || row.id}
+          </h2>
+          <p className="mt-1.5 font-[var(--font-mono)] text-xs text-[var(--color-ink-3)]">
+            {row.kind} · {row.agentType} · credentials shown as{" "}
+            <span className="text-[var(--color-ink-2)]">mwk_••••••</span>
+          </p>
+        </header>
+        <div className="flex-1 overflow-y-auto p-6">
           {messages && messages.length > 0 ? (
-            messages.map((m) => (
-              <div
-                key={`${m.role}:${m.id}`}
-                style={{
-                  borderLeft: `2px solid var(--color-border)`,
-                  paddingLeft: 14,
-                  fontSize: 14,
-                  color: m.role === "thought" ? "var(--color-dim)" : "var(--color-text)",
-                }}
-              >
-                <div
-                  style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-faint)" }}
+            <ol className="flex flex-col gap-4">
+              {messages.map((m) => (
+                <li
+                  key={`${m.role}:${m.id}`}
+                  className="border-l-2 border-[var(--color-line)] pl-3.5"
                 >
-                  {m.role}
+                  <span className="font-[var(--font-mono)] text-[11px] uppercase tracking-wide text-[var(--color-ink-3)]">
+                    {m.role}
+                  </span>
+                  <p
+                    className={`mt-0.5 text-sm text-pretty ${m.role === "thought" ? "text-[var(--color-ink-3)] italic" : "text-[var(--color-ink)]"}`}
+                  >
+                    {m.text}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          ) : loading ? (
+            <div className="flex flex-col gap-3">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="flex flex-col gap-1.5 border-l-2 border-[var(--color-line)] pl-3.5">
+                  <div className="h-2.5 w-16 animate-pulse rounded bg-[var(--color-surface-2)]" />
+                  <div className="h-3.5 w-3/4 animate-pulse rounded bg-[var(--color-surface-2)]" />
                 </div>
-                {m.text}
-              </div>
-            ))
+              ))}
+            </div>
           ) : (
-            <div style={{ color: "var(--color-faint)" }}>
-              No events yet, or this task is not being followed live.
+            <div className="flex flex-col items-center gap-2 py-14 text-center">
+              <p className="text-sm text-[var(--color-ink-2)]">No output recorded</p>
+              <p className="text-xs text-[var(--color-ink-3)]">
+                This task didn't emit any agent messages.
+              </p>
             </div>
           )}
         </div>
-        <div style={{ marginTop: 24, fontSize: 13, color: "var(--color-faint)" }}>
-          Comments — coming soon (read-only board; you cannot control a run here).
-        </div>
+        <footer className="border-t border-[var(--color-line-soft)] px-6 py-3.5">
+          <span className="text-xs text-[var(--color-ink-3)]">
+            Read-only — you can watch delegated work here, not steer it. Comments coming soon.
+          </span>
+        </footer>
       </motion.div>
     </motion.div>
   );
 };
 
+// ── Board ───────────────────────────────────────────────────────────────────
 const App: React.FC = () => {
-  const { data } = useSWR<{ rows: BoardRow[]; capped: boolean }>("/board", fetcher, {
+  const { data, isLoading } = useSWR<{ rows: BoardRow[]; capped: boolean }>("/board", fetcher, {
     refreshInterval: 5000,
   });
   const [open, setOpen] = useState<BoardRow | null>(null);
   useEffect(() => connectStream(), []);
   const rows = data?.rows ?? [];
+  const activeCount = rows.filter((r) => r.live).length;
 
   return (
-    <div style={{ maxWidth: 1100, margin: "0 auto", padding: "40px 32px" }}>
-      <header style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 4 }}>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontWeight: 700,
-            fontSize: 20,
-            color: "var(--color-accent)",
-          }}
-        >
-          meanwhile
-        </span>
-        <span style={{ color: "var(--color-dim)", fontFamily: "var(--font-mono)", fontSize: 14 }}>
-          waiting for — delegated work
-        </span>
+    <div className="mx-auto min-h-dvh max-w-3xl px-6 py-10">
+      <header className="mb-8">
+        <div className="flex items-baseline gap-3">
+          <span className="font-[var(--font-mono)] text-base font-semibold text-[var(--color-ink)]">
+            meanwhile
+          </span>
+          <span className="font-[var(--font-mono)] text-sm text-[var(--color-ink-3)]">
+            waiting for
+          </span>
+        </div>
+        <p className="mt-1.5 text-sm text-pretty text-[var(--color-ink-2)]">
+          Work you delegated to AI agents.{" "}
+          <span className="tnum text-[var(--color-ink-3)]">{activeCount} active</span>.
+        </p>
       </header>
-      <div style={{ height: 1, background: "var(--color-border)", margin: "16px 0 32px" }} />
-      <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-        {BUCKETS.map((bucket) => {
-          const inBucket = rows.filter((r) => rowBucket(r) === bucket.key);
-          if (inBucket.length === 0) return null;
-          return (
-            <section key={bucket.key}>
-              <h2
-                style={{
-                  fontSize: 13,
-                  fontFamily: "var(--font-mono)",
-                  color: bucket.color,
-                  textTransform: "uppercase",
-                  letterSpacing: 1,
-                  marginBottom: 12,
-                }}
-              >
-                {bucket.icon} {bucket.label} · {inBucket.length}
-              </h2>
-              <motion.div layout style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <AnimatePresence>
-                  {inBucket.map((row) => (
-                    <Card key={`${row.kind}:${row.id}`} row={row} onOpen={() => setOpen(row)} />
-                  ))}
-                </AnimatePresence>
-              </motion.div>
-            </section>
-          );
-        })}
-        {rows.length === 0 ? (
-          <div style={{ color: "var(--color-faint)", textAlign: "center", padding: 60 }}>
-            No delegated work yet.
-          </div>
-        ) : null}
-      </div>
-      <AnimatePresence>
-        {open ? <Detail row={open} onClose={() => setOpen(null)} /> : null}
-      </AnimatePresence>
+
+      {isLoading ? (
+        <div className="flex flex-col gap-2.5">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="h-[68px] animate-pulse rounded-xl bg-[var(--color-surface)] ring-1 ring-inset ring-[var(--color-line-soft)]"
+            />
+          ))}
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-[var(--color-line)] py-20 text-center">
+          <p className="text-sm text-[var(--color-ink-2)]">Nothing delegated yet</p>
+          <p className="text-xs text-[var(--color-ink-3)]">
+            Runs and sessions will appear here as they start.
+          </p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-7">
+          {BUCKETS.map((bucket) => {
+            const inBucket = rows.filter((r) => rowBucket(r) === bucket.key);
+            if (inBucket.length === 0) return null;
+            return (
+              <section key={bucket.key}>
+                <div className="mb-2.5 flex items-center gap-2 px-1">
+                  <span className="size-1.5 rounded-full" style={{ backgroundColor: bucket.tone }} />
+                  <h2 className="font-[var(--font-mono)] text-[11px] font-medium uppercase tracking-wide text-[var(--color-ink-2)]">
+                    {bucket.label}
+                  </h2>
+                  <span className="tnum font-[var(--font-mono)] text-[11px] text-[var(--color-ink-3)]">
+                    {inBucket.length}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-2.5">
+                  <AnimatePresence mode="popLayout">
+                    {inBucket.map((row, i) => (
+                      <Card
+                        key={`${row.kind}:${row.id}`}
+                        row={row}
+                        index={i}
+                        onOpen={() => setOpen(row)}
+                      />
+                    ))}
+                  </AnimatePresence>
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+
+      <AnimatePresence>{open ? <Detail row={open} onClose={() => setOpen(null)} /> : null}</AnimatePresence>
     </div>
   );
 };

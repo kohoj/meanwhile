@@ -8,6 +8,8 @@ import {
   reduceSessionTimeline,
   reduceTimeline,
   type SessionTimeline,
+  sessionTimelineFromEvents,
+  timelineFromEvents,
 } from "@kohoz/meanwhile/timeline";
 import type { RunEvent, SessionEvent } from "@kohoz/meanwhile/contracts";
 import { create } from "zustand";
@@ -41,6 +43,9 @@ interface BoardState {
   setCapped: (capped: boolean) => void;
   runTimeline: (id: string) => AgentTimeline;
   sessionTimeline: (id: string) => SessionTimeline;
+  // Load a task's full history on demand — used when opening a task that
+  // fan-in never followed live (typically a closed one).
+  loadHistory: (kind: "run" | "session", id: string) => Promise<void>;
 }
 
 export const useBoard = create<BoardState>((set, get) => ({
@@ -74,6 +79,23 @@ export const useBoard = create<BoardState>((set, get) => ({
   setCapped: (capped) => set({ capped }),
   runTimeline: (id) => get().runTimelines[id] ?? emptyTimeline(),
   sessionTimeline: (id) => get().sessionTimelines[id] ?? emptySessionTimeline(),
+
+  loadHistory: async (kind, id) => {
+    const state = get();
+    // Skip if a live stream already populated this task's timeline.
+    if (kind === "run" && state.runTimelines[id]) return;
+    if (kind === "session" && state.sessionTimelines[id]) return;
+    const res = await fetch(`/task/${kind}/${id}/events`);
+    if (!res.ok) return;
+    const { events } = (await res.json()) as { events: unknown[] };
+    if (kind === "run") {
+      const timeline = timelineFromEvents(events as never[]);
+      set((s) => ({ runTimelines: { ...s.runTimelines, [id]: timeline } }));
+    } else {
+      const timeline = sessionTimelineFromEvents(events as never[]);
+      set((s) => ({ sessionTimelines: { ...s.sessionTimelines, [id]: timeline } }));
+    }
+  },
 }));
 
 // Connect the fan-in SSE stream to the store. Returns a disposer that closes the

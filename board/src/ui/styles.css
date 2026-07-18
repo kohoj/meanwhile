@@ -1,22 +1,39 @@
 @import "tailwindcss";
 
-/* Design tokens — "control-room calm": dark, low-chroma, color spent only on
-   status. Continuous with the launch demo video's palette. */
+/* ── Design system ────────────────────────────────────────────────────────
+   "Control-room calm" for anxious delegators: a near-neutral dark canvas where
+   color is spent only on task status. No gradients, no purple. Depth comes from
+   layered shadows, not borders (shadows adapt to any surface). Tuned against
+   the ui-skills baseline (baseline-ui, emil-design-eng, make-interfaces-feel-better).
+*/
 @theme {
-  --color-bg: #0a0e14;
-  --color-panel: #111722;
-  --color-card: #161d2b;
-  --color-border: #232c3d;
-  --color-text: #e6edf3;
-  --color-dim: #7d8998;
-  --color-faint: #4a5568;
-  --color-running: #4b9fff;
-  --color-waiting: #f0b429;
-  --color-recovering: #f0b429;
-  --color-ok: #3fb950;
-  --color-bad: #f85149;
-  --color-accent: #7c72ff;
+  /* Neutral surface ramp — cool graphite, not tinted blue. */
+  --color-bg: #0b0c0e;
+  --color-surface: #141619;
+  --color-surface-2: #1b1e22;
+  --color-line: #262a30;
+  --color-line-soft: #1f2328;
+
+  /* Text ramp. */
+  --color-ink: #f2f4f7;
+  --color-ink-2: #a8b0bd;
+  --color-ink-3: #6b7280;
+
+  /* Status — the only saturated color in the system. Colorblind-safe hues,
+     each always paired with an icon + label so color is never the sole signal. */
+  --color-running: #3b82f6;
+  --color-waiting: #f59e0b;
+  --color-recovering: #f59e0b;
+  --color-ok: #22c55e;
+  --color-bad: #ef4444;
+  --color-accent: #e2e8f0; /* restrained near-white accent, never purple */
+
   --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+
+  /* Layered shadow depth (make-interfaces-feel-better: shadows over borders). */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 1px rgba(0, 0, 0, 0.2);
+  --shadow-lift: 0 4px 12px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.25);
+  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.55), 0 8px 20px rgba(0, 0, 0, 0.4);
 }
 
 html,
@@ -25,12 +42,35 @@ body,
   height: 100%;
   margin: 0;
   background: var(--color-bg);
-  color: var(--color-text);
+  color: var(--color-ink);
   font-family: Inter, -apple-system, system-ui, sans-serif;
+  /* Crisper text on macOS (make-interfaces-feel-better #8). */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Dynamically-updating numbers never cause layout shift (#9). */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Entrance micro-animation: appear from 0.95 + opacity, never from nothing
+   (emil-design-eng). Compositor props only. */
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
   }

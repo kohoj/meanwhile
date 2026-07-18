@@ -120,6 +120,8 @@ export class BoardServer {
     }
     if (url.pathname === "/board") return this.#board();
     if (url.pathname === "/stream") return this.#stream(request);
+    const history = url.pathname.match(/^\/task\/(run|session)\/([\w-]+)\/events$/);
+    if (history) return this.#history(history[1] as TaskKind, history[2] ?? "", request.signal);
     return this.#asset(url.pathname);
   }
 
@@ -143,6 +145,26 @@ export class BoardServer {
     return new Response(JSON.stringify({ rows, maxLive: this.#maxLive, capped }), {
       headers: jsonHeaders(),
     });
+  }
+
+  // ---- read: full event history of one task (for opening a closed task) ----
+  // Paginates the durable event log rather than following live, so a terminal
+  // task — which fan-in never followed — still shows its complete conversation.
+  async #history(kind: TaskKind, id: string, signal: AbortSignal): Promise<Response> {
+    const events: unknown[] = [];
+    let after: number | undefined;
+    const PAGE = 500;
+    const MAX = 5_000; // bound very long histories; the tail is what matters
+    while (events.length < MAX && !signal.aborted) {
+      const page =
+        kind === "run"
+          ? await this.#client.runs.events(id, { after, limit: PAGE, signal })
+          : await this.#client.sessions.events(id, { after, limit: PAGE, signal });
+      events.push(...page.items);
+      if (page.nextCursor === null) break;
+      after = page.nextCursor;
+    }
+    return new Response(JSON.stringify({ kind, id, events }), { headers: jsonHeaders() });
   }
 
   // ---- read: fan-in SSE of active tasks' events ----------------------------
