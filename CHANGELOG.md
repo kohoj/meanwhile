@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - The `remote-live-agent` path is not asserted for this revision. A `pi-acp@0.0.31` boundary maps an internal model/RPC `error` to ACP `end_turn`; the semantic proof rejects the resulting empty response and publishes no receipt, so the Pi live-agent path is not accepted until the adapter is corrected and a clean receipt succeeds. Credentialed Codex and Claude Code paths likewise require a clean `remote-live-agent` receipt on the released revision before they are claimed for it.
 
+## [0.1.3] - 2026-07-18
+
+Evidence scope: the board ships behind `local-control-plane` evidence — its read/delegate/history paths and its structural read-only boundary are verified end to end against a running local control plane (workspace test suite plus headless-browser walkthrough of the calm, alert, and delegate states). It introduces no new `remote-live-agent` claim. The board is distributed as an isolated workspace and is **not** part of the published `@kohoz/meanwhile` package; run it from a clone.
+
+### Added
+
+- A delegator's Waiting-For board (`board/` workspace): a web view for the people who *asked* for the work — teammates, leads, on-call — not the operator who launched it. It answers one question before you read anything — does anything need a human? — with a single verdict ("Nothing needs you" / "N tasks need your call"), rations color and weight to waiting/recovering work only, and opens any task to its agent conversation (live-followed or loaded from durable history for closed tasks). It can delegate new work (`POST /delegate` → `runs.create` / `sessions.create`) but never cancel, close, or mutate an existing task; read-only-for-existing / delegate-only-for-new is structural. It is a read-only consumer of the public client behind its own origin with defensive headers, so the bearer key never reaches the browser. Distributed as an isolated workspace (its React stack never enters the `@kohoz/meanwhile` package); run it from a clone with `bun run board:build && bun run board:dev`.
+
 ## [0.1.2] - 2026-07-18
 
 Evidence scope: this release carries the durable control-plane, session, credential-broker, and packaging work below, each behind `local-control-plane` and deterministic `remote-provider-compatibility` proofs. It does **not** assert any `remote-live-agent` conclusion — those remain per-revision receipts, and the Pi path is known-open (see Unreleased).

@@ -1,6 +1,6 @@
 {
   "name": "@kohoz/meanwhile",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "The trusted system for work you delegate to AI agents: run any ACP coding agent in an isolated runtime with durable, recoverable, auditable, credential-mediated execution.",
   "type": "module",
   "license": "Apache-2.0",
