@@ -240,7 +240,7 @@ Before enabling it in the control plane:
 6. run `doctor` and the mock-bridge integration tests;
 7. run `bun run test:live:cloudflare` with the deployed bridge URL and token; the deterministic suite never auto-enables it from ambient credentials;
 8. run `bun run proof:release:cloudflare` to prove the deterministic ACP/provider compatibility path with complete configured provenance;
-9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require credentialed generation, two-turn continuity across control-plane restart, SDK artifact download, SDK `local-static` deployment, URL verification, OTLP telemetry, cleanup, backup/restore, and second boot for every bundled toolchain;
+9. run `bun run proof:release:cloudflare:codex`, `bun run proof:release:cloudflare:claude`, and `bun run proof:release:cloudflare:pi` to require credentialed generation, explicit Brief-backed follow-up output, two-turn continuity across control-plane restart, SDK artifact download, SDK `local-static` deployment, URL verification, OTLP telemetry, cleanup and credential revocation for both one-shot runs and the session, backup/restore, and second boot for every bundled toolchain;
 10. verify each generated receipt with `bun run proof:verify -- <receipt> --require-clean --commit=<sha>`; an installed toolchain or configured command is not execution evidence;
 11. for release evidence, run the explicit `Remote proof` GitHub workflow on the release revision. Configure bridge URL, runner/image provenance, and region as repository variables; configure the bridge token and relevant agent credential as repository secrets. The workflow repeats the real provider lifecycle, rejects dirty or mismatched evidence, retains the receipt, and signs its artifact provenance;
 12. inspect Cloudflare for leaked test resources.
@@ -337,7 +337,7 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 - [ ] Local provider is disabled for untrusted tenants.
 - [ ] Remote provider shared contract and live lifecycle tests pass.
 - [ ] Any provider admitting durable sessions has evidence for ordered input, replay, reconnect, interrupt, close, and cleanup on the exact bridge/image revision; deterministic contract evidence and live-provider evidence are listed separately rather than merged.
-- [ ] The release receipt verifies as clean and matches the exact revision, including telemetry export and backup restore; remote release requires complete configured runner/image provenance and retained signed artifact provenance.
+- [ ] The release receipt verifies as clean and matches the exact revision, including Brief-backed follow-up evidence, telemetry export, and backup restore; remote release requires complete configured runner/image provenance and retained signed artifact provenance.
 - [ ] Bridge credentials are scoped, stored outside images, and rotatable.
 - [ ] Both cleanup backlogs, run/session queue latency, run/turn outcomes, continuity loss, and storage capacity are monitored.
 - [ ] OTLP compatibility is proven under Bun before export is enabled.

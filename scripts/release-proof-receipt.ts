@@ -2,7 +2,7 @@ import { mkdir, rename, rm } from "node:fs/promises"
 import { dirname } from "node:path"
 import { z } from "zod"
 
-export const RELEASE_PROOF_RECEIPT_VERSION = 1 as const
+export const RELEASE_PROOF_RECEIPT_VERSION = 2 as const
 
 export const releaseProofClassSchema = z.enum([
   "local-control-plane",
@@ -93,6 +93,25 @@ const releaseProofPayloadSchema = z
         sdkDeploymentVerified: z.literal(true),
       })
       .strict(),
+    sharedExecution: z
+      .object({
+        briefId: sha256Schema,
+        sourceRunId: nonEmptyStringSchema,
+        sourceArtifactId: sha256Schema,
+        sourcePath: nonEmptyStringSchema,
+        sourceDigest: sha256Schema,
+        followUpRunId: nonEmptyStringSchema,
+        followUpArtifactId: sha256Schema,
+        cleanupAuditId: nonEmptyStringSchema,
+        credentialLeaseId: nonEmptyStringSchema.nullable(),
+        credentialLeaseRevoked: z.literal(true).nullable(),
+        contextSnapshotVerified: z.literal(true),
+        runnerRevalidationVerified: z.literal(true),
+        semanticReuseVerified: z.literal(true),
+        persistedAfterRestart: z.literal(true),
+        restoredAfterBackup: z.literal(true),
+      })
+      .strict(),
     session: z
       .object({
         id: nonEmptyStringSchema,
@@ -162,82 +181,119 @@ const releaseProofPayloadSchema = z
   })
   .strict()
 
-export const releaseProofReceiptSchema = releaseProofPayloadSchema
+const releaseProofPayloadV1Schema = releaseProofPayloadSchema
+  .omit({ sharedExecution: true })
+  .extend({ schemaVersion: z.literal(1) })
+
+const releaseProofReceiptV2Schema = releaseProofPayloadSchema
   .extend({ receiptDigest: taggedSha256Schema })
-  .superRefine((receipt, context) => {
-    const expectedClass = releaseProofClass(receipt.provider, receipt.agent.type)
-    if (receipt.proofClass !== expectedClass) {
+  .superRefine(refineReceipt)
+
+const releaseProofReceiptV1Schema = releaseProofPayloadV1Schema
+  .extend({ receiptDigest: taggedSha256Schema })
+  .superRefine(refineReceipt)
+
+export const releaseProofReceiptSchema = z.union([
+  releaseProofReceiptV2Schema,
+  releaseProofReceiptV1Schema,
+])
+
+type RefinableReceipt =
+  | z.infer<typeof releaseProofPayloadSchema>
+  | z.infer<typeof releaseProofPayloadV1Schema>
+
+function refineReceipt(receipt: RefinableReceipt, context: z.RefinementCtx): void {
+  const expectedClass = releaseProofClass(receipt.provider, receipt.agent.type)
+  if (receipt.proofClass !== expectedClass) {
+    context.addIssue({
+      code: "custom",
+      path: ["proofClass"],
+      message: `Proof class must be ${expectedClass}`,
+    })
+  }
+
+  const fixture = receipt.agent.type === "demo"
+  if (
+    receipt.agent.executionEvidence !==
+    (fixture ? "deterministic-fixture" : "credentialed-live-agent")
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["agent", "executionEvidence"],
+      message: "Agent execution evidence does not match the selected agent",
+    })
+  }
+  if (receipt.agent.modelIdentityEvidence !== (fixture ? "not-applicable" : "not-attested")) {
+    context.addIssue({
+      code: "custom",
+      path: ["agent", "modelIdentityEvidence"],
+      message: "Model identity evidence does not match the selected agent",
+    })
+  }
+  if (receipt.credentialBoundary.mode !== (fixture ? "not-required" : "brokered")) {
+    context.addIssue({
+      code: "custom",
+      path: ["credentialBoundary", "mode"],
+      message: "Credential evidence does not match the selected agent",
+    })
+  }
+  if ("sharedExecution" in receipt) {
+    const expectedLease = fixture ? null : "revoked"
+    const observedLease =
+      receipt.sharedExecution.credentialLeaseId === null &&
+      receipt.sharedExecution.credentialLeaseRevoked === null
+        ? null
+        : receipt.sharedExecution.credentialLeaseId !== null &&
+            receipt.sharedExecution.credentialLeaseRevoked === true
+          ? "revoked"
+          : "invalid"
+    if (observedLease !== expectedLease) {
       context.addIssue({
         code: "custom",
-        path: ["proofClass"],
-        message: `Proof class must be ${expectedClass}`,
+        path: ["sharedExecution", "credentialLeaseId"],
+        message: "Shared-execution credential evidence does not match the selected agent",
       })
     }
+  }
 
-    const fixture = receipt.agent.type === "demo"
+  if (Date.parse(receipt.finishedAt) < Date.parse(receipt.startedAt)) {
+    context.addIssue({
+      code: "custom",
+      path: ["finishedAt"],
+      message: "Proof completion cannot precede proof start",
+    })
+  }
+
+  if (receipt.provider === "local") {
     if (
-      receipt.agent.executionEvidence !==
-      (fixture ? "deterministic-fixture" : "credentialed-live-agent")
+      receipt.agent.type !== "demo" ||
+      receipt.provenance.runtimeImageReference !== null ||
+      receipt.provenance.runtimeImageDigest !== null ||
+      receipt.provenance.bridgeProtocolVersion !== null ||
+      receipt.provenance.runnerDigestAuthority !== "measured-local-file" ||
+      receipt.provenance.runtimeImageDigestAuthority !== "unavailable"
     ) {
       context.addIssue({
         code: "custom",
-        path: ["agent", "executionEvidence"],
-        message: "Agent execution evidence does not match the selected agent",
+        path: ["provider"],
+        message: "Local proof evidence must describe the deterministic local boundary",
       })
     }
-    if (receipt.agent.modelIdentityEvidence !== (fixture ? "not-applicable" : "not-attested")) {
-      context.addIssue({
-        code: "custom",
-        path: ["agent", "modelIdentityEvidence"],
-        message: "Model identity evidence does not match the selected agent",
-      })
-    }
-    if (receipt.credentialBoundary.mode !== (fixture ? "not-required" : "brokered")) {
-      context.addIssue({
-        code: "custom",
-        path: ["credentialBoundary", "mode"],
-        message: "Credential evidence does not match the selected agent",
-      })
-    }
-
-    if (Date.parse(receipt.finishedAt) < Date.parse(receipt.startedAt)) {
-      context.addIssue({
-        code: "custom",
-        path: ["finishedAt"],
-        message: "Proof completion cannot precede proof start",
-      })
-    }
-
-    if (receipt.provider === "local") {
-      if (
-        receipt.agent.type !== "demo" ||
-        receipt.provenance.runtimeImageReference !== null ||
-        receipt.provenance.runtimeImageDigest !== null ||
-        receipt.provenance.bridgeProtocolVersion !== null ||
-        receipt.provenance.runnerDigestAuthority !== "measured-local-file" ||
-        receipt.provenance.runtimeImageDigestAuthority !== "unavailable"
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["provider"],
-          message: "Local proof evidence must describe the deterministic local boundary",
-        })
-      }
-    } else if (
-      receipt.provenance.runtimeImageReference === null ||
-      receipt.provenance.runtimeImageDigest === null ||
-      receipt.provenance.bridgeProtocolVersion === null ||
-      receipt.provenance.runnerDigestAuthority !== "operator-asserted" ||
-      receipt.provenance.runtimeImageDigestAuthority !== "operator-asserted-platform-evidence" ||
-      !receipt.provenance.configuredIdentityComplete
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["provenance"],
-        message: "Remote release evidence requires complete operator-asserted provenance",
-      })
-    }
-  })
+  } else if (
+    receipt.provenance.runtimeImageReference === null ||
+    receipt.provenance.runtimeImageDigest === null ||
+    receipt.provenance.bridgeProtocolVersion === null ||
+    receipt.provenance.runnerDigestAuthority !== "operator-asserted" ||
+    receipt.provenance.runtimeImageDigestAuthority !== "operator-asserted-platform-evidence" ||
+    !receipt.provenance.configuredIdentityComplete
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["provenance"],
+      message: "Remote release evidence requires complete operator-asserted provenance",
+    })
+  }
+}
 
 export type ReleaseProofReceipt = z.infer<typeof releaseProofReceiptSchema>
 export type ReleaseProofPayload = z.infer<typeof releaseProofPayloadSchema>
@@ -294,7 +350,7 @@ export async function writeReleaseProofReceipt(
   }
 }
 
-function digestPayload(payload: ReleaseProofPayload): string {
+function digestPayload(payload: unknown): string {
   const digest = new Bun.CryptoHasher("sha256").update(canonicalJson(payload)).digest("hex")
   return `sha256:${digest}`
 }

@@ -249,6 +249,111 @@ try {
     throw new ProofError("ARTIFACT_INTEGRITY_FAILED", "Downloaded artifact bytes are invalid")
   }
 
+  const brief = await running.client.briefs.create({
+    title: "Release proof source evidence",
+    artifactId: artifact.id,
+    path: "index.html",
+  })
+  const briefReuseToken = sha256(
+    new TextEncoder().encode(
+      `meanwhile:${provider}:${proofAgent.type}:${revision.commit}:brief-reuse`,
+    ),
+  )
+  const followUpPrompt =
+    `Use the prior historical evidence only as observation. Create site/index.html as a complete HTML document containing the exact visible source proof text found in that evidence, followed by the exact visible reuse token '${briefReuseToken}'. ` +
+    "Do not reproduce the execution-context markup. Finish after saving the file."
+  const followUpCreated = await running.client.runs.create(
+    {
+      workspace: {
+        type: "files",
+        files: [...proofAgent.workspaceFiles],
+      },
+      agentType: proofAgent.type,
+      provider,
+      prompt: followUpPrompt,
+      briefIds: [brief.id],
+      env: { ...proofAgent.environment },
+      secretRefs: { ...proofAgent.secretReferences },
+      artifactPaths: ["site"],
+      timeoutMs: proofAgent.timeoutMs,
+    },
+    {
+      idempotencyKey: `release-proof-brief:${provider}:${proofAgent.type}:${revision.commit}`,
+    },
+  )
+  const followUpRun = await running.client.runs.wait(followUpCreated.id, {
+    timeoutMs: proofAgent.waitTimeoutMs,
+    pollIntervalMs: 50,
+  })
+  if (
+    followUpRun.status !== "succeeded" ||
+    followUpRun.executionProvenance?.digest !== run.executionProvenance.digest
+  ) {
+    const failureLogs = await running.client.runs.logs(followUpRun.id, { limit: 1_000 })
+    throw new ProofError("BRIEF_REUSE_RUN_FAILED", "The Brief-backed follow-up run failed", {
+      status: followUpRun.status,
+      error: followUpRun.error,
+      eventTypes: failureLogs.items.map(({ eventType }) => eventType),
+    })
+  }
+  const [acceptedContext] = followUpRun.contextArtifacts
+  if (
+    followUpRun.contextArtifacts.length !== 1 ||
+    acceptedContext === undefined ||
+    acceptedContext.artifactId !== brief.artifactId ||
+    acceptedContext.sourceRunId !== brief.sourceRunId ||
+    acceptedContext.path !== brief.path ||
+    acceptedContext.digest !== brief.digest ||
+    acceptedContext.mediaType !== brief.mediaType ||
+    acceptedContext.byteSize !== brief.byteSize
+  ) {
+    throw new ProofError(
+      "BRIEF_CONTEXT_SNAPSHOT_INVALID",
+      "The follow-up run did not freeze the selected Brief evidence",
+    )
+  }
+  const followUpLogs = await running.client.runs.logs(followUpRun.id, { limit: 1_000 })
+  const followUpResponse = agentResponseText(followUpLogs.items)
+  if (followUpResponse.trim().length === 0) {
+    throw new ProofError(
+      "BRIEF_REUSE_RESPONSE_MISSING",
+      "The Brief-backed follow-up response was empty",
+    )
+  }
+  const followUpArtifact = (await running.client.artifacts.list(followUpRun.id)).find(
+    ({ logicalPath }) => logicalPath === "site",
+  )
+  if (followUpArtifact === undefined) {
+    throw new ProofError(
+      "BRIEF_REUSE_ARTIFACT_MISSING",
+      "The Brief-backed follow-up artifact was not captured",
+    )
+  }
+  const followUpArtifactDetail = await running.client.artifacts.get(followUpArtifact.id)
+  const followUpDownload = await running.client.artifacts.download(followUpArtifact.id, {
+    path: "index.html",
+  })
+  const followUpBytes = new Uint8Array(await new Response(followUpDownload.body).arrayBuffer())
+  const followUpText = new TextDecoder().decode(followUpBytes)
+  if (
+    followUpBytes.byteLength !== followUpDownload.byteSize ||
+    sha256(followUpBytes) !== followUpDownload.digest ||
+    followUpArtifactDetail.entries.length !== 1 ||
+    !followUpText.includes(previewText) ||
+    !followUpText.includes(briefReuseToken)
+  ) {
+    throw new ProofError(
+      "BRIEF_REUSE_SEMANTICS_INVALID",
+      "The follow-up artifact did not carry the selected historical evidence into new output",
+    )
+  }
+  const followUpCleanupAudit = await waitForAudit(
+    running.client,
+    followUpRun.id,
+    "runtime.destroy",
+    30_000,
+  )
+
   const deployment = await running.client.deployments.wait(
     (
       await running.client.deployments.create(
@@ -385,6 +490,9 @@ try {
   }
 
   const runId = run.id
+  const briefId = brief.id
+  const followUpRunId = followUpRun.id
+  const followUpArtifactId = followUpArtifact.id
   const sessionId = session.id
   const agentSessionId = readySession.agentSessionId
   const deploymentId = deployment.id
@@ -395,6 +503,9 @@ try {
 
   running = await startInstance(config, key.key)
   const recoveredRun = await running.client.runs.get(runId)
+  const recoveredBrief = await running.client.briefs.get(briefId)
+  const recoveredFollowUpRun = await running.client.runs.get(followUpRunId)
+  const recoveredFollowUpArtifact = await running.client.artifacts.get(followUpArtifactId)
   const recoveredDeployment = await running.client.deployments.get(deploymentId)
   const recoveredArtifact = await running.client.artifacts.get(artifact.id)
   const recoveredAudit = await running.client.audit.list({ resourceId: runId, limit: 100 })
@@ -402,6 +513,10 @@ try {
   if (
     recoveredRun.status !== "succeeded" ||
     recoveredRun.executionProvenance?.digest !== provenanceDigest ||
+    recoveredBrief.digest !== brief.digest ||
+    recoveredFollowUpRun.status !== "succeeded" ||
+    recoveredFollowUpRun.contextArtifacts[0]?.digest !== brief.digest ||
+    recoveredFollowUpArtifact.artifact.digest !== followUpArtifact.digest ||
     recoveredDeployment.status !== "succeeded" ||
     recoveredArtifact.artifact.digest !== artifact.digest ||
     recoveredAudit.items.length === 0
@@ -481,6 +596,9 @@ try {
     prompt,
     agentResponse,
     previewText,
+    followUpPrompt,
+    followUpResponse,
+    followUpText,
     firstSessionPrompt,
     firstTurnResponse,
     secondSessionPrompt,
@@ -507,6 +625,9 @@ try {
   await restoreDataRoot(backupDir, restoredConfig)
   running = await startInstance(restoredConfig, key.key)
   const restoredRun = await running.client.runs.get(runId)
+  const restoredBrief = await running.client.briefs.get(briefId)
+  const restoredFollowUpRun = await running.client.runs.get(followUpRunId)
+  const restoredFollowUpArtifact = await running.client.artifacts.get(followUpArtifactId)
   const restoredDeployment = await running.client.deployments.get(deploymentId)
   const restoredArtifact = await running.client.artifacts.get(artifact.id)
   const restoredAudit = await running.client.audit.list({ resourceId: runId, limit: 100 })
@@ -519,10 +640,20 @@ try {
     runId,
     sessionId,
   )
+  const sharedExecutionCredential = sharedExecutionCredentialEvidence(
+    proofAgent,
+    provider,
+    running.application.store,
+    followUpRunId,
+  )
   await assertPreview(deploymentUrl, previewText)
   if (
     restoredRun.status !== "succeeded" ||
     restoredRun.executionProvenance?.digest !== provenanceDigest ||
+    restoredBrief.digest !== brief.digest ||
+    restoredFollowUpRun.status !== "succeeded" ||
+    restoredFollowUpRun.contextArtifacts[0]?.digest !== brief.digest ||
+    restoredFollowUpArtifact.artifact.digest !== followUpArtifact.digest ||
     restoredDeployment.status !== "succeeded" ||
     restoredArtifact.artifact.digest !== artifact.digest ||
     restoredAudit.items.length !== recoveredAudit.items.length ||
@@ -581,6 +712,22 @@ try {
       agentProducedArtifact: true,
       sdkArtifactDownloadVerified: true,
       sdkDeploymentVerified: true,
+    },
+    sharedExecution: {
+      briefId,
+      sourceRunId: runId,
+      sourceArtifactId: artifact.id,
+      sourcePath: brief.path,
+      sourceDigest: brief.digest,
+      followUpRunId,
+      followUpArtifactId,
+      cleanupAuditId: followUpCleanupAudit.id,
+      ...sharedExecutionCredential,
+      contextSnapshotVerified: true,
+      runnerRevalidationVerified: true,
+      semanticReuseVerified: true,
+      persistedAfterRestart: true,
+      restoredAfterBackup: true,
     },
     session: {
       id: sessionId,
@@ -1191,6 +1338,31 @@ function credentialBoundaryEvidence(
     sessionLeaseRevoked: true,
     sourceValuesAbsent: true,
   }
+}
+
+function sharedExecutionCredentialEvidence(
+  agent: PreparedProofAgent,
+  provider: ProofProvider,
+  store: Pick<Store, "getCredentialLeaseInternal">,
+  followUpRunId: string,
+): Pick<ReleaseProofPayload["sharedExecution"], "credentialLeaseId" | "credentialLeaseRevoked"> {
+  if (agent.type === "demo") {
+    return { credentialLeaseId: null, credentialLeaseRevoked: null }
+  }
+
+  const lease = store.getCredentialLeaseInternal("run", followUpRunId)
+  if (
+    lease === null ||
+    lease.provider !== provider ||
+    lease.status !== "revoked" ||
+    lease.revokedAt === null
+  ) {
+    throw new ProofError(
+      "LIVE_AGENT_CREDENTIAL_EVIDENCE_MISSING",
+      "Live-agent proof requires a restored revoked credential lease for the Brief-backed run",
+    )
+  }
+  return { credentialLeaseId: lease.id, credentialLeaseRevoked: true }
 }
 
 async function prepareProofAgent(

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   createReleaseProofReceipt,
+  RELEASE_PROOF_RECEIPT_VERSION,
   releaseProofClass,
   verifyReleaseProofReceipt,
   writeReleaseProofReceipt,
@@ -62,6 +63,23 @@ describe("release proof receipt", () => {
     expect(() => verifyReleaseProofReceipt(mutated)).toThrow(
       "Release proof receipt digest does not match its evidence",
     )
+  })
+
+  test("emits version 2 Brief evidence while retaining version 1 verification", () => {
+    const current = createReleaseProofReceipt(proofInput("local", "demo"))
+    expect(RELEASE_PROOF_RECEIPT_VERSION).toBe(2)
+    expect(current.schemaVersion).toBe(2)
+    if (current.schemaVersion !== 2) throw new Error("Expected a version 2 receipt")
+
+    const {
+      receiptDigest: _receiptDigest,
+      sharedExecution: _sharedExecution,
+      ...currentPayload
+    } = current
+    const legacyPayload = { ...currentPayload, schemaVersion: 1 as const }
+    const legacy = { ...legacyPayload, receiptDigest: digestPayload(legacyPayload) }
+
+    expect(verifyReleaseProofReceipt(legacy)).toEqual(legacy)
   })
 
   test("writes one atomic self-verifying receipt", async () => {
@@ -180,6 +198,23 @@ function proofInput(
       sdkArtifactDownloadVerified: true,
       sdkDeploymentVerified: true,
     },
+    sharedExecution: {
+      briefId: sha256,
+      sourceRunId: "source-run-id",
+      sourceArtifactId: sha256,
+      sourcePath: "index.html",
+      sourceDigest: sha256,
+      followUpRunId: "follow-up-run-id",
+      followUpArtifactId: otherSha256,
+      cleanupAuditId: "follow-up-cleanup-audit",
+      credentialLeaseId: fixture ? null : "follow-up-credential-lease",
+      credentialLeaseRevoked: fixture ? null : true,
+      contextSnapshotVerified: true,
+      runnerRevalidationVerified: true,
+      semanticReuseVerified: true,
+      persistedAfterRestart: true,
+      restoredAfterBackup: true,
+    },
     session: {
       id: "session-id",
       turns: 2,
@@ -219,4 +254,23 @@ function proofInput(
     },
     backup: { digest: sha256, artifacts: 1, deployments: 1, verified: true },
   }
+}
+
+function digestPayload(payload: unknown): string {
+  return `sha256:${new Bun.CryptoHasher("sha256").update(canonicalJson(payload)).digest("hex")}`
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number") {
+    return JSON.stringify(value)
+  }
+  if (typeof value === "string") return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
+  if (typeof value !== "object") throw new TypeError("Receipt is not JSON serializable")
+
+  const record = value as Readonly<Record<string, unknown>>
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    .join(",")}}`
 }

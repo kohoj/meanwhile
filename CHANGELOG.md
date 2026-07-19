@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - The first shared-execution-intelligence loop for one-shot runs: `Brief` is an immutable, owner-curated reference to one bounded text or JSON entry in an earlier run artifact. Owners promote evidence and select ordered `briefIds`; admission freezes the exact source run/artifact/path/digest/media type/size into durable intent and idempotency, and runner launch revalidates those bytes before placing delimiter-escaped, untrusted historical evidence ahead of the current task. HTTP/OpenAPI, typed SDK, CLI (`briefs create|list|get`, `run --brief`), SQLite, restart, and local end-to-end paths share one contract. The Board adds the same explicit “keep output → attach prior brief” loop without gaining task-lifecycle mutation.
+- Release-proof receipt v2 now makes that loop release evidence: it promotes the source artifact, executes and semantically verifies a separate Brief-backed run, proves its frozen context and runner-time revalidation, cleanup, credential revocation when brokered, restart persistence, backup, and restore. The verifier continues to validate already-issued v1 receipts.
 
 ### Changed
 
