@@ -8,6 +8,7 @@ import { createApiKeyRoutes } from "./api/api-keys"
 import { createArtifactRoutes } from "./api/artifacts"
 import { createAuditRoutes } from "./api/audit"
 import { controlRequestBodyLimit } from "./api/body"
+import { createBriefRoutes } from "./api/briefs"
 import { createDeploymentRoutes } from "./api/deployments"
 import { createProviderRoutes, RegistryProviderDiagnostics } from "./api/providers"
 import { createRunRoutes } from "./api/runs"
@@ -43,6 +44,7 @@ import { EnvironmentSecretResolver } from "./secrets"
 import { ApiKeyService } from "./services/api-key-service"
 import { ArtifactService } from "./services/artifact-service"
 import { AuditService } from "./services/audit-service"
+import { BriefService } from "./services/brief-service"
 import { CredentialLeaseReaper } from "./services/credential-lease-reaper"
 import {
   DeploymentDispatcher,
@@ -50,6 +52,7 @@ import {
   StoreDeploymentRepository,
   StoreDeploymentSourceResolver,
 } from "./services/deployment-executor"
+import { ExecutionContext } from "./services/execution-context"
 import { RunExecutor } from "./services/run-executor"
 import { RunService } from "./services/run-service"
 import { RuntimeReaper, RuntimeReaperLoop } from "./services/runtime-reaper"
@@ -134,6 +137,8 @@ export const createApplication = async (
     const catalog = await AgentCatalog.load(config.agentCatalogPath)
     const artifacts = new LocalArtifactStore(config.artifactDir)
     const artifactService = new ArtifactService(store, artifacts)
+    const executionContext = new ExecutionContext(artifactService)
+    const briefService = new BriefService({ store, executionContext })
     const auditService = new AuditService(store)
     const apiKeyService = new ApiKeyService(store)
     const workspaceBundles = new WorkspaceBundleStore(store, artifacts, WORKSPACE_BUNDLE_LIMITS)
@@ -176,6 +181,7 @@ export const createApplication = async (
         maxTotalBytes: 256 * 1024 * 1024,
       },
       secrets,
+      executionContext,
       logger: instrumentation.telemetry.logger,
       telemetry: instrumentation.telemetry,
       concurrency: config.runConcurrency,
@@ -188,6 +194,7 @@ export const createApplication = async (
       secretReferences: secrets,
       providerNames: providerAdmission,
       executionProvenance,
+      briefs: briefService,
       defaultProvider: config.defaultProvider,
     })
     const sessionExecutor = new SessionExecutor({
@@ -341,6 +348,7 @@ export const createApplication = async (
     controlApi.route("/", createRunRoutes(runService))
     controlApi.route("/", createSessionRoutes(sessionService))
     controlApi.route("/", createArtifactRoutes(artifactService))
+    controlApi.route("/", createBriefRoutes(briefService))
     controlApi.route("/", createAuditRoutes(auditService))
     controlApi.route("/", createApiKeyRoutes(apiKeyService))
     controlApi.route("/", createDeploymentRoutes(deploymentExecutor, deploymentDispatcher))

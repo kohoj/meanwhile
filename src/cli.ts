@@ -157,6 +157,9 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
     case "artifacts":
       await artifactsCommand(rest, context)
       return 0
+    case "briefs":
+      await briefsCommand(rest, context)
+      return 0
     case "deploy":
       await createDeployment(rest, context)
       return 0
@@ -217,6 +220,7 @@ async function createRun(args: readonly string[], context: CliContext): Promise<
       "credential-ref",
       "agent",
       "provider",
+      "brief",
       "artifact",
       "env",
       "secret",
@@ -247,6 +251,7 @@ async function createRun(args: readonly string[], context: CliContext): Promise<
     env,
     secretRefs,
     provider,
+    briefIds: [...uniqueValues(parsed.many("brief"), "--brief")],
     artifactPaths: [...uniqueValues(parsed.many("artifact"), "--artifact")],
     timeoutMs,
   }
@@ -365,6 +370,48 @@ async function artifactsCommand(args: readonly string[], context: CliContext): P
     byteSize: content.byteSize,
     mediaType: content.mediaType,
   })
+}
+
+async function briefsCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  const client = apiClient(context)
+  if (subcommand === "create") {
+    const parsed = parseArguments(rest, { values: ["title", "path"] })
+    const artifactId = parsed.onlyPositional()
+    const path = parsed.one("path")
+    const brief = await client.briefs.create(
+      {
+        artifactId,
+        title: requiredOption(parsed, "title"),
+        ...(path === undefined ? {} : { path }),
+      },
+      { signal: context.signal },
+    )
+    await printJson(context, { brief })
+    return
+  }
+  if (subcommand === "list") {
+    const parsed = parseArguments(rest, { values: ["limit", "before"] })
+    parsed.requireNoPositionals()
+    const before = parsed.one("before")
+    await printJson(
+      context,
+      await client.briefs.list({
+        limit: parseInteger(parsed.one("limit") ?? "50", "--limit", 1, 100),
+        ...(before === undefined ? {} : { before }),
+        signal: context.signal,
+      }),
+    )
+    return
+  }
+  if (subcommand === "get") {
+    const briefId = parseArguments(rest).onlyPositional()
+    await printJson(context, {
+      brief: await client.briefs.get(briefId, { signal: context.signal }),
+    })
+    return
+  }
+  throw argumentError("Expected: briefs create|list|get")
 }
 
 async function runLogs(args: readonly string[], context: CliContext): Promise<void> {
@@ -1373,6 +1420,9 @@ Usage:
   meanwhile artifacts list RUN_ID
   meanwhile artifacts get ARTIFACT_ID
   meanwhile artifacts download ARTIFACT_ID [--path PATH] --output FILE
+  meanwhile briefs create ARTIFACT_ID --title TITLE [--path PATH]
+  meanwhile briefs list [--limit N] [--before CURSOR]
+  meanwhile briefs get BRIEF_ID
   meanwhile deploy RUN_ID (--artifact PATH | --workspace PATH) --target NAME --idempotency-key KEY
   meanwhile deployments list [--limit N] [--before CURSOR]
   meanwhile deployments get DEPLOYMENT_ID
@@ -1393,6 +1443,7 @@ Run options:
   --provider NAME             Runtime provider (default: MEANWHILE_DEFAULT_PROVIDER or local)
   --revision REVISION         Repository revision
   --credential-ref env://VAR  Repository credential reference
+  --brief BRIEF_ID            Curated prior evidence to reuse; repeatable
   --artifact PATH             Declared output path; repeatable
   --env NAME=VALUE            Persisted non-secret environment; repeatable
   --secret NAME=env://VAR     Secret reference; repeatable

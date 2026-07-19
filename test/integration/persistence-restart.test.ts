@@ -36,6 +36,16 @@ describe("SQLite persistence", () => {
       env: {},
       secretRefs: {},
       provider: "local",
+      contextArtifacts: [
+        {
+          artifactId: "a".repeat(64),
+          sourceRunId: "prior-run",
+          path: "findings.md",
+          digest: "b".repeat(64),
+          mediaType: "text/markdown; charset=utf-8",
+          byteSize: 42,
+        },
+      ],
       artifactPaths: ["dist"],
       timeoutMs: 60_000,
       createdAt,
@@ -64,6 +74,16 @@ describe("SQLite persistence", () => {
     expect(second.getRun("owner-a", "run-a")).toMatchObject({
       status: "queued",
       executionProvenance: testExecutionProvenanceFor("local"),
+      contextArtifacts: [
+        {
+          artifactId: "a".repeat(64),
+          sourceRunId: "prior-run",
+          path: "findings.md",
+          digest: "b".repeat(64),
+          mediaType: "text/markdown; charset=utf-8",
+          byteSize: 42,
+        },
+      ],
     })
     expect(second.listRunLogs("owner-a", "run-a", 0, 10)).toHaveLength(1)
     expect(second.listAudit("owner-a", "run-a").map((record) => record.action)).toEqual([
@@ -81,6 +101,16 @@ describe("SQLite persistence", () => {
       env: {},
       secretRefs: {},
       provider: "local",
+      contextArtifacts: [
+        {
+          artifactId: "a".repeat(64),
+          sourceRunId: "prior-run",
+          path: "findings.md",
+          digest: "b".repeat(64),
+          mediaType: "text/markdown; charset=utf-8",
+          byteSize: 42,
+        },
+      ],
       artifactPaths: ["dist"],
       timeoutMs: 60_000,
       createdAt,

@@ -122,6 +122,7 @@ If an assumption is false, the associated guarantee is invalid; fail closed wher
 | Enumerate another owner's ID | Every public store method scopes by owner; cross-owner result is `NOT_FOUND` | Timing and aggregate-capacity side channels require separate review |
 | Use leaked provider/storage handle | Handles never cross public APIs and are validated by adapter/bridge | Trusted logs or database compromise can expose handles |
 | Cross-owner artifact dedup leak | Authorization and owner-scoped storage key precede byte lookup; no public global digest oracle | Storage-level aggregate side channels remain possible to operators |
+| Reuse another owner's brief or execution context | Brief promotion, listing, selection, and source resolution are owner-scoped and return `NOT_FOUND` across owners | A stolen owner key authorizes all resources for that owner until revocation |
 
 Authorization must be structural. A route-level precheck followed by an unscoped SQL read is not sufficient.
 
@@ -149,6 +150,7 @@ The agent is expected to modify files and run tools; sandbox isolation, credenti
 | Partial or mutable artifact | Atomic write then publish metadata; content digest; no in-place mutation | Hash implementation or storage compromise can violate integrity |
 | Secret in artifact | Scan for exact resolved secret bytes before persistence; reject or quarantine and audit | Encoded, transformed, derived, or newly obtained secrets may evade exact matching |
 | Malicious media | Preserve bytes and safe media metadata; previews use a hostile-content origin | Users who download/open artifacts still assume client-side risk |
+| Prior-agent prompt injection | Brief promotion and selection are explicit; accepted evidence is text/JSON-only, bounded, content-addressed, revalidated, delimiter-escaped, and labeled as untrusted observation rather than instructions | Models may still follow malicious text; owner curation is authorization, not proof of truth or prompt-injection immunity |
 
 Artifact capture is not a general recursive copy. The collector reads only declared logical paths and treats every filesystem entry as hostile.
 

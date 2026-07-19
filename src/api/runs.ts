@@ -189,7 +189,11 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
     const { provider, ...runInput } = input
     const result = await service.create(
       request,
-      { ...runInput, workspace, ...(provider === undefined ? {} : { provider }) },
+      {
+        ...runInput,
+        workspace,
+        ...(provider === undefined ? {} : { provider }),
+      },
       idempotencyKey,
     )
     const response = { run: RunSchema.parse(result.run) }

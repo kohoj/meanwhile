@@ -222,6 +222,21 @@ export const RunSchema = z
     env: z.record(z.string(), z.string()),
     secretRefs: z.record(z.string(), z.string()),
     provider: z.string(),
+    contextArtifacts: z
+      .array(
+        z
+          .object({
+            artifactId: ArtifactIdentifierSchema,
+            sourceRunId: IdentifierSchema,
+            path: RelativeWorkspacePathSchema,
+            digest: ArtifactIdentifierSchema,
+            mediaType: z.string().min(1).max(256),
+            byteSize: z.number().int().nonnegative(),
+          })
+          .strict(),
+      )
+      .max(16)
+      .readonly(),
     artifactPaths: z.array(z.string()).readonly(),
     timeoutMs: z.number().int().positive(),
     deadlineAt: timestamp.nullable(),
@@ -396,6 +411,37 @@ export const ArtifactDetailSchema = z.object({
   entries: z.array(ArtifactEntrySchema).readonly(),
 })
 
+export const BriefSchema = z
+  .object({
+    id: ArtifactIdentifierSchema,
+    ownerId: IdentifierSchema,
+    title: z.string().min(1).max(160),
+    artifactId: ArtifactIdentifierSchema,
+    sourceRunId: IdentifierSchema,
+    path: RelativeWorkspacePathSchema,
+    digest: ArtifactIdentifierSchema,
+    mediaType: z.string().min(1).max(256),
+    byteSize: z.number().int().nonnegative(),
+    createdAt: timestamp,
+  })
+  .strict()
+  .meta({ id: "Brief" })
+
+export const CreateBriefRequestSchema = z
+  .object({
+    title: z.string().trim().min(1).max(160),
+    artifactId: ArtifactIdentifierSchema,
+    path: RelativeWorkspacePathSchema.optional(),
+  })
+  .strict()
+  .meta({ id: "CreateBriefRequest" })
+
+export const BriefResponseSchema = z.object({ brief: BriefSchema })
+export const BriefPageSchema = z.object({
+  items: z.array(BriefSchema).readonly(),
+  nextCursor: z.string().nullable(),
+})
+
 export const CursorQuerySchema = z
   .object({
     after: z.coerce.number().int().nonnegative().default(0),
@@ -450,6 +496,7 @@ export const CreateRunRequestSchema = z
       .regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/)
       .max(64)
       .optional(),
+    briefIds: z.array(ArtifactIdentifierSchema).max(16).default([]),
     artifactPaths: z.array(RelativeWorkspacePathSchema).max(128).default([]),
     timeoutMs: z.number().int().min(1_000).max(86_400_000).default(3_600_000),
   })
@@ -469,6 +516,13 @@ export const CreateRunRequestSchema = z
         code: "custom",
         message: "Artifact paths must be unique",
         path: ["artifactPaths"],
+      })
+    }
+    if (new Set(value.briefIds).size !== value.briefIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Brief IDs must be unique",
+        path: ["briefIds"],
       })
     }
   })
@@ -734,6 +788,7 @@ export const AuditRecordSchema = z
       "runtime",
       "credential_lease",
       "artifact",
+      "brief",
       "deployment",
     ]),
     resourceId: z.string(),
@@ -756,6 +811,7 @@ export const AuditQuerySchema = CreatedPageQuerySchema.extend({
       "runtime",
       "credential_lease",
       "artifact",
+      "brief",
       "deployment",
     ])
     .optional(),
@@ -871,6 +927,9 @@ export type RunEvent = z.output<typeof RunEventSchema>
 export type Artifact = z.output<typeof ArtifactSchema>
 export type ArtifactEntry = z.output<typeof ArtifactEntrySchema>
 export type ArtifactDetail = z.output<typeof ArtifactDetailSchema>
+export type CreateBriefRequest = z.input<typeof CreateBriefRequestSchema>
+export type Brief = z.output<typeof BriefSchema>
+export type BriefPage = z.output<typeof BriefPageSchema>
 export type ApiKey = z.output<typeof ApiKeySchema>
 export type AuditRecord = z.output<typeof AuditRecordSchema>
 export type AuditPage = z.output<typeof AuditPageSchema>

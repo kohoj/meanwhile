@@ -25,6 +25,8 @@ test("the route inventory is exact and every control operation fails closed", as
     "/artifacts/{id}",
     "/artifacts/{id}/content",
     "/audit",
+    "/briefs",
+    "/briefs/{id}",
     "/deployments",
     "/deployments/{id}",
     "/deployments/{id}/logs",

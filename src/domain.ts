@@ -174,6 +174,8 @@ export interface Run {
   readonly env: Readonly<Record<string, string>>
   readonly secretRefs: Readonly<Record<string, string>>
   readonly provider: string
+  /** Immutable, owner-authorized evidence selected from earlier run artifacts. */
+  readonly contextArtifacts: readonly ExecutionContextArtifact[]
   readonly artifactPaths: readonly string[]
   readonly timeoutMs: number
   readonly deadlineAt: Timestamp | null
@@ -188,6 +190,19 @@ export interface Run {
   readonly updatedAt: Timestamp
   readonly error: StructuredError | null
   readonly exitCode: number | null
+}
+
+/**
+ * One accepted evidence input for a run. The source artifact remains the byte
+ * authority; this snapshot freezes the exact entry identity used by the run.
+ */
+export interface ExecutionContextArtifact {
+  readonly artifactId: string
+  readonly sourceRunId: string
+  readonly path: string
+  readonly digest: string
+  readonly mediaType: string
+  readonly byteSize: number
 }
 
 export interface RunStatusEvent {
@@ -470,6 +485,24 @@ export interface Artifact {
   readonly createdAt: Timestamp
 }
 
+/**
+ * An immutable, owner-curated reference to one text entry in an artifact.
+ * Artifact bytes remain authoritative; a brief only makes selected evidence
+ * discoverable and reusable by later runs.
+ */
+export interface Brief {
+  readonly id: string
+  readonly ownerId: string
+  readonly title: string
+  readonly artifactId: string
+  readonly sourceRunId: string
+  readonly path: string
+  readonly digest: string
+  readonly mediaType: string
+  readonly byteSize: number
+  readonly createdAt: Timestamp
+}
+
 export interface ApiKey {
   readonly id: string
   readonly ownerId: string
@@ -520,6 +553,7 @@ export interface AuditRecord {
     | "runtime"
     | "credential_lease"
     | "artifact"
+    | "brief"
     | "deployment"
   readonly resourceId: string
   readonly requestId: string

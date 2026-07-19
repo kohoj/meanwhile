@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { API_OWNER_ID, API_RUN_ID, API_TIMESTAMP, apiRun } from "../../test/fixtures/api";
 import { BoardServer } from "../src/server";
 
-// The board is structurally read-only; these tests pin that boundary without a
-// live control plane, because the method/route guards answer before any upstream
-// call is made.
+// Existing task lifecycle is structurally read-only. These tests pin the route
+// guard without a live control plane; the two allowed writes create new task or
+// brief intent and are tested through the root integration surface.
 let server: BoardServer;
 let base: string;
 
@@ -26,7 +27,7 @@ afterAll(async () => {
   await server.stop();
 });
 
-describe("read-only boundary", () => {
+describe("task-lifecycle boundary", () => {
   test("mutating methods are rejected everywhere", async () => {
     for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
       for (const path of ["/board", "/stream", "/", "/anything"]) {
@@ -54,5 +55,89 @@ describe("read-only boundary", () => {
     // Either a 404 or the SPA fallback, never the traversed file.
     const body = await res.text();
     expect(body).not.toContain("dependencies");
+  });
+});
+
+describe("new-intent boundary", () => {
+  test("forwards selected briefs into a new run and promotes immutable output", async () => {
+    const briefId = "b".repeat(64);
+    const artifactId = "a".repeat(64);
+    const brief = {
+      id: briefId,
+      ownerId: API_OWNER_ID,
+      title: "Authentication findings",
+      artifactId,
+      sourceRunId: API_RUN_ID,
+      path: "findings.md",
+      digest: "c".repeat(64),
+      mediaType: "text/markdown; charset=utf-8",
+      byteSize: 42,
+      createdAt: API_TIMESTAMP,
+    };
+    const upstreamBodies: unknown[] = [];
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (request.method === "POST") upstreamBodies.push(await request.json());
+        if (url.pathname === "/runs") return Response.json({ run: apiRun() }, { status: 201 });
+        if (url.pathname === "/briefs" && request.method === "POST") {
+          return Response.json({ brief }, { status: 201 });
+        }
+        if (url.pathname === "/briefs") {
+          return Response.json({ items: [brief], nextCursor: null });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+    const assets = mkdtempSync(join(tmpdir(), "board-intent-assets-"));
+    writeFileSync(join(assets, "index.html"), "<!doctype html><div id=root></div>");
+    const intentServer = new BoardServer({
+      baseUrl: upstream.url.origin,
+      apiKey: "test-key",
+      assetsDir: assets,
+      port: 0,
+    });
+    const intentBase = intentServer.start().url;
+
+    try {
+      const delegated = await fetch(`${intentBase}/delegate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "run",
+          agentType: "demo",
+          prompt: "Use the accepted finding",
+          briefIds: [briefId],
+        }),
+      });
+      expect(delegated.status).toBe(201);
+      expect(upstreamBodies[0]).toMatchObject({ briefIds: [briefId] });
+
+      const promoted = await fetch(`${intentBase}/briefs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: brief.title,
+          artifactId: brief.artifactId,
+          path: brief.path,
+        }),
+      });
+      expect(promoted.status).toBe(201);
+      expect(upstreamBodies[1]).toEqual({
+        title: brief.title,
+        artifactId: brief.artifactId,
+        path: brief.path,
+      });
+
+      const listed = await fetch(`${intentBase}/briefs`);
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toEqual({ items: [brief], nextCursor: null });
+    } finally {
+      await intentServer.stop();
+      await upstream.stop(true);
+      rmSync(assets, { recursive: true, force: true });
+    }
   });
 });

@@ -45,6 +45,8 @@ Interactive continuity adds four entities without changing those lifecycles:
 
 A `Run` remains the atomic execution and promotion unit. An `AgentSession` is the interactive continuity unit. Do not add optional fields until one entity can impersonate the other.
 
+A `Brief` is not another execution lifecycle. It is an immutable, owner-curated reference from reusable context back to authoritative artifact evidence.
+
 ```text
 User / upstream agent
         │ HTTP / SDK / CLI
@@ -102,7 +104,7 @@ Do not use `@hono/node-server`, Express, Fastify, `better-sqlite3`, `dotenv`, `t
 The control plane exclusively owns:
 
 - authentication, owner identity, and authorization;
-- run, session, turn, and deployment records and state machines;
+- run, session, turn, brief, and deployment records, with state machines only for lifecycle entities;
 - idempotency and concurrency decisions;
 - secret-reference resolution, lifetime, and redaction policy;
 - durable run/session event streams, run logs, artifact metadata, and audit evidence;
@@ -232,13 +234,21 @@ Execution and recovery fail closed before compute if the configured adapter, cap
 
 ### 5.5 Store
 
-`src/persistence/store.ts` is the only SQL layer. Routes, services, providers, and deploy adapters issue no SQL directly. Public reads of owned resources require `ownerId` in their method signature; narrowly named internal reads exist only for trusted executors. Run, session, turn, command, event, lease, and cleanup transitions commit their related audit/state evidence atomically.
+`src/persistence/store.ts` is the only SQL layer. Routes, services, providers, and deploy adapters issue no SQL directly. Public reads of owned resources require `ownerId` in their method signature; narrowly named internal reads exist only for trusted executors. Run, session, turn, brief, command, event, lease, and cleanup transitions commit their related audit/state evidence atomically.
 
 ### 5.6 ArtifactStore and DeployAdapter
 
 Artifacts are content-addressed and record owner ID, run ID, logical path, kind, SHA-256, media type, byte size, storage key, and creation time. Writes are atomic; reads are owner-scoped; bytes never mutate in place.
 
 Deployment input is an artifact reference or captured workspace snapshot, never an arbitrary host path or live runtime path.
+
+### 5.7 Shared execution intelligence
+
+Shared execution intelligence reuses the artifact boundary; it is not a second memory store, truth source, vector index, or hidden prompt history. `Brief` is an immutable, owner-curated reference to one bounded text or JSON entry in an earlier run artifact. Promotion validates the entry and stores a human title plus the exact source identity without copying bytes. A new one-shot run selects ordered brief IDs; admission owner-authorizes each brief and source, revalidates the immutable entry, and snapshots source run, artifact, path, digest, media type, and byte size into run intent. The ordered snapshots participate in idempotency.
+
+Immediately before one-shot runner launch, the control plane re-reads each selected entry through the owner-scoped artifact service and fails closed if any byte identity no longer matches the accepted snapshot. It places the bounded content in a versioned, delimiter-safe execution-context envelope ahead of the current task. The envelope states that prior agent output is untrusted historical observation, not instruction, and must be verified against the current workspace. Explicit owner selection authorizes reuse; it does not make agent-produced text true or safe from prompt injection.
+
+The initial contract is deliberately run-to-run and explicit. It does not automatically mine logs, rank memories, share across owners, mutate source artifacts, or imply that interactive sessions consume or publish shared intelligence. Those require separate durable contracts rather than optional behavior hidden in the runner.
 
 ## 6. Run state machine
 
@@ -269,7 +279,7 @@ The state machine still has exactly three status-mutation entrances: `claimRunPr
 
 `succeeded` means the ACP agent returned the protocol's successful terminal outcome; it does not certify that the user's task acceptance criteria were met. Higher-level proofs validate declared artifacts, tests, or deployments separately. Never scrape agent prose or adapter-specific metadata to reinterpret the protocol result.
 
-A run records authenticated owner ID, immutable workspace input, agent type, prompt, non-secret env, secret references, provider, artifact declarations, timeout and absolute deadline, status/version, opaque runtime/process references, timestamps, and normalized terminal evidence.
+A run records authenticated owner ID, immutable workspace input, agent type, prompt, non-secret env, secret references, provider, accepted context-artifact snapshots, artifact declarations, timeout and absolute deadline, status/version, opaque runtime/process references, timestamps, and normalized terminal evidence.
 
 ### 6.1 Idempotency
 
@@ -355,6 +365,8 @@ Inline upload preparation snapshots and validates all files and computes the can
 Every workspace path crossing a boundary is relative, normalized, size-limited, and checked against traversal and symlink escape. Core code never relies on a provider's absolute path.
 
 Artifact collection is declared, not an unrestricted filesystem dump. Enforce file count, per-file and total byte limits, path and symlink safety, deterministic manifests and hashes, secret scanning before persistence, and abortable provider reads bounded by the original run deadline. Failed runs may still produce artifacts. Collection failure is separate evidence and does not rewrite the agent result unless an explicit policy says so.
+
+Brief reuse is declared, never ambient. Only explicitly promoted, bounded UTF-8 text or JSON entries may cross into a later run. Owner authorization happens at promotion and run creation, the exact entry identity is persisted with intent, and execution revalidates the source bytes. A source artifact remains immutable evidence; the later run is a new interpretation, not a revision of the earlier result.
 
 `POST /deployments` requires `Idempotency-Key`, scoped to `(ownerId, key)`, and accepts `runId`, exactly one of `artifactPath` or logical `workspacePath`, a `deployTarget`, non-secret configuration, and secret references. The canonical hash binds normalized caller intent. First admission resolves the source to immutable stored bytes and atomically commits the binding, deployment record, immutable artifact reference, and create audit. An exact replay returns the original deployment before consulting mutable adapters or source catalogs; conflicting reuse returns `IDEMPOTENCY_CONFLICT`. If the source was not captured before runtime cleanup, return `DEPLOYMENT_SOURCE_UNAVAILABLE`.
 
@@ -567,6 +579,7 @@ src/services/credential-lease-reaper.ts durable revocation before compute cleanu
 src/services/workspace-preparer.ts immutable input to provider workspace
 src/services/artifact-collector.ts
 src/services/artifact-service.ts  owner-scoped immutable artifact reads
+src/services/brief-service.ts     curated artifact reference and run-resolution boundary
 src/services/audit-service.ts     owner-scoped audit reads
 src/services/api-key-service.ts   owner-scoped API-key lifecycle
 src/services/deployment-executor.ts
@@ -586,7 +599,7 @@ src/providers/registry.ts         explicit provider resolution
 src/providers/local-provider.ts   complete local implementation
 src/providers/cloudflare-provider.ts bridge client adapter
 providers/cloudflare-sandbox/     isolated Cloudflare package
-board/                            isolated read-only delegator board (own React stack; consumes the public client, never the kernel)
+board/                            isolated delegator board (read-only task lifecycle; creates tasks/briefs through the public client)
 
 src/artifacts/                    immutable storage contract + local store
 src/artifacts/workspace-bundle.ts uploaded immutable workspace input

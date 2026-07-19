@@ -15,6 +15,7 @@ import { AppError } from "../errors"
 import { hashCanonical } from "../idempotency"
 import type { CreateRunInput, Page, Store } from "../persistence/store"
 import type { SecretReferenceValidator } from "../secrets"
+import type { BriefService } from "./brief-service"
 
 export interface UploadedFilesWorkspaceSource {
   readonly type: "files"
@@ -58,6 +59,7 @@ export interface CreateRunCommand {
   readonly env: Readonly<Record<string, string>>
   readonly secretRefs: Readonly<Record<string, string>>
   readonly provider?: string
+  readonly briefIds?: readonly string[]
   readonly artifactPaths: readonly string[]
   readonly timeoutMs: number
 }
@@ -86,6 +88,7 @@ export interface RunServiceOptions {
   readonly secretReferences: SecretReferenceValidator
   readonly providerNames: RunProviderNames
   readonly executionProvenance: RunExecutionProvenance
+  readonly briefs?: Pick<BriefService, "resolve">
   readonly defaultProvider: string
   readonly clock?: () => Date
   readonly id?: () => string
@@ -118,6 +121,7 @@ export class RunService {
   readonly #secretReferences: SecretReferenceValidator
   readonly #providerNames: RunProviderNames
   readonly #executionProvenance: RunExecutionProvenance
+  readonly #briefs: Pick<BriefService, "resolve"> | undefined
   readonly #defaultProvider: string
   readonly #clock: () => Date
   readonly #id: () => string
@@ -132,6 +136,7 @@ export class RunService {
     this.#secretReferences = options.secretReferences
     this.#providerNames = options.providerNames
     this.#executionProvenance = options.executionProvenance
+    this.#briefs = options.briefs
     this.#defaultProvider = options.defaultProvider
     this.#clock = options.clock ?? (() => new Date())
     this.#id = options.id ?? (() => crypto.randomUUID())
@@ -207,6 +212,17 @@ export class RunService {
       agentSpec: agentIntent.agentSpec,
       agentCatalogDigest: agentIntent.agentCatalogDigest,
     })
+    const briefIds = input.briefIds ?? []
+    if (briefIds.length > 0 && this.#briefs === undefined) {
+      throw new AppError({
+        code: "INVALID_REQUEST",
+        message: "Reusable briefs are unavailable",
+      })
+    }
+    const contextArtifacts =
+      briefIds.length === 0
+        ? []
+        : await (this.#briefs as Pick<BriefService, "resolve">).resolve(context.ownerId, briefIds)
     let preparedWorkspace: PreparedWorkspaceBundle | null = null
     let workspace: WorkspaceSource
     if (input.workspace.type === "files") {
@@ -215,7 +231,14 @@ export class RunService {
     } else {
       workspace = input.workspace
     }
-    const normalizedInput = { ...input, provider, ...agentIntent, executionProvenance }
+    const { briefIds: _requestedBriefs, ...inputWithoutContext } = input
+    const normalizedInput = {
+      ...inputWithoutContext,
+      contextArtifacts,
+      provider,
+      ...agentIntent,
+      executionProvenance,
+    }
     const requestHash =
       idempotencyKey === undefined ? undefined : hashCanonical({ ...normalizedInput, workspace })
 
@@ -244,6 +267,7 @@ export class RunService {
         env: input.env,
         secretRefs: input.secretRefs,
         provider,
+        contextArtifacts,
         artifactPaths: input.artifactPaths,
         timeoutMs: input.timeoutMs,
         createdAt,
@@ -254,7 +278,11 @@ export class RunService {
           actorApiKeyId: context.apiKeyId,
           requestId: context.requestId,
           traceId: context.traceId,
-          metadata: { agentType: input.agentType, provider },
+          metadata: {
+            agentType: input.agentType,
+            provider,
+            contextArtifacts: contextArtifacts.length,
+          },
         },
       }
       const result = this.#store.createRun(createInput)

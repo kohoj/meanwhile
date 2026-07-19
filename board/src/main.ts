@@ -1,6 +1,8 @@
 // Entry point for the board BFF. Reads configuration from the environment and
-// starts the read-only server. The board never mints or stores credentials; it
-// uses the same MEANWHILE_API_KEY the operator already has for this owner.
+// starts the delegator server. Task lifecycle stays read-only; new task and
+// brief intent is created only through the public client. The board never mints
+// or stores credentials; it uses the same MEANWHILE_API_KEY the operator already
+// has for this owner.
 import { BoardServer } from "./server";
 
 const baseUrl = Bun.env.MEANWHILE_URL ?? "http://127.0.0.1:7331";
@@ -28,7 +30,7 @@ const server = new BoardServer({
 });
 
 const { url } = server.start();
-console.log(`Meanwhile board (read-only) on ${url}`);
+console.log(`Meanwhile board on ${url}`);
 
 const shutdown = () => {
   void server.stop().then(() => process.exit(0));

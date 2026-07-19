@@ -43,6 +43,7 @@ import {
   type WorkspaceEntry,
 } from "./artifact-collector"
 import { attachAgentCredentialLease } from "./credential-lease-attacher"
+import type { ExecutionContext } from "./execution-context"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
 const DEFAULT_POLL_MS = 500
@@ -57,6 +58,7 @@ export interface RunExecutorOptions {
   readonly artifactStore: ArtifactStore
   readonly artifactLimits: ArtifactCollectionLimits
   readonly secrets: SecretResolver
+  readonly executionContext?: Pick<ExecutionContext, "renderPrompt">
   readonly logger: StructuredLogger
   readonly telemetry?: Telemetry
   readonly concurrency?: number
@@ -75,6 +77,7 @@ export class RunExecutor implements ManagedComponent {
   readonly #artifactStore: ArtifactStore
   readonly #artifactLimits: ArtifactCollectionLimits
   readonly #secrets: SecretResolver
+  readonly #executionContext: Pick<ExecutionContext, "renderPrompt"> | undefined
   readonly #logger: StructuredLogger
   readonly #telemetry: Telemetry | undefined
   readonly #concurrency: number
@@ -99,6 +102,7 @@ export class RunExecutor implements ManagedComponent {
     this.#artifactStore = options.artifactStore
     this.#artifactLimits = options.artifactLimits
     this.#secrets = options.secrets
+    this.#executionContext = options.executionContext
     this.#logger = options.logger
     this.#telemetry = options.telemetry
     this.#concurrency = options.concurrency ?? 2
@@ -487,6 +491,7 @@ export class RunExecutor implements ManagedComponent {
         createdAt: this.#now(),
       })
       if (launch === null) return
+      const prompt = await this.#renderPrompt(run)
       const resolvedSecrets = await this.#secrets.resolve(
         run.secretRefs,
         secretScope(run.ownerId, "agent", run.id),
@@ -515,7 +520,7 @@ export class RunExecutor implements ManagedComponent {
             args: [...run.agentSpec.args],
             workingDirectory: run.agentSpec.workingDirectory,
           },
-          prompt: run.prompt,
+          prompt,
           permissionPolicy:
             run.agentSpec.permissionPolicy.mode === "deny-all"
               ? { mode: "deny-all" }
@@ -1399,6 +1404,17 @@ export class RunExecutor implements ManagedComponent {
 
   #now(): string {
     return this.#clock().toISOString()
+  }
+
+  async #renderPrompt(run: Run): Promise<string> {
+    if (run.contextArtifacts.length === 0) return run.prompt
+    if (this.#executionContext === undefined) {
+      throw new AppError({
+        code: "INTERNAL",
+        message: "Accepted artifact-backed execution context cannot be materialized",
+      })
+    }
+    return this.#executionContext.renderPrompt(run.ownerId, run.contextArtifacts, run.prompt)
   }
 
   #setRunSpanOutcome(span: OperationSpan, runId: string): void {

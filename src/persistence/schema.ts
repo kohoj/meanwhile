@@ -62,6 +62,7 @@ CREATE TABLE runs (
         env_json TEXT NOT NULL CHECK(json_valid(env_json)),
         secret_refs_json TEXT NOT NULL CHECK(json_valid(secret_refs_json)),
         provider TEXT NOT NULL,
+        context_artifacts_json TEXT NOT NULL CHECK(json_valid(context_artifacts_json)),
         artifact_paths_json TEXT NOT NULL CHECK(json_valid(artifact_paths_json)),
         timeout_ms INTEGER NOT NULL CHECK(timeout_ms > 0),
         deadline_at TEXT,
@@ -228,6 +229,29 @@ CREATE TABLE artifacts (
       ) STRICT;
 
 CREATE INDEX artifacts_owner_run_idx ON artifacts(owner_id, run_id, created_at, id);
+
+CREATE TABLE briefs (
+        id TEXT PRIMARY KEY CHECK(
+          length(id) = 64 AND id NOT GLOB '*[^0-9a-f]*'
+        ),
+        owner_id TEXT NOT NULL REFERENCES owners(id),
+        title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 160),
+        artifact_id TEXT NOT NULL,
+        source_run_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        digest TEXT NOT NULL CHECK(
+          length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        media_type TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE(owner_id, id),
+        UNIQUE(owner_id, artifact_id, path),
+        FOREIGN KEY(owner_id, source_run_id, artifact_id)
+          REFERENCES artifacts(owner_id, run_id, id)
+      ) STRICT;
+
+CREATE INDEX briefs_owner_created_idx ON briefs(owner_id, created_at DESC, id DESC);
 
 CREATE TABLE deployments (
         id TEXT PRIMARY KEY,

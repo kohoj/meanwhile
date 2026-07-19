@@ -7,10 +7,12 @@ import {
   type ApiKey,
   type Artifact,
   type AuditRecord,
+  type Brief,
   canTransitionRun,
   type Deployment,
   type DeploymentLogChunk,
   type DeploymentStatus,
+  type ExecutionContextArtifact,
   type ExecutionProvenance,
   isTerminalRunStatus,
   type JsonObject,
@@ -63,6 +65,7 @@ interface RunRow extends Record<string, Bind> {
   env_json: string
   secret_refs_json: string
   provider: string
+  context_artifacts_json: string
   artifact_paths_json: string
   timeout_ms: number
   deadline_at: string | null
@@ -258,6 +261,19 @@ interface ArtifactRow extends Record<string, Bind> {
   created_at: string
 }
 
+interface BriefRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  title: string
+  artifact_id: string
+  source_run_id: string
+  path: string
+  digest: string
+  media_type: string
+  byte_size: number
+  created_at: string
+}
+
 interface DeploymentRow extends Record<string, Bind> {
   id: string
   owner_id: string
@@ -304,7 +320,7 @@ const encodeCreatedCursor = (resource: {
 
 const decodeCreatedCursor = (
   cursor: string,
-  resource: "Run" | "Agent session" | "Deployment" | "Audit",
+  resource: "Run" | "Agent session" | "Brief" | "Deployment" | "Audit",
 ): { createdAt: string; id: string } => {
   try {
     const value: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"))
@@ -342,6 +358,7 @@ const runFromRow = (row: RunRow): Run => ({
   env: parse<Record<string, string>>(row.env_json),
   secretRefs: parse<Record<string, string>>(row.secret_refs_json),
   provider: row.provider,
+  contextArtifacts: parse<ExecutionContextArtifact[]>(row.context_artifacts_json),
   artifactPaths: parse<string[]>(row.artifact_paths_json),
   timeoutMs: row.timeout_ms,
   deadlineAt: row.deadline_at,
@@ -537,6 +554,30 @@ const artifactFromRow = (row: ArtifactRow): Artifact => ({
   createdAt: row.created_at,
 })
 
+const briefFromRow = (row: BriefRow): Brief => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  title: row.title,
+  artifactId: row.artifact_id,
+  sourceRunId: row.source_run_id,
+  path: row.path,
+  digest: row.digest,
+  mediaType: row.media_type,
+  byteSize: row.byte_size,
+  createdAt: row.created_at,
+})
+
+const sameBrief = (left: Brief, right: Brief): boolean =>
+  left.id === right.id &&
+  left.ownerId === right.ownerId &&
+  left.title === right.title &&
+  left.artifactId === right.artifactId &&
+  left.sourceRunId === right.sourceRunId &&
+  left.path === right.path &&
+  left.digest === right.digest &&
+  left.mediaType === right.mediaType &&
+  left.byteSize === right.byteSize
+
 const sameArtifactIdentity = (left: Artifact, right: Artifact): boolean =>
   left.id === right.id &&
   left.ownerId === right.ownerId &&
@@ -671,6 +712,7 @@ export interface CreateRunInput {
   readonly env: Readonly<Record<string, string>>
   readonly secretRefs: Readonly<Record<string, string>>
   readonly provider: string
+  readonly contextArtifacts?: readonly ExecutionContextArtifact[]
   readonly artifactPaths: readonly string[]
   readonly timeoutMs: number
   readonly createdAt: string
@@ -1352,9 +1394,10 @@ export class Store {
           INSERT INTO runs(
             id, owner_id, workspace_json, agent_type, agent_spec_json, agent_catalog_digest,
             execution_provenance_json,
-            prompt, env_json, secret_refs_json, provider, artifact_paths_json, timeout_ms,
+            prompt, env_json, secret_refs_json, provider, context_artifacts_json,
+            artifact_paths_json, timeout_ms,
             status, status_version, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)
         `)
         .run(
           input.id,
@@ -1368,6 +1411,7 @@ export class Store {
           stringify(input.env),
           stringify(input.secretRefs),
           input.provider,
+          stringify(input.contextArtifacts ?? []),
           stringify(input.artifactPaths),
           input.timeoutMs,
           input.createdAt,
@@ -3296,6 +3340,84 @@ export class Store {
       )
       .all(ownerId, runId)
       .map(artifactFromRow)
+  }
+
+  createBrief(
+    brief: Brief,
+    audit: AuditRecord,
+  ): { readonly brief: Brief; readonly replayed: boolean } {
+    const transaction = this.database.transaction(() => {
+      const existing = this.database
+        .query<BriefRow, [string, string, string]>(
+          "SELECT * FROM briefs WHERE owner_id = ? AND artifact_id = ? AND path = ?",
+        )
+        .get(brief.ownerId, brief.artifactId, brief.path)
+      if (existing !== null) {
+        const materialized = briefFromRow(existing)
+        if (!sameBrief(materialized, brief)) {
+          throw new AppError({
+            code: "BRIEF_CONFLICT",
+            status: 409,
+            message: "This artifact entry is already promoted with different metadata",
+          })
+        }
+        return { brief: materialized, replayed: true }
+      }
+
+      this.database
+        .query(`
+          INSERT INTO briefs(
+            id, owner_id, title, artifact_id, source_run_id, path, digest,
+            media_type, byte_size, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          brief.id,
+          brief.ownerId,
+          brief.title,
+          brief.artifactId,
+          brief.sourceRunId,
+          brief.path,
+          brief.digest,
+          brief.mediaType,
+          brief.byteSize,
+          brief.createdAt,
+        )
+      this.insertAudit(audit)
+      return { brief, replayed: false }
+    })
+    return transaction.immediate()
+  }
+
+  getBrief(ownerId: string, briefId: string): Brief | null {
+    const row = this.database
+      .query<BriefRow, [string, string]>("SELECT * FROM briefs WHERE owner_id = ? AND id = ?")
+      .get(ownerId, briefId)
+    return row === null ? null : briefFromRow(row)
+  }
+
+  listBriefs(ownerId: string, options: { limit: number; before?: string }): Page<Brief> {
+    const limit = Math.min(Math.max(options.limit, 1), 100)
+    const cursor =
+      options.before === undefined ? null : decodeCreatedCursor(options.before, "Brief")
+    const rows =
+      cursor === null
+        ? this.database
+            .query<BriefRow, [string, number]>(
+              "SELECT * FROM briefs WHERE owner_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .all(ownerId, limit + 1)
+        : this.database
+            .query<BriefRow, [string, string, string, string, number]>(`
+              SELECT * FROM briefs
+              WHERE owner_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+              ORDER BY created_at DESC, id DESC LIMIT ?
+            `)
+            .all(ownerId, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
+    const hasMore = rows.length > limit
+    const items = rows.slice(0, limit).map(briefFromRow)
+    const last = items.at(-1)
+    return { items, nextCursor: hasMore && last !== undefined ? encodeCreatedCursor(last) : null }
   }
 
   createDeployment(

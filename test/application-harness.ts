@@ -101,6 +101,7 @@ export const createDemoRun = async (
     files?: readonly { path: string; content: string }[]
     secretRefs?: Readonly<Record<string, string>>
     env?: Readonly<Record<string, string>>
+    briefIds?: readonly string[]
   } = {},
 ): Promise<Run> => {
   const files = options.files ?? [
@@ -123,6 +124,7 @@ export const createDemoRun = async (
       env: options.env ?? {},
       secretRefs: options.secretRefs ?? {},
       provider: "local",
+      briefIds: options.briefIds ?? [],
       artifactPaths: options.artifactPaths ?? ["dist"],
       timeoutMs: options.timeoutMs ?? 5_000,
     }),

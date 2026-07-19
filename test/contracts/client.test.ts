@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { Meanwhile, MeanwhileError } from "../../src/client"
 import {
   API_DEPLOYMENT_ID,
+  API_OWNER_ID,
   API_RUN_ID,
   API_SESSION_ID,
+  API_TIMESTAMP,
   API_TURN_ID,
   apiDeployment,
   apiRun,
@@ -46,6 +48,7 @@ describe("Meanwhile client contract", () => {
         agentType: "demo",
         prompt: "make it work",
         provider: "local",
+        briefIds: ["f".repeat(64)],
         artifactPaths: ["dist"],
       },
       { idempotencyKey: "client-create-1" },
@@ -54,7 +57,12 @@ describe("Meanwhile client contract", () => {
     expect(run).toEqual(apiRun())
     expect(observed.authorization).toBe("Bearer top-secret-key")
     expect(observed.idempotencyKey).toBe("client-create-1")
-    expect(observed.body).toMatchObject({ env: {}, secretRefs: {}, timeoutMs: 3_600_000 })
+    expect(observed.body).toMatchObject({
+      env: {},
+      secretRefs: {},
+      briefIds: ["f".repeat(64)],
+      timeoutMs: 3_600_000,
+    })
     expect(observed.evidence).toEqual({
       method: "POST",
       path: "runs",
@@ -79,6 +87,48 @@ describe("Meanwhile client contract", () => {
 
     expect(run.status).toBe("succeeded")
     expect(delays).toEqual([7, 7])
+  })
+
+  test("curates and discovers immutable artifact evidence through briefs", async () => {
+    const brief = {
+      id: "1".repeat(64),
+      ownerId: API_OWNER_ID,
+      title: "Authentication findings",
+      artifactId: "f".repeat(64),
+      sourceRunId: API_RUN_ID,
+      path: "findings.md",
+      digest: "e".repeat(64),
+      mediaType: "text/markdown; charset=utf-8",
+      byteSize: 42,
+      createdAt: API_TIMESTAMP,
+    }
+    const requests: { method: string; path: string }[] = []
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : input)
+        const method = init?.method ?? (input instanceof Request ? input.method : "GET")
+        requests.push({ method, path: `${url.pathname}${url.search}` })
+        if (url.search) return Response.json({ items: [brief], nextCursor: null })
+        return Response.json({ brief }, { status: method === "POST" ? 201 : 200 })
+      },
+    })
+
+    expect(
+      await client.briefs.create({
+        title: brief.title,
+        artifactId: brief.artifactId,
+        path: brief.path,
+      }),
+    ).toEqual(brief)
+    expect((await client.briefs.list({ limit: 10 })).items).toEqual([brief])
+    expect(await client.briefs.get(brief.id)).toEqual(brief)
+    expect(requests).toEqual([
+      { method: "POST", path: "/briefs" },
+      { method: "GET", path: "/briefs?limit=10" },
+      { method: "GET", path: `/briefs/${brief.id}` },
+    ])
   })
 
   test("replays a dropped log stream from the durable cursor without duplication", async () => {

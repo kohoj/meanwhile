@@ -58,6 +58,7 @@ export function apiRun(status: Run["status"] = "queued"): Run {
     env: {},
     secretRefs: {},
     provider: "local",
+    contextArtifacts: [],
     artifactPaths: ["dist"],
     timeoutMs: 60_000,
     deadlineAt: null,

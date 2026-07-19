@@ -163,10 +163,37 @@ Repository input is equally direct:
 
 Identity never comes from this body. Every protected request derives the owner from its bearer API key.
 
+### Keep and reuse evidence from an earlier run
+
+The first shared-execution-intelligence primitive is intentionally small: an owner explicitly promotes one bounded text or JSON artifact entry into a discoverable `Brief`, then selects that brief for a later one-shot run. A brief is an immutable reference, not copied memory; the source artifact remains authoritative.
+
+```ts
+const prior = await meanwhile.artifacts.list(previousRun.id)
+const findings = prior.find((artifact) => artifact.logicalPath === "findings.md")
+if (!findings) throw new Error("findings.md was not captured")
+
+const brief = await meanwhile.briefs.create({
+  title: "Authentication findings",
+  artifactId: findings.id,
+})
+
+const next = await meanwhile.runs.create({
+  workspace: { type: "bundle", artifactId: currentWorkspaceBundleId },
+  agentType: "codex",
+  prompt: "Apply the earlier finding to this checkout and verify it.",
+  briefIds: [brief.id],
+  artifactPaths: ["dist"],
+})
+```
+
+Brief creation and run admission both authorize the source under the same owner. The accepted run snapshots source run, artifact, path, digest, media type, and byte size; launch revalidates the exact bytes and places delimiter-escaped content in an envelope marked as untrusted historical evidence, not instructions. Nothing is mined, ranked, or attached automatically. The Board exposes the same explicit loop as “keep” on captured text output and “prior briefs” during delegation.
+
 The CLI is a presentation layer over the same client:
 
 ```console
 bun run cli -- run --agent codex --provider local --files ./workspace --artifact dist -- <task>
+bun run cli -- briefs create <artifact-id> --title "Authentication findings" --path findings.md
+bun run cli -- run --agent codex --provider local --files ./workspace --brief <brief-id> -- <task>
 bun run cli -- logs <run-id> --follow
 bun run cli -- cancel <run-id>
 bun run cli -- deploy <run-id> --artifact dist --target local-static
@@ -265,6 +292,7 @@ All failures use one safe envelope:
 | Session turns | `POST /sessions/:id/turns`, `GET /sessions/:id/turns`, `GET /sessions/:id/turns/:turnId` |
 | Session evidence/commands | `GET /sessions/:id/events`, `POST /sessions/:id/interrupt`, `POST /sessions/:id/close` |
 | Artifacts | `GET /artifacts/:id`, `GET /artifacts/:id/content` |
+| Briefs | `POST /briefs`, `GET /briefs`, `GET /briefs/:id` |
 | Deployments | `POST /deployments`, `GET /deployments`, `GET /deployments/:id`, `GET /deployments/:id/logs` |
 | Providers | `POST /providers/test` |
 | Operations | `GET /audit`, API-key lifecycle, `/healthz`, `/readyz`, `/openapi.json` |
@@ -467,7 +495,7 @@ bun run cli -- data gc --apply
 
 Backup includes a normalized SQLite snapshot, all referenced workspace/artifact objects, and only previews referenced by successful local deployment rows. Preview verification proves the canonical manifest, exact file set, and every size/digest; orphan or tampered publication bytes make backup/verification fail rather than entering the archive. Restore accepts only an absent or empty destination; garbage collection is explicit dry-run/apply mark-and-sweep.
 
-Meanwhile has one current database schema and no upgrade path. A new empty database is initialized atomically and records the exact schema fingerprint; any nonempty database with a missing or different identity is rejected without modification. Schema changes require a fresh data root and deliberate export/import at the product boundary, never SQL backfill or dual-read code.
+Meanwhile has one current database schema and no upgrade path. A new empty database is initialized atomically and records the exact schema fingerprint; any nonempty database with a missing or different identity is rejected without modification. Schema changes require a fresh data root. Carrying durable data forward requires a separately designed export/import boundary, which does not exist today; Meanwhile never guesses with SQL backfills or dual reads.
 
 ## Observability
 
@@ -531,7 +559,7 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 Meanwhile's direction is to be the durable, trustworthy layer *under* agent work — the thing an application, a team, or the person who requested the work can rely on — rather than another agent or another agent console. Concretely:
 
 - **Shipped (`v0.1.3`).** The durable control plane, durable sessions and turns, the credential-free local runtime, the packaged Cloudflare runtime, and the delegator's board — a read-only, evidence-driven view (with delegate-only write) that answers one question for everyone with a stake in a task, not just the person who launched it: *is it done, is it waiting on someone, or is the system recovering it?* The board is a projection over the durable event stream exposed by `runs.followEvents()` / `sessions.followEvents()` — a view, never a second control plane, and never a way to mutate an existing run.
-- **Next — shared execution intelligence.** Letting one task safely reuse what an earlier task discovered, under the same owner isolation and content-addressed evidence rules, so isolation and shared learning stop being mutually exclusive.
+- **In development — shared execution intelligence.** The first run-to-run loop is implemented: an owner explicitly promotes bounded text/JSON artifact evidence into an immutable, discoverable Brief, then selects it through HTTP, SDK, CLI, or the Board for a later run. Accepted runs retain exact source snapshots with owner isolation, idempotency binding, restart persistence, and runner-time byte revalidation. Automatic extraction, semantic ranking, interactive-session support, and cross-owner sharing are deliberately absent.
 - **Then — an open contract.** Hardening the typed client and OpenAPI surface so other tools (boards, IDEs, chat entry points) can run on Meanwhile's durable, credential-mediating, auditable core instead of rebuilding it.
 
 Only the *Shipped* line is release evidence. Everything below it is intent, and this document will not describe those items as implemented until their own proofs exist.

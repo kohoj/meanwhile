@@ -6,8 +6,10 @@ import { join } from "node:path"
 import { issueApiKey } from "../../src/auth"
 import { type CliOptions, runCli } from "../../src/cli"
 import {
+  API_OWNER_ID,
   API_RUN_ID,
   API_SESSION_ID,
+  API_TIMESTAMP,
   apiDeployment,
   apiRun,
   apiRunLog,
@@ -61,6 +63,8 @@ describe("Meanwhile CLI", () => {
           "demo",
           "--artifact",
           "dist",
+          "--brief",
+          "f".repeat(64),
           "--idempotency-key",
           "cli-test",
           "--",
@@ -78,6 +82,7 @@ describe("Meanwhile CLI", () => {
         agentType: "demo",
         prompt: "make it work",
         provider: "local",
+        briefIds: ["f".repeat(64)],
         artifactPaths: ["dist"],
         workspace: { type: "files" },
       })
@@ -99,6 +104,44 @@ describe("Meanwhile CLI", () => {
         error: { code: "INVALID_ARGUMENT", message: expect.stringContaining("symbolic links") },
       })
       expect(requestCount).toBe(1)
+    } finally {
+      await server.stop(true)
+    }
+  })
+
+  test("promotes immutable output into a reusable brief", async () => {
+    const artifactId = "a".repeat(64)
+    const brief = {
+      id: "b".repeat(64),
+      ownerId: API_OWNER_ID,
+      title: "Authentication findings",
+      artifactId,
+      sourceRunId: API_RUN_ID,
+      path: "findings.md",
+      digest: "c".repeat(64),
+      mediaType: "text/markdown; charset=utf-8",
+      byteSize: 42,
+      createdAt: API_TIMESTAMP,
+    }
+    let body: unknown
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        body = await request.json()
+        return Response.json({ brief }, { status: 201 })
+      },
+    })
+    const key = await issueApiKey()
+    try {
+      const invocation = capture()
+      const exitCode = await runCli(
+        ["briefs", "create", artifactId, "--title", brief.title, "--path", brief.path],
+        invocation.options({ MEANWHILE_URL: server.url.origin, MEANWHILE_API_KEY: key.key }),
+      )
+      expect(exitCode).toBe(0)
+      expect(body).toEqual({ artifactId, title: brief.title, path: brief.path })
+      expect(JSON.parse(invocation.stdout)).toEqual({ brief })
     } finally {
       await server.stop(true)
     }

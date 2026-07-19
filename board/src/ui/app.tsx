@@ -2,11 +2,20 @@ import { AnimatePresence, motion } from "motion/react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import useSWR from "swr";
+import type { Brief } from "@kohoz/meanwhile/contracts";
 import { type BoardRow, connectStream, useBoard } from "./store";
 import "./styles.css";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 const EASE = [0.22, 1, 0.36, 1] as const;
+
+interface PromotableArtifactEntry {
+  artifactId: string;
+  path: string;
+  mediaType: string;
+  byteSize: number;
+  brief: Brief | null;
+}
 
 // Plain-words relative time for the trust anchor — never a raw timestamp.
 const ago = (iso: string | null): string | null => {
@@ -113,6 +122,12 @@ const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose
   const messages = row.kind === "run" ? runTl?.messages : sessTl?.messages;
   const status = useLiveStatus(row);
   const [loading, setLoading] = useState(!messages);
+  const [promoting, setPromoting] = useState<string | null>(null);
+  const [promotionError, setPromotionError] = useState<string | null>(null);
+  const artifactUrl = row.kind === "run" ? `/task/run/${row.id}/artifacts` : null;
+  const { data: artifactData, mutate: refreshArtifacts } = useSWR<{
+    items: PromotableArtifactEntry[];
+  }>(artifactUrl, fetcher);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -128,6 +143,30 @@ const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose
       alive = false;
     };
   }, [row.kind, row.id, loadHistory, messages]);
+
+  const promote = async (entry: PromotableArtifactEntry) => {
+    const identity = `${entry.artifactId}:${entry.path}`;
+    setPromoting(identity);
+    setPromotionError(null);
+    const title = `${entry.path} · ${row.title || row.id}`.slice(0, 160);
+    try {
+      const response = await fetch("/briefs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, artifactId: entry.artifactId, path: entry.path }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ error: "Could not keep this output." }));
+        setPromotionError(body.error ?? "Could not keep this output.");
+      } else {
+        await refreshArtifacts();
+      }
+    } catch {
+      setPromotionError("Could not reach the control plane.");
+    } finally {
+      setPromoting(null);
+    }
+  };
 
   return (
     <motion.div
@@ -187,10 +226,51 @@ const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose
               No agent output was recorded.
             </p>
           )}
+          {artifactData && artifactData.items.length > 0 ? (
+            <section className="mt-8 border-t border-[var(--color-hair)] pt-5">
+              <div className="font-[var(--font-mono)] text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
+                reusable output
+              </div>
+              <div className="mt-2 flex flex-col gap-1">
+                {artifactData.items.map((entry) => {
+                  const identity = `${entry.artifactId}:${entry.path}`;
+                  return (
+                    <div
+                      key={identity}
+                      className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 hover:bg-[var(--color-bg)]"
+                    >
+                      <span className="min-w-0 truncate font-[var(--font-mono)] text-[12px] text-[var(--color-ink-3)]">
+                        {entry.path}
+                      </span>
+                      {entry.brief ? (
+                        <span className="shrink-0 font-[var(--font-mono)] text-[10px] text-[var(--color-ink-4)]">
+                          kept
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => promote(entry)}
+                          disabled={promoting !== null}
+                          className="shrink-0 font-[var(--font-mono)] text-[10px] text-[var(--color-ink-3)] transition-colors hover:text-[var(--color-ink)] disabled:opacity-40"
+                        >
+                          {promoting === identity ? "keeping…" : "+ keep"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {promotionError ? (
+                <p className="mt-2 text-[12px]" style={{ color: "var(--color-crash)" }}>
+                  {promotionError}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
         </div>
         <footer className="px-7 pb-6 pt-3">
           <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
-            watching only · credentials never leave the runtime · esc to close
+            task lifecycle is read-only · credentials never leave the runtime · esc to close
           </span>
         </footer>
       </motion.div>
@@ -207,8 +287,11 @@ const DelegateDialog: React.FC<{ onClose: () => void; onDone: () => void }> = ({
   const [prompt, setPrompt] = useState("");
   const [agentType, setAgentType] = useState("demo");
   const [repo, setRepo] = useState("");
+  const [selectedBriefIds, setSelectedBriefIds] = useState<string[]>([]);
+  const [showBriefs, setShowBriefs] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { data: briefData } = useSWR<{ items: Brief[] }>("/briefs", fetcher);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -223,7 +306,13 @@ const DelegateDialog: React.FC<{ onClose: () => void; onDone: () => void }> = ({
       const res = await fetch("/delegate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: prompt.trim(), agentType, repo: repo.trim(), kind: "run" }),
+        body: JSON.stringify({
+          prompt: prompt.trim(),
+          agentType,
+          repo: repo.trim(),
+          kind: "run",
+          briefIds: selectedBriefIds,
+        }),
       });
       if (!res.ok) {
         const { error } = await res.json().catch(() => ({ error: "Could not delegate." }));
@@ -297,6 +386,48 @@ const DelegateDialog: React.FC<{ onClose: () => void; onDone: () => void }> = ({
             />
           </label>
         </div>
+
+        {briefData && briefData.items.length > 0 ? (
+          <div className="mt-4 border-t border-[var(--color-hair)] pt-3">
+            <button
+              type="button"
+              onClick={() => setShowBriefs((value) => !value)}
+              className="flex w-full items-center justify-between font-[var(--font-mono)] text-[11px] text-[var(--color-ink-3)]"
+            >
+              <span>
+                prior briefs{selectedBriefIds.length > 0 ? ` · ${selectedBriefIds.length} selected` : ""}
+              </span>
+              <span>{showBriefs ? "▾" : "▸"}</span>
+            </button>
+            {showBriefs ? (
+              <div className="mt-2 max-h-36 overflow-y-auto rounded-lg bg-[var(--color-bg)] p-1">
+                {briefData.items.map((brief) => {
+                  const selected = selectedBriefIds.includes(brief.id);
+                  return (
+                    <label
+                      key={brief.id}
+                      className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-[12px] text-[var(--color-ink-2)] hover:bg-[var(--color-raise)]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() =>
+                          setSelectedBriefIds((current) =>
+                            selected
+                              ? current.filter((id) => id !== brief.id)
+                              : [...current, brief.id],
+                          )
+                        }
+                        className="accent-[var(--color-ink)]"
+                      />
+                      <span className="min-w-0 truncate">{brief.title}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         {error ? (
           <p className="mt-4 text-[13px]" style={{ color: "var(--color-crash)" }}>

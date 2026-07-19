@@ -14,7 +14,13 @@ import {
   ArtifactPageSchema,
   type AuditPage,
   AuditPageSchema,
+  type Brief,
+  type BriefPage,
+  BriefPageSchema,
+  BriefResponseSchema,
   CreateApiKeyRequestSchema,
+  type CreateBriefRequest,
+  CreateBriefRequestSchema,
   type CreateDeploymentRequest,
   CreateDeploymentRequestSchema,
   CreatedApiKeyResponseSchema,
@@ -180,6 +186,12 @@ export interface ArtifactsClient {
   ): Promise<ArtifactDownload>
 }
 
+export interface BriefsClient {
+  create(input: CreateBriefRequest, options?: RequestOptions): Promise<Brief>
+  list(options?: ListCreatedOptions): Promise<BriefPage>
+  get(id: string, options?: RequestOptions): Promise<Brief>
+}
+
 export interface DeploymentsClient {
   create(input: CreateDeploymentRequest, options: CreateDeploymentOptions): Promise<Deployment>
   list(options?: ListCreatedOptions): Promise<DeploymentPage>
@@ -199,6 +211,7 @@ export interface AuditClient {
         | "turn"
         | "runtime"
         | "artifact"
+        | "brief"
         | "deployment"
       readonly resourceId?: string
       readonly action?: string
@@ -249,6 +262,7 @@ export class Meanwhile {
   readonly runs: RunsClient
   readonly sessions: SessionsClient
   readonly artifacts: ArtifactsClient
+  readonly briefs: BriefsClient
   readonly deployments: DeploymentsClient
   readonly providers: ProvidersClient
   readonly audit: AuditClient
@@ -259,6 +273,7 @@ export class Meanwhile {
     this.runs = new Runs(transport)
     this.sessions = new Sessions(transport)
     this.artifacts = new Artifacts(transport)
+    this.briefs = new Briefs(transport)
     this.deployments = new Deployments(transport)
     this.providers = new Providers(transport)
     this.audit = new Audit(transport)
@@ -653,6 +668,32 @@ class Artifacts implements ArtifactsClient {
   }
 }
 
+class Briefs implements BriefsClient {
+  constructor(private readonly transport: Transport) {}
+
+  async create(input: CreateBriefRequest, options: RequestOptions = {}): Promise<Brief> {
+    const result = await this.transport.json("briefs", BriefResponseSchema, {
+      method: "POST",
+      body: parseInput(CreateBriefRequestSchema, input),
+      ...signalInput(options.signal),
+    })
+    return result.brief
+  }
+
+  list(options: ListCreatedOptions = {}): Promise<BriefPage> {
+    return this.transport.json(`briefs?${createdPageQuery(options)}`, BriefPageSchema, {
+      ...signalInput(options.signal),
+    })
+  }
+
+  async get(id: string, options: RequestOptions = {}): Promise<Brief> {
+    const result = await this.transport.json(briefPath(id), BriefResponseSchema, {
+      ...signalInput(options.signal),
+    })
+    return result.brief
+  }
+}
+
 class Deployments implements DeploymentsClient {
   constructor(private readonly transport: Transport) {}
 
@@ -1042,6 +1083,12 @@ function artifactPath(id: string): string {
   if (!result.success)
     throw invalidArgument("Artifact id must be a SHA-256 digest", { field: "id" })
   return `artifacts/${encodeURIComponent(result.data)}`
+}
+
+function briefPath(id: string): string {
+  const result = ArtifactIdentifierSchema.safeParse(id)
+  if (!result.success) throw invalidArgument("Brief id must be a SHA-256 digest", { field: "id" })
+  return `briefs/${encodeURIComponent(result.data)}`
 }
 
 function validId(id: string): string {

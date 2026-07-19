@@ -3,12 +3,17 @@
 // It is a CONSUMER of the public @kohoz/meanwhile client — the same category as
 // the CLI — holding the owner's API key server-side so no bearer token ever
 // reaches the browser (the client fail-closes in a browser for exactly this
-// reason). It exposes ONLY reads: a board snapshot, and a fan-in SSE stream of
-// the live events of active tasks. There is deliberately no create/cancel/send/
-// interrupt/close/deploy code path anywhere in this file — read-only is
-// structural, not a convention.
+// reason). Existing work stays read-only. The only writes create new durable
+// intent: delegate a task, or curate immutable output into a reusable brief.
+// There is deliberately no cancel/send/interrupt/close/deploy path.
 import { Meanwhile } from "@kohoz/meanwhile";
-import type { AgentSession, Run, RunEvent, SessionEvent } from "@kohoz/meanwhile/contracts";
+import type {
+  AgentSession,
+  Brief,
+  Run,
+  RunEvent,
+  SessionEvent,
+} from "@kohoz/meanwhile/contracts";
 import { isRunActive, isSessionActive, runBucket, sessionBucket } from "./buckets";
 
 export interface BoardServerOptions {
@@ -117,29 +122,38 @@ export class BoardServer {
 
   async #handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    // The one write the board allows: DELEGATING new work. It maps to the
-    // client's create* calls only — never cancel, close, interrupt, or delete.
-    // "Read-only for existing work, delegate-only for new work" is enforced by
-    // there being no other mutating path in this file.
+    // Both writes create new durable intent. Neither mutates task lifecycle.
     if (request.method === "POST" && url.pathname === "/delegate") {
       return this.#delegate(request);
+    }
+    if (request.method === "POST" && url.pathname === "/briefs") {
+      return this.#promoteBrief(request);
     }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method Not Allowed", { status: 405, headers: uiHeaders() });
     }
     if (url.pathname === "/board") return this.#board();
+    if (url.pathname === "/briefs") return this.#briefs();
     if (url.pathname === "/stream") return this.#stream(request);
+    const artifactList = url.pathname.match(/^\/task\/run\/([\w-]+)\/artifacts$/);
+    if (artifactList) return this.#taskArtifacts(artifactList[1] ?? "");
     const history = url.pathname.match(/^\/task\/(run|session)\/([\w-]+)\/events$/);
     if (history) return this.#history(history[1] as TaskKind, history[2] ?? "", request.signal);
     return this.#asset(url.pathname);
   }
 
-  // ---- write (the only one): delegate new work ----------------------------
+  // ---- write: delegate new work -------------------------------------------
   // Accepts the delegator's plain intent and maps it to the client's create
   // calls. It never touches an existing task. Idempotency key is minted here so
   // a double-submit can't create duplicate work.
   async #delegate(request: Request): Promise<Response> {
-    let body: { prompt?: string; agentType?: string; kind?: string; repo?: string };
+    let body: {
+      prompt?: string;
+      agentType?: string;
+      kind?: string;
+      repo?: string;
+      briefIds?: unknown;
+    };
     try {
       body = await request.json();
     } catch {
@@ -152,6 +166,21 @@ export class BoardServer {
       return this.#badRequest("Pick an agent.");
     }
     const repo = (body.repo ?? "").trim();
+    const requestedBriefIds = body.briefIds ?? [];
+    if (!Array.isArray(requestedBriefIds)) return this.#badRequest("Selected briefs are invalid.");
+    const briefIds = requestedBriefIds.filter(
+      (value): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value),
+    );
+    if (
+      briefIds.length !== requestedBriefIds.length ||
+      briefIds.length > 16 ||
+      new Set(briefIds).size !== briefIds.length
+    ) {
+      return this.#badRequest("Selected briefs are invalid.");
+    }
+    if (body.kind === "session" && briefIds.length > 0) {
+      return this.#badRequest("Briefs can currently be attached only to one-shot runs.");
+    }
     // A delegator gives intent, not files. Use their repo if provided, else a
     // minimal placeholder workspace so the agent has somewhere to work.
     const workspace = repo
@@ -173,7 +202,10 @@ export class BoardServer {
           headers: jsonHeaders(),
         });
       }
-      const run = await this.#client.runs.create({ workspace, agentType, prompt }, { idempotencyKey });
+      const run = await this.#client.runs.create(
+        { workspace, agentType, prompt, briefIds },
+        { idempotencyKey },
+      );
       return new Response(JSON.stringify({ kind: "run", id: run.id }), {
         status: 201,
         headers: jsonHeaders(),
@@ -183,6 +215,61 @@ export class BoardServer {
       const code = error instanceof Error ? error.name : "error";
       return this.#badRequest(`Could not delegate the work (${code}).`);
     }
+  }
+
+  // ---- write: promote immutable evidence ---------------------------------
+  async #promoteBrief(request: Request): Promise<Response> {
+    let body: { title?: string; artifactId?: string; path?: string };
+    try {
+      body = await request.json();
+    } catch {
+      return this.#badRequest("Could not read the request.");
+    }
+    const title = (body.title ?? "").trim();
+    const artifactId = (body.artifactId ?? "").trim();
+    const path = (body.path ?? "").trim();
+    if (!title || title.length > 160) return this.#badRequest("Give the brief a short title.");
+    if (!/^[a-f0-9]{64}$/.test(artifactId) || !path) {
+      return this.#badRequest("Choose a captured text artifact.");
+    }
+    try {
+      const brief = await this.#client.briefs.create({ title, artifactId, path });
+      return new Response(JSON.stringify({ brief }), { status: 201, headers: jsonHeaders() });
+    } catch (error) {
+      return this.#badRequest(`Could not keep the brief (${safeMessage(error)}).`);
+    }
+  }
+
+  // ---- read: reusable brief catalog --------------------------------------
+  async #briefs(): Promise<Response> {
+    const page = await this.#client.briefs.list({ limit: 100 });
+    return new Response(JSON.stringify(page), { headers: jsonHeaders() });
+  }
+
+  // ---- read: promotable immutable output ---------------------------------
+  async #taskArtifacts(runId: string): Promise<Response> {
+    const [artifacts, briefs] = await Promise.all([
+      this.#client.artifacts.list(runId),
+      this.#client.briefs.list({ limit: 100 }),
+    ]);
+    const details = await Promise.all(artifacts.map((artifact) => this.#client.artifacts.get(artifact.id)));
+    const promoted = new Map<string, Brief>(
+      briefs.items.map((brief) => [`${brief.artifactId}\0${brief.path}`, brief]),
+    );
+    const entries = details.flatMap(({ artifact, entries }) =>
+      entries
+        .filter(
+          ({ mediaType, size }) => isBriefMediaType(mediaType) && size <= 64 * 1024,
+        )
+        .map((entry) => ({
+          artifactId: artifact.id,
+          path: entry.path,
+          mediaType: entry.mediaType,
+          byteSize: entry.size,
+          brief: promoted.get(`${artifact.id}\0${entry.path}`) ?? null,
+        })),
+    );
+    return new Response(JSON.stringify({ items: entries }), { headers: jsonHeaders() });
   }
 
   #badRequest(message: string): Response {
@@ -362,3 +449,8 @@ export class BoardServer {
 
 const safeMessage = (error: unknown): string =>
   error instanceof Error ? error.name : "stream error";
+
+const isBriefMediaType = (mediaType: string): boolean => {
+  const type = mediaType.split(";", 1)[0]?.trim().toLowerCase();
+  return Boolean(type && (type.startsWith("text/") || type === "application/json" || type.endsWith("+json")));
+};
