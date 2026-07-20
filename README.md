@@ -12,7 +12,7 @@ You hand a task to an AI agent. Then what? You want to know it finished, see wha
 
 Meanwhile is the durable layer under the agent, not another agent. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose.
 
-> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime ship today (`v0.1.3`). A delegator's board — where the people who *asked* for the work watch it close, wait, or recover, and can hand off new work — ships in `v0.1.3` as the isolated [`board/`](board/PRODUCT.md) workspace, verified against a local control plane; it runs from a clone and is not part of the published npm package.
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime ship today (`v0.1.3`). Its isolated [`board/`](board/PRODUCT.md) workspace is a verified single-owner reference surface for reading, delegating, and opening durable task detail. Multi-person Project identity, membership, authorization, attribution, and comments are not implemented; they are the [active product milestone](docs/project-collaboration.md).
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -546,10 +546,13 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 Meanwhile `v0.1.3` is the current public release baseline. The complete credential-free local product path, durable sessions, the delegator's board, and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
+The current Board is not a multi-user security boundary. Its server holds one owner API key, and every key under that owner currently has owner-wide authority. Sharing that Board or key with a team does not create member identity, Project isolation, or safe read-only collaboration.
+
 The deterministic suite proves interrupt, per-turn timeout, replay, and cleanup semantics against replaceable providers. Local release evidence proves the complete host-process product path. Cloudflare release evidence proves one ACP identity across two turns, event replay, cleanup, and control-plane restart on real remote compute; the separate live lifecycle test proves remote hard termination and credential mediation. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these remain operator/platform assertions rather than remote attestation.
 
 Before broad multi-tenant production use, the project still needs:
 
+- durable Actor identity, Project membership, project-scoped authorization, delegator attribution, and append-only comments before claiming a shared team Board;
 - automated package publication tied to verified release receipts;
 - a Pi ACP adapter that propagates an internal model/RPC failure as prompt failure. The exact pinned `pi-acp@0.0.31` currently maps its internal `error` result to ACP `end_turn`; Meanwhile's semantic proof rejects the resulting empty response and publishes no receipt, but that path is not accepted as passed until the adapter boundary is corrected and a clean `remote-live-agent` receipt succeeds;
 - continuous real-account verification for every released remote-provider revision;
@@ -566,15 +569,18 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 
 Meanwhile's direction is to be the durable, trustworthy layer *under* agent work — the thing an application, a team, or the person who requested the work can rely on — rather than another agent or another agent console. Concretely:
 
-- **Shipped (`v0.1.3`).** The durable control plane, durable sessions and turns, the credential-free local runtime, the packaged Cloudflare runtime, and the delegator's board — a read-only, evidence-driven view (with delegate-only write) that answers one question for everyone with a stake in a task, not just the person who launched it: *is it done, is it waiting on someone, or is the system recovering it?* The board is a projection over the durable event stream exposed by `runs.followEvents()` / `sessions.followEvents()` — a view, never a second control plane, and never a way to mutate an existing run.
-- **In development — shared execution intelligence.** Explicit Brief reuse now spans one-shot Runs and turn-scoped durable Sessions through HTTP/OpenAPI, SDK, CLI, and Board delegation. Accepted Runs and Turns retain exact source and workspace-basis snapshots with owner isolation, idempotency binding, restart persistence, dispatch-time byte revalidation, and explicit source/current-workspace relationship classification. The next boundary is evidence-backed fact discovery and conflict/supersession semantics; automatic attachment and cross-owner sharing remain out of scope.
-- **Then — an open contract.** Hardening the typed client and OpenAPI surface so other tools (boards, IDEs, chat entry points) can run on Meanwhile's durable, credential-mediating, auditable core instead of rebuilding it.
+- **Shipped (`v0.1.3`).** The durable control plane, durable sessions and turns, credential-free local runtime, packaged Cloudflare runtime, and a single-owner Board projection over durable Run/Session evidence.
+- **Landed but paused.** Explicit owner-scoped Brief reuse spans one-shot Runs and turn-scoped Sessions with immutable provenance, workspace relevance, idempotency, restart persistence, and dispatch-time byte revalidation. It is a supporting capability, not the active product milestone; Fact discovery and further intelligence expansion are frozen.
+- **Now — Project collaboration.** Introduce stable Actor identity, Project membership and roles, immutable delegator attribution, Project-scoped authorization across every derived resource, a shared Project watch, and append-only comments. Completion requires the two-person positive and negative proof in [Project collaboration](docs/project-collaboration.md), not merely a Project field or updated Board copy.
+- **Then — Project-scoped execution intelligence.** Bind Brief discovery and reuse to the source Project before adding fact discovery, conflict/supersession, or explicit cross-Project sharing.
+- **Then — an open integration contract.** Let external boards, IDEs, and chat entry points consume the Project and durable execution APIs instead of rebuilding identity, credentials, audit, recovery, and evidence.
 
 Only the *Shipped* line is release evidence. Everything below it is intent, and this document will not describe those items as implemented until their own proofs exist.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — control path, authority, races, recovery, and extension rules
+- [Project collaboration](docs/project-collaboration.md) — active product route, ownership boundaries, gates, and two-person acceptance proof
 - [Provider contract](docs/provider-contract.md) — implement and prove a runtime adapter
 - [Operations](docs/operations.md) — configuration, backup, recovery, telemetry, and Cloudflare operation
 - [Threat model](docs/threat-model.md) — trust boundaries and residual risks

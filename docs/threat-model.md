@@ -21,6 +21,9 @@ Meanwhile aims to provide:
 
 The initial architecture does not claim to:
 
+- provide stable person identity, Project membership, role enforcement, or a
+  safe multi-person Board; all API keys under one owner currently have the same
+  owner-wide authority;
 - make the local provider a sandbox;
 - make an explicitly authorized model/API destination trustworthy;
 - prevent an agent from exfiltrating workspace data to an explicitly allowed destination;
@@ -64,6 +67,11 @@ High-value assets include:
 | Internet client | Unauthenticated and hostile by default |
 
 An API key is authority, not identity proof beyond its owner binding. Anyone holding it acts as that owner until revocation.
+
+Consequently the current Board must not be shared with a team through one
+common API key. Multi-person collaboration requires the Actor, Project, and
+membership boundary defined in [Project collaboration](project-collaboration.md);
+UI filtering alone cannot provide it.
 
 ## Trust boundaries
 

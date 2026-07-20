@@ -13,6 +13,7 @@ const markdownFiles = [
   "SECURITY.md",
   "docs/architecture.md",
   "docs/operations.md",
+  "docs/project-collaboration.md",
   "docs/provider-contract.md",
   "docs/threat-model.md",
 ] as const

@@ -41,7 +41,15 @@ A Turn, not an AgentSession, explicitly selects ordered Brief IDs. Turn admissio
 
 The session persists its prepared workspace basis, including the resolved repository commit, so Run and Turn use the same relevance semantics. Existing ACP continuity remains unchanged: a Brief-backed turn can teach the live context, but the durable evidence contract belongs to that turn.
 
-### 4. Fact discovery and conflict handling — next
+### 4. Project authorization — prerequisite
+
+The implemented Brief contract is owner-scoped because the current product has
+no stable Actor or Project membership model. Before adding discovery, Briefs
+must inherit the source Run's Project and every list/read/reuse path must enforce
+active Project membership. The controlling sequence and two-person proof live
+in [Project collaboration](project-collaboration.md).
+
+### 5. Fact discovery and conflict handling — paused
 
 Discovery should remain owner-directed and evidence-backed. A later contract may promote structured facts from declared artifact entries, but each fact must retain its source Brief and artifact identity. Search or ranking may propose evidence; it may never attach it automatically or become authoritative.
 
@@ -51,4 +59,4 @@ When multiple facts disagree, Meanwhile should expose the conflict and workspace
 
 Each step must prove the whole ownership path through HTTP/OpenAPI, SDK, CLI or Board where relevant, SQLite restart persistence, owner isolation, idempotency conflict, runner/turn dispatch revalidation, prompt-injection containment, and semantic end-to-end output. Provider compatibility and credentialed live-agent proof remain separate evidence classes.
 
-The current implementation stops at explicit Run and Turn reuse with workspace relevance. Extraction, ranking, conflicts, and supersession must not be described as shipped until those durable contracts and proofs exist.
+The current implementation stops at explicit owner-scoped Run and Turn reuse with workspace relevance. Project collaboration is the active milestone. Extraction, ranking, conflicts, and supersession remain paused and must not be described as shipped or next until Project authorization and the two-person product proof exist.

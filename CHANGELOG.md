@@ -15,6 +15,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- Product status and roadmap now distinguish the shipped single-owner Board from the unimplemented multi-person Project experience. Stable Actor identity, Project membership and authorization, delegator attribution, a shared Project watch, and append-only comments are the active milestone; Fact discovery and further Brief expansion are paused until the two-person collaboration proof passes. This is a documentation and sequencing correction, not a claim that collaboration contracts already exist.
 - The single current SQLite schema now persists immutable Brief metadata, accepted context-artifact snapshots on Runs and Turns, and resolved repository commits on AgentSessions. As with every schema fingerprint change before an upgrade contract exists, operators must use a fresh data root. Existing durable data cannot be carried forward until a separate export/import contract exists; Meanwhile never attempts in-place migration.
 
 ### Pending release evidence

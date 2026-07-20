@@ -23,6 +23,8 @@ meanwhile sessions watch <session-id> --json
 
 The original challenge is the acceptance floor. The product bar is that a failed remote run can be explained, cancelled, recovered, or cleaned up without SSH access.
 
+The current product milestone is the shared Project watch: people in one Project can see work that any member delegated, open its durable conversation and evidence, and add append-only comments without gaining control of another member's agent. The durable execution core makes that collaboration trustworthy; the Board makes it visible. This outcome is not implemented yet. The controlling route and acceptance gates are in [`docs/project-collaboration.md`](docs/project-collaboration.md).
+
 Meanwhile is not a generic shell API, agent/model provider, workflow engine, provider-specific wrapper, secrets manager, CI system, IDE, or dashboard. Do not add Redis, Kafka, a distributed queue, DAG engine, DI container, ORM, MCP facade, second remote provider, or UI merely to look complete.
 
 ## 2. The design in one sentence
@@ -46,6 +48,8 @@ Interactive continuity adds four entities without changing those lifecycles:
 A `Run` remains the atomic execution and promotion unit. An `AgentSession` is the interactive continuity unit. Do not add optional fields until one entity can impersonate the other.
 
 A `Brief` is not another execution lifecycle. It is an immutable, owner-curated reference from reusable context back to authoritative artifact evidence.
+
+Project collaboration adds identity and visibility, not another execution lifecycle. `Owner` remains the tenant boundary; a future `Actor` is durable person/service identity; `ProjectMembership` grants Project capabilities; `Run` and `AgentSession` remain execution truth; an append-only `Comment` remains collaboration evidence and never silently becomes agent input. API keys are credentials, not durable people. These target contracts are unimplemented until their matching source and proofs land.
 
 ```text
 User / upstream agent
@@ -249,6 +253,21 @@ Shared execution intelligence reuses the artifact boundary; it is not a second m
 Immediately before one-shot runner launch or interactive `turn.start` delivery, the control plane re-reads each selected entry through the owner-scoped artifact service and fails closed if any byte identity or snapshotted source-workspace basis no longer matches. After workspace preparation records the run or session's current resolved commit, a pure provider-neutral comparison classifies each entry as `exact`, `same_repository_changed`, `same_repository_unresolved`, `different_workspace`, or legacy `unknown`. The control plane places that classification, both workspace bases, and the bounded content in a versioned, delimiter-safe execution-context envelope ahead of the current task. The envelope states that prior agent output is untrusted historical observation, not instruction, and that workspace relationship is provenance rather than proof of truth. Explicit owner selection authorizes reuse; it does not make agent-produced text true or safe from prompt injection.
 
 The initial contract is deliberately explicit and artifact-to-run/turn. A turn's Briefs apply only to that turn; an AgentSession never gains ambient hidden attachments. The live ACP context may naturally retain what an earlier turn discussed, but durable reuse authority stays with the selecting turn. The system does not automatically mine logs, rank memories, share across owners, mutate source artifacts, or publish session conversation as intelligence. Those require separate durable contracts rather than optional behavior hidden in the runner.
+
+### 5.8 Project collaboration
+
+Project collaboration is the active product milestone. The current source has only owner-wide authorization: bearer authentication yields `ownerId` plus `apiKeyId`, every key under an owner has the same authority, and the Board holds one owner key. It has no Project, stable Actor, membership, immutable delegator identity, comment, mention, or project-scoped stream. Never describe the current Board as multi-person collaboration.
+
+The target boundary is defined in [`docs/project-collaboration.md`](docs/project-collaboration.md). Its controlling rules are:
+
+- collaboration occurs inside one owner; never punch cross-owner sharing exceptions;
+- an API key authenticates one stable Actor but never substitutes for that Actor's identity;
+- Project is an explicit collaboration boundary and never inferred from repository URL or workspace input;
+- new Runs and AgentSessions bind immutable Project and delegating Actor identity while their existing executors remain the only lifecycle owners;
+- Project members may read authorized conversation/evidence and append comments, but another Actor's existing work remains non-operable;
+- comments use a separate append-only collaboration contract and never enter RunEvent, SessionEvent, prompts, or agent context implicitly;
+- every derived resource follows the authoritative Run/Session Project relationship; owner equality alone is insufficient once multiple Actors and Projects exist;
+- Fact discovery and further Brief expansion are frozen until the two-person Project proof passes. The implemented Brief kernel remains supported, but it is not the current roadmap gate.
 
 ## 6. Run state machine
 
@@ -623,6 +642,7 @@ scripts/release-proof-receipt.ts  versioned proof taxonomy, schema, digest, and 
 scripts/verify-release-proof.ts   independent receipt/revision verification
 .github/workflows/remote-proof.yml explicit real-account proof plus signed receipt provenance
 docs/                             architecture, provider authoring, operations
+docs/project-collaboration.md     controlling route for the active product milestone
 docs/threat-model.md              trust boundaries, attacker model, residual risk
 ```
 
@@ -684,6 +704,8 @@ Tests must prove:
 - each Cloudflare live-agent proof requires credentialed generation and multi-turn continuity inside the sandbox; a deterministic ACP fixture, image version check, health response, or lifecycle-only test is not accepted as equivalent evidence, and exact model identity is not claimed without attestation;
 - pinned OTel SDK/exporter packages initialize and export under Bun.
 
+Before claiming Project collaboration, one clean revision must additionally prove the complete two-person path in `docs/project-collaboration.md`: distinct Actor credentials, same-Project visibility, delegator attribution, safe conversation/artifact detail, append-only comments and mentions, raw-API denial of another Actor's lifecycle commands, same-owner non-member isolation, cross-owner isolation, stream revocation after member removal, key rotation, restart, backup, and restore. A Project field, multiple owner keys, mock UI, or two browser windows is not equivalent evidence.
+
 Assert ordering, error codes, and side effects with injected clocks and deterministic adapters. Do not sleep and hope. A mock proves replaceability; only the gated live test proves real provider integration.
 
 ## 15. Product surface and operating contract
@@ -742,6 +764,8 @@ Build in dependency order:
 6. Cloudflare bridge and real remote provider.
 7. CLI, doctor, demo, documentation, containers, complete verification.
 
+The existing execution stack has completed that sequence. Forward product work now proceeds only through the ordered gates in `docs/project-collaboration.md`: durable Actor/Project membership; Project-bound work and derived-resource authorization; shared Project watch; append-only collaboration; two-person product proof; then Project-scoped shared execution intelligence and external integrations. Do not begin a later gate because an earlier schema or UI compiles.
+
 For every change:
 
 - keep the surface small and ownership complete;
@@ -758,6 +782,9 @@ For every change:
 Honest current limits:
 
 - local execution is not isolation;
+- API keys currently authenticate only an owner and all keys under that owner have owner-wide authority;
+- the Board is a single-owner reference surface, not a shared multi-person Project;
+- Project identity, Actor identity, memberships, delegator attribution, comments, mentions, and project-scoped authorization are not implemented;
 - SQLite supports one active control-plane writer;
 - in-flight recovery is only as strong as provider process identity and replay;
 - mediated credentials do not make an allowed destination trustworthy or prevent workspace-data exfiltration to it;
@@ -786,6 +813,8 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
 - The local proof is deliberately credential-free and deterministic. Credential-bearing Codex, Claude Code, and Pi proofs run only through the Cloudflare mediation boundary; local execution has no exception path.
 - The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. The image gate proves installation and bootability. Each separate credential-gated acceptance command requires remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup; only its clean current-revision receipt establishes that path as passed.
-- Version `0.1.1` is the current tagged release baseline, not a blanket production-support promise. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
+- Version `0.1.3` is the current published release baseline. Its Board proves one owner's read/delegate/detail loop, not multi-person Project collaboration.
+- The branch also contains unreleased owner-scoped Brief reuse across one-shot Runs and turn-scoped Sessions with workspace relevance and dispatch-time byte revalidation. That work remains a valid supporting capability, but Fact discovery and further intelligence work are paused behind the Project collaboration gates.
+- The active milestone is Gate 1 of `docs/project-collaboration.md`: durable Actor identity, Project, membership, and credential binding. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

@@ -84,6 +84,23 @@ Interactive work adds `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent`
 
 The most important negative rule is simple: neither executor branches on a provider name. Provider choice is resolved by a registry; capability decisions use explicit provider-neutral facts.
 
+## Current collaboration boundary
+
+The implemented authorization model is tenant-wide, not Project-wide. Bearer
+authentication resolves only `ownerId` and `apiKeyId`; every key under one
+owner currently reaches the same owner-scoped resources. The Board is therefore
+one authenticated owner's projection, even when its presentation is useful to
+a stakeholder.
+
+The active architecture milestone introduces stable Actor identity, Project
+membership, immutable delegator attribution, project-scoped derived-resource
+authorization, a shared watch, and append-only comments without changing Run or
+AgentSession lifecycle ownership. `Owner` remains the tenant boundary; Project
+is never inferred from a repository; API keys remain credentials rather than
+people; comments remain separate from execution events and agent input. See
+[Project collaboration](project-collaboration.md) for the ordered gates and
+completion proof.
+
 The public contract has one implementation path. Pure Zod schemas define requests and responses, generate OpenAPI through the Hono route layer, and validate SDK traffic at runtime. `src/client.ts` adds the deep consumer semantics that raw HTTP should not force every caller to rebuild: authentication, request correlation, durable waits, structured safe failures, and cursor-correct `AsyncIterable` event following. `src/timeline.ts` is a pure projection from durable events to messages, tool calls, plans, usage, and statuses. The CLI and executable demos are presentation layers over that client. None may call a service or store directly, so local convenience cannot become a second control plane.
 
 ## Control path of a run

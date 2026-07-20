@@ -4,6 +4,20 @@ The design brief for the delegator's Waiting-For board. Every visual and
 interaction decision traces back to this. (Format follows the ui-skills
 `impeccable`/`interface-design` "Intent First" method.)
 
+## Product boundary and current status
+
+The intended product is one shared Project watch: every Project member can see
+work that any member delegated, open the agent conversation and durable
+evidence, and add an append-only comment or mention without controlling another
+member's agent.
+
+The current implementation is only the visual and read-side precursor. One
+Board server holds one owner API key and shows that owner's Runs and Sessions.
+It has no Project, member identity, membership authorization, delegator
+attribution, comment, or mention. Do not deploy it with one shared key and call
+that team collaboration. The control-plane route that must land first is
+defined in [Project collaboration](../docs/project-collaboration.md).
+
 ## Who is this human?
 
 **Not the operator who launched the agents — the person who is *waiting on them*.**
@@ -16,6 +30,9 @@ Three faces of one role, "the delegator":
   reading a terminal or pinging the engineer every hour.
 - A **reviewer / on-call** who inherited someone else's running work and must
   tell, in three seconds, whether anything is stuck, unsafe, or on fire.
+
+In the final Project surface these are distinct authenticated people, not
+different personas sharing one owner credential.
 
 They are **anxious, interrupt-driven, and low-context**. They did not type the
 prompts. They will not run a command. They open this on a second monitor or a
