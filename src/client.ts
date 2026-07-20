@@ -132,6 +132,7 @@ export interface WaitOptions extends RequestOptions {
 export interface SendSessionTurnOptions extends CreateRunOptions {
   readonly timeoutMs?: number
   readonly conflictPolicy?: "reject" | "enqueue" | "interrupt_and_send"
+  readonly briefIds?: readonly string[]
 }
 
 export interface RunsClient {
@@ -451,6 +452,7 @@ class Sessions implements SessionsClient {
             ...(options.conflictPolicy === undefined
               ? {}
               : { conflictPolicy: options.conflictPolicy }),
+            ...(options.briefIds === undefined ? {} : { briefIds: [...options.briefIds] }),
           }
         : input
     const result = await this.transport.json(

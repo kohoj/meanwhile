@@ -155,6 +155,30 @@ export interface BundleWorkspaceSource {
 
 export type WorkspaceSource = RepositoryWorkspaceSource | BundleWorkspaceSource
 
+/**
+ * Credential-free workspace identity captured alongside reusable evidence.
+ * A repository basis distinguishes caller intent from the commit actually
+ * prepared by the runtime; a bundle is already content addressed.
+ */
+export type WorkspaceBasis =
+  | {
+      readonly type: "repository"
+      readonly url: string
+      readonly requestedRevision: string | null
+      readonly resolvedRevision: string | null
+    }
+  | {
+      readonly type: "bundle"
+      readonly artifactId: string
+    }
+
+export type WorkspaceRelationship =
+  | "exact"
+  | "same_repository_changed"
+  | "same_repository_unresolved"
+  | "different_workspace"
+  | "unknown"
+
 export interface StructuredError {
   readonly code: string
   readonly message: string
@@ -199,6 +223,8 @@ export interface Run {
 export interface ExecutionContextArtifact {
   readonly artifactId: string
   readonly sourceRunId: string
+  /** Null only for durable snapshots accepted before workspace-basis v2. */
+  readonly sourceWorkspace: WorkspaceBasis | null
   readonly path: string
   readonly digest: string
   readonly mediaType: string
@@ -322,6 +348,7 @@ export interface AgentSession {
   readonly processId: string | null
   readonly agentSessionId: string | null
   readonly capabilities: JsonObject | null
+  readonly resolvedRevision: string | null
   readonly idleTimeoutMs: number
   readonly createdAt: Timestamp
   readonly startedAt: Timestamp | null
@@ -336,6 +363,8 @@ export interface SessionTurn {
   readonly sessionId: string
   readonly sequence: number
   readonly prompt: string
+  /** Immutable, owner-authorized evidence selected for this turn only. */
+  readonly contextArtifacts: readonly ExecutionContextArtifact[]
   readonly timeoutMs: number
   readonly deadlineAt: Timestamp | null
   readonly status: TurnStatus
@@ -496,6 +525,7 @@ export interface Brief {
   readonly title: string
   readonly artifactId: string
   readonly sourceRunId: string
+  readonly sourceWorkspace: WorkspaceBasis
   readonly path: string
   readonly digest: string
   readonly mediaType: string

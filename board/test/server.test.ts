@@ -2,7 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { API_OWNER_ID, API_RUN_ID, API_TIMESTAMP, apiRun } from "../../test/fixtures/api";
+import {
+  API_OWNER_ID,
+  API_RUN_ID,
+  API_SESSION_ID,
+  API_TIMESTAMP,
+  apiRun,
+  apiSession,
+  apiTurn,
+} from "../../test/fixtures/api";
 import { BoardServer } from "../src/server";
 
 // Existing task lifecycle is structurally read-only. These tests pin the route
@@ -68,6 +76,7 @@ describe("new-intent boundary", () => {
       title: "Authentication findings",
       artifactId,
       sourceRunId: API_RUN_ID,
+      sourceWorkspace: { type: "bundle" as const, artifactId: "d".repeat(64) },
       path: "findings.md",
       digest: "c".repeat(64),
       mediaType: "text/markdown; charset=utf-8",
@@ -82,6 +91,12 @@ describe("new-intent boundary", () => {
         const url = new URL(request.url);
         if (request.method === "POST") upstreamBodies.push(await request.json());
         if (url.pathname === "/runs") return Response.json({ run: apiRun() }, { status: 201 });
+        if (url.pathname === "/sessions") {
+          return Response.json({ session: apiSession("queued") }, { status: 201 });
+        }
+        if (url.pathname === `/sessions/${API_SESSION_ID}/turns`) {
+          return Response.json({ turn: apiTurn() }, { status: 201 });
+        }
         if (url.pathname === "/briefs" && request.method === "POST") {
           return Response.json({ brief }, { status: 201 });
         }
@@ -130,6 +145,19 @@ describe("new-intent boundary", () => {
         artifactId: brief.artifactId,
         path: brief.path,
       });
+
+      const delegatedSession = await fetch(`${intentBase}/delegate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "session",
+          agentType: "demo",
+          prompt: "Continue with the accepted finding",
+          briefIds: [briefId],
+        }),
+      });
+      expect(delegatedSession.status).toBe(201);
+      expect(upstreamBodies[3]).toMatchObject({ briefIds: [briefId] });
 
       const listed = await fetch(`${intentBase}/briefs`);
       expect(listed.status).toBe(200);

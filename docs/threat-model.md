@@ -151,6 +151,7 @@ The agent is expected to modify files and run tools; sandbox isolation, credenti
 | Secret in artifact | Scan for exact resolved secret bytes before persistence; reject or quarantine and audit | Encoded, transformed, derived, or newly obtained secrets may evade exact matching |
 | Malicious media | Preserve bytes and safe media metadata; previews use a hostile-content origin | Users who download/open artifacts still assume client-side risk |
 | Prior-agent prompt injection | Brief promotion and selection are explicit; accepted evidence is text/JSON-only, bounded, content-addressed, revalidated, delimiter-escaped, and labeled as untrusted observation rather than instructions | Models may still follow malicious text; owner curation is authorization, not proof of truth or prompt-injection immunity |
+| Stale prior evidence | Accepted context freezes a credential-free source-workspace basis; launch compares it with the prepared current workspace and resolved commit and places the conservative relationship in the evidence envelope | An `exact` workspace relationship proves identity, not that the earlier agent conclusion was correct or remains semantically applicable |
 
 Artifact capture is not a general recursive copy. The collector reads only declared logical paths and treats every filesystem entry as hostile.
 

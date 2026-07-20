@@ -96,6 +96,7 @@ describe("Meanwhile client contract", () => {
       title: "Authentication findings",
       artifactId: "f".repeat(64),
       sourceRunId: API_RUN_ID,
+      sourceWorkspace: { type: "bundle" as const, artifactId: "a".repeat(64) },
       path: "findings.md",
       digest: "e".repeat(64),
       mediaType: "text/markdown; charset=utf-8",
@@ -263,6 +264,7 @@ describe("Meanwhile client contract", () => {
     const created = await client.sessions.send(API_SESSION_ID, "inspect the failure", {
       conflictPolicy: "enqueue",
       timeoutMs: 60_000,
+      briefIds: ["f".repeat(64)],
       idempotencyKey: "turn-once",
     })
     const terminal = await client.sessions.waitForTurn(API_SESSION_ID, created.id, {
@@ -272,6 +274,7 @@ describe("Meanwhile client contract", () => {
 
     expect(requestBody).toEqual({
       prompt: "inspect the failure",
+      briefIds: ["f".repeat(64)],
       conflictPolicy: "enqueue",
       timeoutMs: 60_000,
     })

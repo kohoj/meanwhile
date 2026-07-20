@@ -553,7 +553,7 @@ async function sendSessionTurn(args: readonly string[], context: CliContext): Pr
   const delimiter = args.indexOf("--")
   if (delimiter < 0) throw argumentError("Turn prompt must follow a -- delimiter")
   const parsed = parseArguments(args.slice(0, delimiter), {
-    values: ["conflict", "timeout", "idempotency-key"],
+    values: ["brief", "conflict", "timeout", "idempotency-key"],
   })
   const sessionId = parsed.onlyPositional()
   const prompt = args
@@ -570,6 +570,7 @@ async function sendSessionTurn(args: readonly string[], context: CliContext): Pr
     sessionId,
     {
       prompt,
+      briefIds: [...uniqueValues(parsed.many("brief"), "--brief")],
       timeoutMs: parseDurationOption(parsed.one("timeout") ?? "1h", "--timeout"),
       conflictPolicy: conflictPolicy as "reject" | "enqueue" | "interrupt_and_send",
     },
@@ -1412,7 +1413,7 @@ Usage:
   meanwhile sessions create (--repo URL | --files DIR) --agent NAME [options]
   meanwhile sessions list [--limit N]
   meanwhile sessions get SESSION_ID
-  meanwhile sessions send SESSION_ID [--conflict POLICY] [--timeout DURATION] -- PROMPT
+  meanwhile sessions send SESSION_ID [--brief BRIEF_ID] [--conflict POLICY] [--timeout DURATION] -- PROMPT
   meanwhile sessions turns SESSION_ID
   meanwhile sessions watch SESSION_ID --json [--after N] [--limit N]
   meanwhile sessions interrupt SESSION_ID
@@ -1452,6 +1453,7 @@ Run options:
 
 Session options:
   --idle-timeout 30s|10m|1h   Close an inactive live session and release compute
+  --brief BRIEF_ID            Curated prior evidence for this turn; repeatable
   --conflict POLICY           reject, enqueue, or interrupt_and_send
 
 Deployment options:

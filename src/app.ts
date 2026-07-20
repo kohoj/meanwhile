@@ -137,7 +137,7 @@ export const createApplication = async (
     const catalog = await AgentCatalog.load(config.agentCatalogPath)
     const artifacts = new LocalArtifactStore(config.artifactDir)
     const artifactService = new ArtifactService(store, artifacts)
-    const executionContext = new ExecutionContext(artifactService)
+    const executionContext = new ExecutionContext(artifactService, store)
     const briefService = new BriefService({ store, executionContext })
     const auditService = new AuditService(store)
     const apiKeyService = new ApiKeyService(store)
@@ -202,6 +202,7 @@ export const createApplication = async (
       providers: providerRegistry,
       runner: new SessionRunnerController(),
       workspace: workspacePreparer,
+      executionContext,
       secrets,
       logger: instrumentation.telemetry.logger,
       telemetry: instrumentation.telemetry,
@@ -223,6 +224,7 @@ export const createApplication = async (
           runtimeCredentialBroker(providerRegistry.get(name)) !== null,
       },
       executionProvenance,
+      briefs: briefService,
       defaultProvider: config.defaultProvider,
     })
     const reaper = new RuntimeReaper(store, providerRegistry, {

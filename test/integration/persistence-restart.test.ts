@@ -40,6 +40,7 @@ describe("SQLite persistence", () => {
         {
           artifactId: "a".repeat(64),
           sourceRunId: "prior-run",
+          sourceWorkspace: null,
           path: "findings.md",
           digest: "b".repeat(64),
           mediaType: "text/markdown; charset=utf-8",
@@ -78,6 +79,7 @@ describe("SQLite persistence", () => {
         {
           artifactId: "a".repeat(64),
           sourceRunId: "prior-run",
+          sourceWorkspace: null,
           path: "findings.md",
           digest: "b".repeat(64),
           mediaType: "text/markdown; charset=utf-8",
@@ -105,6 +107,7 @@ describe("SQLite persistence", () => {
         {
           artifactId: "a".repeat(64),
           sourceRunId: "prior-run",
+          sourceWorkspace: null,
           path: "findings.md",
           digest: "b".repeat(64),
           mediaType: "text/markdown; charset=utf-8",
@@ -125,6 +128,91 @@ describe("SQLite persistence", () => {
     })
     expect(replay.replayed).toBeTrue()
     expect(replay.run.id).toBe("run-a")
+    second.close()
+  })
+
+  test("session workspace basis and turn-scoped context survive restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "meanwhile-session-context-store-"))
+    directories.push(directory)
+    const path = join(directory, "control-plane.sqlite")
+    const createdAt = "2026-07-21T00:00:00.000Z"
+    const sourceWorkspace = {
+      type: "repository" as const,
+      url: "https://example.test/repository.git",
+      requestedRevision: "main",
+      resolvedRevision: "b".repeat(40),
+    }
+
+    const first = new Store(path)
+    first.createOwner({ id: "owner-session", name: "Session owner", createdAt })
+    first.createAgentSession({
+      id: "session-context",
+      ownerId: "owner-session",
+      workspace: {
+        type: "repository",
+        url: sourceWorkspace.url,
+        revision: sourceWorkspace.requestedRevision,
+      },
+      agentType: "demo",
+      agentSpec: testAgentSpec(),
+      agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
+      executionProvenance: testExecutionProvenanceFor("local"),
+      env: {},
+      secretRefs: {},
+      provider: "local",
+      idleTimeoutMs: 60_000,
+      createdAt,
+      audit: {
+        actorApiKeyId: null,
+        requestId: "session-context",
+        traceId: null,
+        metadata: {},
+      },
+    })
+    expect(
+      first.setAgentSessionResolvedRevision("session-context", "c".repeat(40), createdAt),
+    ).toBeTrue()
+    first.createSessionTurn({
+      id: "turn-context",
+      ownerId: "owner-session",
+      sessionId: "session-context",
+      prompt: "Use the finding",
+      contextArtifacts: [
+        {
+          artifactId: "a".repeat(64),
+          sourceRunId: "source-run",
+          sourceWorkspace,
+          path: "finding.md",
+          digest: "d".repeat(64),
+          mediaType: "text/markdown; charset=utf-8",
+          byteSize: 42,
+        },
+      ],
+      timeoutMs: 60_000,
+      conflictPolicy: "reject",
+      createdAt,
+      audit: {
+        actorApiKeyId: null,
+        requestId: "turn-context",
+        traceId: null,
+        metadata: {},
+      },
+    })
+    first.close()
+
+    const second = new Store(path)
+    expect(second.getAgentSession("owner-session", "session-context")?.resolvedRevision).toBe(
+      "c".repeat(40),
+    )
+    expect(
+      second.getSessionTurn("owner-session", "session-context", "turn-context")?.contextArtifacts,
+    ).toEqual([
+      expect.objectContaining({
+        sourceRunId: "source-run",
+        sourceWorkspace,
+        digest: "d".repeat(64),
+      }),
+    ])
     second.close()
   })
 })

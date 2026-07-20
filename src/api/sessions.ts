@@ -224,9 +224,9 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
     )
   })
 
-  routes.openapi(createTurnRoute, (context) => {
+  routes.openapi(createTurnRoute, async (context) => {
     const request = context.get("requestContext")
-    const result = service.send(
+    const result = await service.send(
       request,
       context.req.valid("param").id,
       context.req.valid("json"),

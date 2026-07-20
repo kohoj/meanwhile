@@ -1,6 +1,7 @@
 import type { PreparedWorkspaceBundle } from "../artifacts/workspace-bundle"
 import {
   type AgentSession,
+  type ExecutionContextArtifact,
   isSafeRepositoryRevision,
   type RequestContext,
   type SessionEvent,
@@ -12,6 +13,7 @@ import { AppError } from "../errors"
 import { hashCanonical } from "../idempotency"
 import type { Store } from "../persistence/store"
 import type { SecretReferenceValidator } from "../secrets"
+import type { BriefService } from "./brief-service"
 import type {
   RunAgentIntentResolver,
   RunExecutionProvenance,
@@ -47,6 +49,7 @@ export interface SessionServiceOptions {
   readonly providerNames: RunProviderNames
   readonly providerCapabilities: SessionProviderCapabilities
   readonly executionProvenance: RunExecutionProvenance
+  readonly briefs?: Pick<BriefService, "resolve">
   readonly defaultProvider: string
   readonly clock?: () => Date
   readonly id?: () => string
@@ -62,6 +65,7 @@ export class SessionService {
   readonly #providerNames: RunProviderNames
   readonly #providerCapabilities: SessionProviderCapabilities
   readonly #executionProvenance: RunExecutionProvenance
+  readonly #briefs: Pick<BriefService, "resolve"> | undefined
   readonly #defaultProvider: string
   readonly #clock: () => Date
   readonly #id: () => string
@@ -76,6 +80,7 @@ export class SessionService {
     this.#providerNames = options.providerNames
     this.#providerCapabilities = options.providerCapabilities
     this.#executionProvenance = options.executionProvenance
+    this.#briefs = options.briefs
     this.#defaultProvider = options.defaultProvider
     this.#clock = options.clock ?? (() => new Date())
     this.#id = options.id ?? (() => crypto.randomUUID())
@@ -212,23 +217,38 @@ export class SessionService {
     return this.#store.listSessionTurns(ownerId, sessionId, options.after, options.limit)
   }
 
-  send(
+  async send(
     context: RequestContext,
     sessionId: string,
     input: {
       readonly prompt: string
+      readonly briefIds?: readonly string[]
       readonly timeoutMs: number
       readonly conflictPolicy: TurnConflictPolicy
     },
     idempotencyKey?: string,
-  ): { readonly turn: SessionTurn; readonly replayed: boolean } {
+  ): Promise<{ readonly turn: SessionTurn; readonly replayed: boolean }> {
     this.#requireSession(context.ownerId, sessionId)
-    const requestHash = idempotencyKey === undefined ? undefined : hashCanonical(input)
+    const briefIds = input.briefIds ?? []
+    const briefResolver = this.#briefs
+    let contextArtifacts: readonly ExecutionContextArtifact[]
+    if (briefIds.length === 0) {
+      contextArtifacts = []
+    } else {
+      if (briefResolver === undefined) {
+        throw new AppError({ code: "INVALID_REQUEST", message: "Reusable briefs are unavailable" })
+      }
+      contextArtifacts = await briefResolver.resolve(context.ownerId, briefIds)
+    }
+    const { briefIds: _requestedBriefs, ...inputWithoutContext } = input
+    const normalizedInput = { ...inputWithoutContext, contextArtifacts }
+    const requestHash = idempotencyKey === undefined ? undefined : hashCanonical(normalizedInput)
     const result = this.#store.createSessionTurn({
       id: this.#id(),
       ownerId: context.ownerId,
       sessionId,
-      ...input,
+      ...inputWithoutContext,
+      contextArtifacts,
       createdAt: this.#clock().toISOString(),
       ...(idempotencyKey === undefined || requestHash === undefined
         ? {}
@@ -237,7 +257,7 @@ export class SessionService {
         actorApiKeyId: context.apiKeyId,
         requestId: context.requestId,
         traceId: context.traceId,
-        metadata: {},
+        metadata: { contextArtifacts: contextArtifacts.length },
       },
     })
     this.#commands.enqueue(sessionId)

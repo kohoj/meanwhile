@@ -2,6 +2,7 @@ import type { Brief, ExecutionContextArtifact, RequestContext } from "../domain"
 import { AppError } from "../errors"
 import { hashCanonical } from "../idempotency"
 import type { Page, Store } from "../persistence/store"
+import { sameWorkspaceBasis } from "../workspace-basis"
 import type { ExecutionContext } from "./execution-context"
 
 export interface CreateBriefCommand {
@@ -41,7 +42,9 @@ export class BriefService {
         ...(input.path === undefined ? {} : { path: input.path }),
       },
     ])
-    if (source === undefined) throw new Error("Brief source resolution returned no evidence")
+    if (source === undefined || source.sourceWorkspace === null) {
+      throw new Error("Brief source resolution returned incomplete evidence")
+    }
 
     const brief: Brief = {
       id: hashCanonical({
@@ -55,6 +58,7 @@ export class BriefService {
       title: input.title,
       artifactId: source.artifactId,
       sourceRunId: source.sourceRunId,
+      sourceWorkspace: source.sourceWorkspace,
       path: source.path,
       digest: source.digest,
       mediaType: source.mediaType,
@@ -106,6 +110,8 @@ export class BriefService {
         brief === undefined ||
         source.artifactId !== brief.artifactId ||
         source.sourceRunId !== brief.sourceRunId ||
+        source.sourceWorkspace === null ||
+        !sameWorkspaceBasis(source.sourceWorkspace, brief.sourceWorkspace) ||
         source.path !== brief.path ||
         source.digest !== brief.digest ||
         source.mediaType !== brief.mediaType ||

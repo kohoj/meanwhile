@@ -33,6 +33,7 @@ import {
 } from "../providers/runtime-provider"
 import type { ResolvedSecretMaterial, SecretPurpose, SecretResolver } from "../secrets"
 import type { OperationSpan, StructuredLogger, Telemetry, TelemetryScope } from "../telemetry"
+import { workspaceBasis } from "../workspace-basis"
 import {
   ArtifactCollectionError,
   type ArtifactCollectionLimits,
@@ -491,7 +492,7 @@ export class RunExecutor implements ManagedComponent {
         createdAt: this.#now(),
       })
       if (launch === null) return
-      const prompt = await this.#renderPrompt(run)
+      const prompt = await this.#renderPrompt(current)
       const resolvedSecrets = await this.#secrets.resolve(
         run.secretRefs,
         secretScope(run.ownerId, "agent", run.id),
@@ -1414,7 +1415,12 @@ export class RunExecutor implements ManagedComponent {
         message: "Accepted artifact-backed execution context cannot be materialized",
       })
     }
-    return this.#executionContext.renderPrompt(run.ownerId, run.contextArtifacts, run.prompt)
+    return this.#executionContext.renderPrompt(
+      run.ownerId,
+      run.contextArtifacts,
+      workspaceBasis(run.workspace, run.resolvedRevision),
+      run.prompt,
+    )
   }
 
   #setRunSpanOutcome(span: OperationSpan, runId: string): void {

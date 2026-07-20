@@ -106,6 +106,39 @@ export const WorkspaceSourceSchema = z.discriminatedUnion("type", [
     .strict(),
 ])
 
+export const WorkspaceBasisSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("repository"),
+      url: repositoryUrl,
+      requestedRevision: z.string().max(255).refine(isSafeRepositoryRevision).nullable(),
+      resolvedRevision: z
+        .string()
+        .regex(/^[a-f0-9]{40,64}$/i)
+        .nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("bundle"),
+      artifactId: ArtifactIdentifierSchema,
+    })
+    .strict(),
+])
+
+export const ExecutionContextArtifactSchema = z
+  .object({
+    artifactId: ArtifactIdentifierSchema,
+    sourceRunId: IdentifierSchema,
+    sourceWorkspace: WorkspaceBasisSchema.nullable().default(null),
+    path: RelativeWorkspacePathSchema,
+    digest: ArtifactIdentifierSchema,
+    mediaType: z.string().min(1).max(256),
+    byteSize: z.number().int().nonnegative(),
+  })
+  .strict()
+  .meta({ id: "ExecutionContextArtifact" })
+
 export const UploadedFileSchema = z
   .object({
     path: RelativeWorkspacePathSchema,
@@ -222,21 +255,7 @@ export const RunSchema = z
     env: z.record(z.string(), z.string()),
     secretRefs: z.record(z.string(), z.string()),
     provider: z.string(),
-    contextArtifacts: z
-      .array(
-        z
-          .object({
-            artifactId: ArtifactIdentifierSchema,
-            sourceRunId: IdentifierSchema,
-            path: RelativeWorkspacePathSchema,
-            digest: ArtifactIdentifierSchema,
-            mediaType: z.string().min(1).max(256),
-            byteSize: z.number().int().nonnegative(),
-          })
-          .strict(),
-      )
-      .max(16)
-      .readonly(),
+    contextArtifacts: z.array(ExecutionContextArtifactSchema).max(16).readonly(),
     artifactPaths: z.array(z.string()).readonly(),
     timeoutMs: z.number().int().positive(),
     deadlineAt: timestamp.nullable(),
@@ -418,6 +437,7 @@ export const BriefSchema = z
     title: z.string().min(1).max(160),
     artifactId: ArtifactIdentifierSchema,
     sourceRunId: IdentifierSchema,
+    sourceWorkspace: WorkspaceBasisSchema,
     path: RelativeWorkspacePathSchema,
     digest: ArtifactIdentifierSchema,
     mediaType: z.string().min(1).max(256),
@@ -625,6 +645,10 @@ export const AgentSessionSchema = z
     processId: z.string().nullable(),
     agentSessionId: z.string().nullable(),
     capabilities: z.record(z.string(), safeJson).nullable(),
+    resolvedRevision: z
+      .string()
+      .regex(/^[a-f0-9]{40,64}$/i)
+      .nullable(),
     idleTimeoutMs: z.number().int().positive(),
     createdAt: timestamp,
     startedAt: timestamp.nullable(),
@@ -641,6 +665,7 @@ export const SessionTurnSchema = z
     sessionId: IdentifierSchema,
     sequence: z.number().int().positive(),
     prompt: z.string(),
+    contextArtifacts: z.array(ExecutionContextArtifactSchema).max(16).readonly(),
     timeoutMs: z.number().int().positive(),
     deadlineAt: timestamp.nullable(),
     status: TurnStatusSchema,
@@ -656,10 +681,20 @@ export const SessionTurnSchema = z
 export const CreateSessionTurnRequestSchema = z
   .object({
     prompt: z.string().min(1).max(1_048_576),
+    briefIds: z.array(ArtifactIdentifierSchema).max(16).default([]),
     timeoutMs: z.number().int().min(1_000).max(86_400_000).default(3_600_000),
     conflictPolicy: z.enum(["reject", "enqueue", "interrupt_and_send"]).default("reject"),
   })
   .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.briefIds).size !== value.briefIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Brief IDs must be unique",
+        path: ["briefIds"],
+      })
+    }
+  })
   .meta({ id: "CreateSessionTurnRequest" })
 
 const SessionEventBaseShape = {

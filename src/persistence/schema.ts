@@ -238,6 +238,7 @@ CREATE TABLE briefs (
         title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 160),
         artifact_id TEXT NOT NULL,
         source_run_id TEXT NOT NULL,
+        source_workspace_json TEXT NOT NULL CHECK(json_valid(source_workspace_json)),
         path TEXT NOT NULL,
         digest TEXT NOT NULL CHECK(
           length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'
@@ -353,6 +354,7 @@ CREATE TABLE agent_sessions (
         process_id TEXT,
         agent_session_id TEXT,
         capabilities_json TEXT CHECK(capabilities_json IS NULL OR json_valid(capabilities_json)),
+        resolved_revision TEXT,
         idle_timeout_ms INTEGER NOT NULL CHECK(idle_timeout_ms >= 1000),
         created_at TEXT NOT NULL,
         started_at TEXT,
@@ -386,6 +388,7 @@ CREATE TABLE session_turns (
         session_id TEXT NOT NULL,
         sequence INTEGER NOT NULL CHECK(sequence > 0),
         prompt TEXT NOT NULL,
+        context_artifacts_json TEXT NOT NULL CHECK(json_valid(context_artifacts_json)),
         timeout_ms INTEGER NOT NULL CHECK(timeout_ms >= 1000),
         deadline_at TEXT,
         status TEXT NOT NULL CHECK(status IN (

@@ -165,7 +165,7 @@ Identity never comes from this body. Every protected request derives the owner f
 
 ### Keep and reuse evidence from an earlier run
 
-The first shared-execution-intelligence primitive is intentionally small: an owner explicitly promotes one bounded text or JSON artifact entry into a discoverable `Brief`, then selects that brief for a later one-shot run. A brief is an immutable reference, not copied memory; the source artifact remains authoritative.
+The first shared-execution-intelligence primitive is intentionally small: an owner explicitly promotes one bounded text or JSON artifact entry into a discoverable `Brief`, then selects that brief for a later one-shot run or durable turn. A brief is an immutable reference, not copied memory; the source artifact remains authoritative.
 
 ```ts
 const prior = await meanwhile.artifacts.list(previousRun.id)
@@ -184,9 +184,16 @@ const next = await meanwhile.runs.create({
   briefIds: [brief.id],
   artifactPaths: ["dist"],
 })
+
+const turn = await meanwhile.sessions.send(session.id, "Check the earlier finding here.", {
+  briefIds: [brief.id],
+  idempotencyKey: crypto.randomUUID(),
+})
 ```
 
-Brief creation and run admission both authorize the source under the same owner. The accepted run snapshots source run, artifact, path, digest, media type, and byte size; launch revalidates the exact bytes and places delimiter-escaped content in an envelope marked as untrusted historical evidence, not instructions. Nothing is mined, ranked, or attached automatically. The Board exposes the same explicit loop as “keep” on captured text output and “prior briefs” during delegation.
+Brief creation and run/turn admission both authorize the source under the same owner. A Brief exposes the credential-free workspace basis of its source run. The accepted Run or Turn snapshots that basis with the source run, artifact, path, digest, media type, and byte size. After preparing the current workspace, runner launch or `turn.start` dispatch revalidates the exact bytes and classifies the evidence as `exact`, `same_repository_changed`, `same_repository_unresolved`, `different_workspace`, or legacy `unknown` using the actual resolved commit when available. The delimiter-escaped envelope tells the agent that this relationship is provenance, not proof of truth, and that historical output remains untrusted observation rather than instructions. Briefs selected for a Turn apply only to that Turn; nothing is mined, ranked, or attached automatically. The Board exposes the same explicit loop as “keep” on captured text output and “prior briefs” during delegation.
+
+The complete product contract and sequencing are in [Shared execution intelligence](docs/shared-execution-intelligence.md).
 
 The CLI is a presentation layer over the same client:
 
@@ -194,6 +201,7 @@ The CLI is a presentation layer over the same client:
 bun run cli -- run --agent codex --provider local --files ./workspace --artifact dist -- <task>
 bun run cli -- briefs create <artifact-id> --title "Authentication findings" --path findings.md
 bun run cli -- run --agent codex --provider local --files ./workspace --brief <brief-id> -- <task>
+bun run cli -- sessions send <session-id> --brief <brief-id> -- <task>
 bun run cli -- logs <run-id> --follow
 bun run cli -- cancel <run-id>
 bun run cli -- deploy <run-id> --artifact dist --target local-static
@@ -559,7 +567,7 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 Meanwhile's direction is to be the durable, trustworthy layer *under* agent work — the thing an application, a team, or the person who requested the work can rely on — rather than another agent or another agent console. Concretely:
 
 - **Shipped (`v0.1.3`).** The durable control plane, durable sessions and turns, the credential-free local runtime, the packaged Cloudflare runtime, and the delegator's board — a read-only, evidence-driven view (with delegate-only write) that answers one question for everyone with a stake in a task, not just the person who launched it: *is it done, is it waiting on someone, or is the system recovering it?* The board is a projection over the durable event stream exposed by `runs.followEvents()` / `sessions.followEvents()` — a view, never a second control plane, and never a way to mutate an existing run.
-- **In development — shared execution intelligence.** The first run-to-run loop is implemented: an owner explicitly promotes bounded text/JSON artifact evidence into an immutable, discoverable Brief, then selects it through HTTP, SDK, CLI, or the Board for a later run. Accepted runs retain exact source snapshots with owner isolation, idempotency binding, restart persistence, and runner-time byte revalidation. Automatic extraction, semantic ranking, interactive-session support, and cross-owner sharing are deliberately absent.
+- **In development — shared execution intelligence.** Explicit Brief reuse now spans one-shot Runs and turn-scoped durable Sessions through HTTP/OpenAPI, SDK, CLI, and Board delegation. Accepted Runs and Turns retain exact source and workspace-basis snapshots with owner isolation, idempotency binding, restart persistence, dispatch-time byte revalidation, and explicit source/current-workspace relationship classification. The next boundary is evidence-backed fact discovery and conflict/supersession semantics; automatic attachment and cross-owner sharing remain out of scope.
 - **Then — an open contract.** Hardening the typed client and OpenAPI surface so other tools (boards, IDEs, chat entry points) can run on Meanwhile's durable, credential-mediating, auditable core instead of rebuilding it.
 
 Only the *Shipped* line is release evidence. Everything below it is intent, and this document will not describe those items as implemented until their own proofs exist.

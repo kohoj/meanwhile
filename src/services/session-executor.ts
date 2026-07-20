@@ -21,7 +21,9 @@ import {
 } from "../providers/runtime-provider"
 import type { ResolvedSecretMaterial, SecretRedactor, SecretResolver } from "../secrets"
 import type { StructuredLogger, Telemetry, TelemetryScope } from "../telemetry"
+import { workspaceBasis } from "../workspace-basis"
 import { attachAgentCredentialLease } from "./credential-lease-attacher"
+import type { ExecutionContext } from "./execution-context"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
 const DEFAULT_POLL_MS = 250
@@ -38,6 +40,7 @@ export interface SessionExecutorOptions {
   readonly providers: RuntimeProviderRegistry
   readonly runner: SessionRunnerController
   readonly workspace: WorkspacePreparer
+  readonly executionContext?: Pick<ExecutionContext, "renderPrompt">
   readonly secrets: SecretResolver
   readonly logger: StructuredLogger
   readonly telemetry?: Telemetry
@@ -53,6 +56,7 @@ export class SessionExecutor implements ManagedComponent {
   readonly #providers: RuntimeProviderRegistry
   readonly #runner: SessionRunnerController
   readonly #workspace: WorkspacePreparer
+  readonly #executionContext: Pick<ExecutionContext, "renderPrompt"> | undefined
   readonly #secrets: SecretResolver
   readonly #logger: StructuredLogger
   readonly #telemetry: Telemetry | undefined
@@ -73,6 +77,7 @@ export class SessionExecutor implements ManagedComponent {
     this.#providers = options.providers
     this.#runner = options.runner
     this.#workspace = options.workspace
+    this.#executionContext = options.executionContext
     this.#secrets = options.secrets
     this.#logger = options.logger
     this.#telemetry = options.telemetry
@@ -524,7 +529,7 @@ export class SessionExecutor implements ManagedComponent {
       repositoryCredential = repositorySecrets.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
     }
     try {
-      await this.#workspace.prepare({
+      const prepared = await this.#workspace.prepare({
         ownerId: session.ownerId,
         runId: session.id,
         source: session.workspace,
@@ -544,6 +549,13 @@ export class SessionExecutor implements ManagedComponent {
           })
         },
       })
+      if (prepared.resolvedRevision !== null) {
+        this.#store.setAgentSessionResolvedRevision(
+          session.id,
+          prepared.resolvedRevision.toLowerCase(),
+          this.#now(),
+        )
+      }
     } finally {
       await repositorySecrets?.release()
     }
@@ -565,15 +577,47 @@ export class SessionExecutor implements ManagedComponent {
         })
       }
       for (const command of this.#store.listPendingSessionCommands(sessionId)) {
+        const data = await this.#renderCommand(sessionId, command)
         await (provider.send as NonNullable<RuntimeProvider["send"]>)(process, {
           sequence: command.sequence,
           id: command.id,
-          data: JSON.stringify(command.data),
+          data: JSON.stringify(data),
         })
         this.#store.markSessionCommandSent(sessionId, command.sequence, this.#now())
       }
       await abortableDelay(this.#pollMs, signal)
     }
+  }
+
+  async #renderCommand(
+    sessionId: string,
+    command: ReturnType<Store["listPendingSessionCommands"]>[number],
+  ): Promise<JsonObject> {
+    if (command.type !== "turn.start" || command.turnId === null) return command.data
+    const session = this.#store.getAgentSessionInternal(sessionId)
+    const turn = session
+      ? this.#store.getSessionTurn(session.ownerId, session.id, command.turnId)
+      : null
+    if (session === null || turn === null) {
+      throw new AppError({
+        code: "DATABASE_INTEGRITY_FAILED",
+        message: "Pending turn command is missing its durable intent",
+      })
+    }
+    if (turn.contextArtifacts.length === 0) return command.data
+    if (this.#executionContext === undefined) {
+      throw new AppError({
+        code: "INTERNAL",
+        message: "Accepted artifact-backed turn context cannot be materialized",
+      })
+    }
+    const prompt = await this.#executionContext.renderPrompt(
+      session.ownerId,
+      turn.contextArtifacts,
+      workspaceBasis(session.workspace, session.resolvedRevision),
+      turn.prompt,
+    )
+    return { ...command.data, prompt }
   }
 
   #acceptFrame(

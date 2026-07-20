@@ -34,10 +34,12 @@ import {
   type TerminalRunStatus,
   type TurnConflictPolicy,
   type TurnStatus,
+  type WorkspaceBasis,
   type WorkspaceSource,
 } from "../domain"
 import { AppError } from "../errors"
 import { parseExecutionProvenance } from "../provenance"
+import { sameWorkspaceBasis } from "../workspace-basis"
 import {
   CURRENT_SCHEMA,
   databaseSchemaFingerprint,
@@ -193,6 +195,7 @@ interface AgentSessionRow extends Record<string, Bind> {
   process_id: string | null
   agent_session_id: string | null
   capabilities_json: string | null
+  resolved_revision: string | null
   idle_timeout_ms: number
   created_at: string
   started_at: string | null
@@ -207,6 +210,7 @@ interface SessionTurnRow extends Record<string, Bind> {
   session_id: string
   sequence: number
   prompt: string
+  context_artifacts_json: string
   timeout_ms: number
   deadline_at: string | null
   status: TurnStatus
@@ -267,6 +271,7 @@ interface BriefRow extends Record<string, Bind> {
   title: string
   artifact_id: string
   source_run_id: string
+  source_workspace_json: string
   path: string
   digest: string
   media_type: string
@@ -358,7 +363,9 @@ const runFromRow = (row: RunRow): Run => ({
   env: parse<Record<string, string>>(row.env_json),
   secretRefs: parse<Record<string, string>>(row.secret_refs_json),
   provider: row.provider,
-  contextArtifacts: parse<ExecutionContextArtifact[]>(row.context_artifacts_json),
+  contextArtifacts: parse<ExecutionContextArtifact[]>(row.context_artifacts_json).map(
+    normalizeExecutionContextArtifact,
+  ),
   artifactPaths: parse<string[]>(row.artifact_paths_json),
   timeoutMs: row.timeout_ms,
   deadlineAt: row.deadline_at,
@@ -393,6 +400,7 @@ const agentSessionFromRow = (row: AgentSessionRow): AgentSession => ({
   processId: row.process_id,
   agentSessionId: row.agent_session_id,
   capabilities: row.capabilities_json === null ? null : parse<JsonObject>(row.capabilities_json),
+  resolvedRevision: row.resolved_revision,
   idleTimeoutMs: row.idle_timeout_ms,
   createdAt: row.created_at,
   startedAt: row.started_at,
@@ -407,6 +415,9 @@ const sessionTurnFromRow = (row: SessionTurnRow): SessionTurn => ({
   sessionId: row.session_id,
   sequence: row.sequence,
   prompt: row.prompt,
+  contextArtifacts: parse<ExecutionContextArtifact[]>(row.context_artifacts_json).map(
+    normalizeExecutionContextArtifact,
+  ),
   timeoutMs: row.timeout_ms,
   deadlineAt: row.deadline_at,
   status: row.status,
@@ -560,6 +571,7 @@ const briefFromRow = (row: BriefRow): Brief => ({
   title: row.title,
   artifactId: row.artifact_id,
   sourceRunId: row.source_run_id,
+  sourceWorkspace: parse<WorkspaceBasis>(row.source_workspace_json),
   path: row.path,
   digest: row.digest,
   mediaType: row.media_type,
@@ -573,10 +585,15 @@ const sameBrief = (left: Brief, right: Brief): boolean =>
   left.title === right.title &&
   left.artifactId === right.artifactId &&
   left.sourceRunId === right.sourceRunId &&
+  sameWorkspaceBasis(left.sourceWorkspace, right.sourceWorkspace) &&
   left.path === right.path &&
   left.digest === right.digest &&
   left.mediaType === right.mediaType &&
   left.byteSize === right.byteSize
+
+const normalizeExecutionContextArtifact = (
+  artifact: ExecutionContextArtifact & { readonly sourceWorkspace?: WorkspaceBasis | null },
+): ExecutionContextArtifact => ({ ...artifact, sourceWorkspace: artifact.sourceWorkspace ?? null })
 
 const sameArtifactIdentity = (left: Artifact, right: Artifact): boolean =>
   left.id === right.id &&
@@ -881,6 +898,7 @@ export interface CreateSessionTurnInput {
   readonly ownerId: string
   readonly sessionId: string
   readonly prompt: string
+  readonly contextArtifacts: readonly ExecutionContextArtifact[]
   readonly timeoutMs: number
   readonly conflictPolicy: TurnConflictPolicy
   readonly createdAt: string
@@ -2061,6 +2079,26 @@ export class Store {
     throw new AppError({
       code: "RUNNER_EVIDENCE_CONFLICT",
       message: "Resolved revision conflicts with persisted run intent",
+      status: 409,
+    })
+  }
+
+  setAgentSessionResolvedRevision(sessionId: string, revision: string, at: string): boolean {
+    if (!/^[0-9a-f]{40,64}$/.test(revision)) {
+      throw new AppError({ code: "INVALID_REQUEST", message: "Resolved revision is invalid" })
+    }
+    const result = this.database
+      .query(`
+        UPDATE agent_sessions SET resolved_revision = ?, updated_at = ?
+        WHERE id = ? AND (resolved_revision IS NULL OR resolved_revision = ?)
+      `)
+      .run(revision, at, sessionId, revision)
+    if (result.changes === 1) return true
+    const existing = this.getAgentSessionInternal(sessionId)
+    if (existing === null) return false
+    throw new AppError({
+      code: "RUNNER_EVIDENCE_CONFLICT",
+      message: "Resolved revision conflicts with persisted session intent",
       status: 409,
     })
   }
@@ -3367,9 +3405,9 @@ export class Store {
       this.database
         .query(`
           INSERT INTO briefs(
-            id, owner_id, title, artifact_id, source_run_id, path, digest,
-            media_type, byte_size, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, owner_id, title, artifact_id, source_run_id, source_workspace_json,
+            path, digest, media_type, byte_size, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           brief.id,
@@ -3377,6 +3415,7 @@ export class Store {
           brief.title,
           brief.artifactId,
           brief.sourceRunId,
+          stringify(brief.sourceWorkspace),
           brief.path,
           brief.digest,
           brief.mediaType,
@@ -4374,8 +4413,9 @@ export class Store {
       this.database
         .query(`
           INSERT INTO session_turns(
-            id,owner_id,session_id,sequence,prompt,timeout_ms,status,status_version,created_at,updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)
+            id,owner_id,session_id,sequence,prompt,context_artifacts_json,timeout_ms,
+            status,status_version,created_at,updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)
         `)
         .run(
           input.id,
@@ -4383,6 +4423,7 @@ export class Store {
           input.sessionId,
           sequence,
           input.prompt,
+          stringify(input.contextArtifacts),
           input.timeoutMs,
           input.createdAt,
           input.createdAt,
@@ -4447,6 +4488,7 @@ export class Store {
           ...input.audit.metadata,
           sessionId: input.sessionId,
           conflictPolicy: input.conflictPolicy,
+          contextArtifacts: input.contextArtifacts.length,
         },
         createdAt: input.createdAt,
       })

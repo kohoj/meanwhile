@@ -9,11 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - The first shared-execution-intelligence loop for one-shot runs: `Brief` is an immutable, owner-curated reference to one bounded text or JSON entry in an earlier run artifact. Owners promote evidence and select ordered `briefIds`; admission freezes the exact source run/artifact/path/digest/media type/size into durable intent and idempotency, and runner launch revalidates those bytes before placing delimiter-escaped, untrusted historical evidence ahead of the current task. HTTP/OpenAPI, typed SDK, CLI (`briefs create|list|get`, `run --brief`), SQLite, restart, and local end-to-end paths share one contract. The Board adds the same explicit “keep output → attach prior brief” loop without gaining task-lifecycle mutation.
+- Briefs now expose their credential-free source-workspace basis, and accepted run context freezes it into idempotent intent. After workspace preparation resolves the current checkout, the execution envelope conservatively classifies each historical entry as exact, changed, unresolved, different, or legacy unknown. This makes stale/current-workspace handling explicit without treating provenance as truth certification or adding mutable memory state.
+- Durable Turns now accept ordered Brief IDs through HTTP/OpenAPI, SDK, CLI (`sessions send --brief`), and Board session delegation. Turn admission freezes the same owner-scoped context snapshots in idempotency; AgentSessions persist their resolved repository commit; `turn.start` dispatch revalidates and renders the same workspace-aware envelope. Selection is turn-scoped and never becomes an ambient Session attachment.
 - Release-proof receipt v2 now makes that loop release evidence: it promotes the source artifact, executes and semantically verifies a separate Brief-backed run, proves its frozen context and runner-time revalidation, cleanup, credential revocation when brokered, restart persistence, backup, and restore. The verifier continues to validate already-issued v1 receipts.
 
 ### Changed
 
-- The single current SQLite schema now persists immutable Brief metadata and accepted context-artifact snapshots on runs. As with every schema fingerprint change before an upgrade contract exists, operators must use a fresh data root. Existing durable data cannot be carried forward until a separate export/import contract exists; Meanwhile never attempts in-place migration.
+- The single current SQLite schema now persists immutable Brief metadata, accepted context-artifact snapshots on Runs and Turns, and resolved repository commits on AgentSessions. As with every schema fingerprint change before an upgrade contract exists, operators must use a fresh data root. Existing durable data cannot be carried forward until a separate export/import contract exists; Meanwhile never attempts in-place migration.
 
 ### Pending release evidence
 

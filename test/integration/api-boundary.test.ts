@@ -89,6 +89,9 @@ test("the OpenAPI document represents durable run intent, nullable errors, deplo
   const runSchema = requireSchema(schemas, "Run")
   const agentSpecSchema = requireSchema(schemas, "AgentLaunchSnapshot")
   const deploymentSchema = requireSchema(schemas, "Deployment")
+  const sessionSchema = requireSchema(schemas, "AgentSession")
+  const turnSchema = requireSchema(schemas, "SessionTurn")
+  const createTurnSchema = requireSchema(schemas, "CreateSessionTurnRequest")
 
   expect(runSchema.required).toEqual(
     expect.arrayContaining(["agentSpec", "agentCatalogDigest", "resolvedRevision"]),
@@ -112,6 +115,9 @@ test("the OpenAPI document represents durable run intent, nullable errors, deplo
       "credentials",
     ]),
   )
+  expect(sessionSchema.required).toEqual(expect.arrayContaining(["resolvedRevision"]))
+  expect(turnSchema.required).toEqual(expect.arrayContaining(["contextArtifacts"]))
+  expect(createTurnSchema.properties?.["briefIds"]).toBeDefined()
 
   expect(runSchema.properties?.["error"]?.anyOf).toEqual([
     { $ref: "#/components/schemas/StructuredError" },

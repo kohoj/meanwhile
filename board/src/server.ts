@@ -178,9 +178,6 @@ export class BoardServer {
     ) {
       return this.#badRequest("Selected briefs are invalid.");
     }
-    if (body.kind === "session" && briefIds.length > 0) {
-      return this.#badRequest("Briefs can currently be attached only to one-shot runs.");
-    }
     // A delegator gives intent, not files. Use their repo if provided, else a
     // minimal placeholder workspace so the agent has somewhere to work.
     const workspace = repo
@@ -196,7 +193,10 @@ export class BoardServer {
           { workspace, agentType },
           { idempotencyKey },
         );
-        await this.#client.sessions.send(s.id, prompt, { idempotencyKey: crypto.randomUUID() });
+        await this.#client.sessions.send(s.id, prompt, {
+          briefIds,
+          idempotencyKey: crypto.randomUUID(),
+        });
         return new Response(JSON.stringify({ kind: "session", id: s.id }), {
           status: 201,
           headers: jsonHeaders(),
