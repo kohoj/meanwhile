@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- A pure run-event timeline projection for provisioning, running, and total elapsed duration.
+
 ### Pending release evidence
 
 - The `remote-live-agent` path is not asserted for this revision. A `pi-acp@0.0.31` boundary maps an internal model/RPC `error` to ACP `end_turn`; the semantic proof rejects the resulting empty response and publishes no receipt, so the Pi live-agent path is not accepted until the adapter is corrected and a clean receipt succeeds. Credentialed Codex and Claude Code paths likewise require a clean `remote-live-agent` receipt on the released revision before they are claimed for it.
