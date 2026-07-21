@@ -15,12 +15,15 @@ Meanwhile is the open control plane for running any coding agent in any isolated
 The user supplies a repository or files, an ACP agent, work, and a runtime provider. A one-shot `Run` carries one task to immutable output. A durable `AgentSession` keeps one ACP context alive across ordered `Turn`s. Meanwhile provisions compute, records durable evidence, cleans up disposable resources, and can deploy captured run output through an API, SDK, or CLI.
 
 ```text
-meanwhile run --agent codex --provider cloudflare --repo <url> -- <task>
+meanwhile run --project <project-id> --agent codex --provider cloudflare --repo <url> -- <task>
 meanwhile logs <run-id> --follow
 meanwhile deploy <run-id> --artifact dist --target local-static --idempotency-key <key>
-meanwhile sessions create --agent codex --provider cloudflare --repo <url>
+meanwhile sessions create --project <project-id> --agent codex --provider cloudflare --repo <url>
 meanwhile sessions send <session-id> --conflict reject -- <task>
 meanwhile sessions watch <session-id> --json
+meanwhile principals create --name "Bob Li" --kind person
+meanwhile projects add-member <project-id> <principal-id> --role member
+meanwhile api-keys create --name "Bob laptop" --principal <principal-id>
 ```
 
 The original challenge is the acceptance floor. The product bar is that a failed remote run can be explained, cancelled, recovered, or cleaned up without SSH access.
@@ -259,6 +262,8 @@ The initial contract is deliberately explicit and artifact-to-run/turn. A turn's
 ### 5.8 Project collaboration
 
 The first Shared Project vertical slice is implemented. Bearer API keys bind one stable Principal; opaque expiring browser sessions bind the same identity but authorize reads plus self-revocation only. Owner contains Projects, membership is explicit, new Runs and AgentSessions freeze Project and delegator identity, and idempotency includes the Principal. Active Project members may read authoritative work, conversation, artifacts, Briefs, and deployments. Lifecycle commands and deployment creation remain restricted to the immutable original delegator. Inaccessible resources continue to return no existence signal.
+
+The public CLI exposes the existing identity and collaboration contracts rather than inventing a private administration plane: operators can create/list Principals and Projects, add/remove Project members, issue a key for one selected Principal, and bind Runs or AgentSessions with `--project`. Member provisioning is not an invitation system; key delivery remains an explicit operator responsibility until a later invitation contract is designed.
 
 Project Watch is the selected reference client. It polls the authoritative Project work read model and loads native task events on demand; no second task lifecycle or Project event journal exists. The Board owns no SQL, hidden authorization, or agent control. `MEANWHILE_API_KEY` is an explicit local single-user mode; team mode exchanges each person's API key once for a read-only browser session held in an HttpOnly SameSite cookie.
 

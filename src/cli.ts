@@ -172,6 +172,12 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
     case "api-keys":
       await apiKeysCommand(rest, context)
       return 0
+    case "principals":
+      await principalsCommand(rest, context)
+      return 0
+    case "projects":
+      await projectsCommand(rest, context)
+      return 0
     case "providers":
       await providersCommand(rest, context)
       return 0
@@ -219,6 +225,7 @@ async function createRun(args: readonly string[], context: CliContext): Promise<
       "revision",
       "credential-ref",
       "agent",
+      "project",
       "provider",
       "brief",
       "artifact",
@@ -245,6 +252,7 @@ async function createRun(args: readonly string[], context: CliContext): Promise<
 
   const workspace = await executionWorkspace(parsed, context)
   const body = {
+    ...(parsed.one("project") === undefined ? {} : { projectId: parsed.one("project") }),
     workspace,
     agentType,
     prompt,
@@ -497,6 +505,7 @@ async function createSession(args: readonly string[], context: CliContext): Prom
       "revision",
       "credential-ref",
       "agent",
+      "project",
       "provider",
       "env",
       "secret",
@@ -511,6 +520,7 @@ async function createSession(args: readonly string[], context: CliContext): Prom
   const idempotencyKey = parsed.one("idempotency-key")
   const session = await apiClient(context).sessions.create(
     {
+      ...(parsed.one("project") === undefined ? {} : { projectId: parsed.one("project") }),
       workspace: await executionWorkspace(parsed, context),
       agentType: requiredOption(parsed, "agent"),
       provider: parsed.one("provider") ?? context.environment.MEANWHILE_DEFAULT_PROVIDER ?? "local",
@@ -801,11 +811,15 @@ async function apiKeysCommand(args: readonly string[], context: CliContext): Pro
   const [subcommand, ...rest] = args
   const client = apiClient(context)
   if (subcommand === "create") {
-    const parsed = parseArguments(rest, { values: ["name"] })
+    const parsed = parseArguments(rest, { values: ["name", "principal"] })
     parsed.requireNoPositionals()
+    const principalId = parsed.one("principal")
     await printJson(
       context,
-      await client.apiKeys.create(requiredOption(parsed, "name"), { signal: context.signal }),
+      await client.apiKeys.create(requiredOption(parsed, "name"), {
+        ...(principalId === undefined ? {} : { principalId }),
+        signal: context.signal,
+      }),
     )
     return
   }
@@ -820,6 +834,92 @@ async function apiKeysCommand(args: readonly string[], context: CliContext): Pro
     return
   }
   throw argumentError("Expected: api-keys create|list|revoke")
+}
+
+async function principalsCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  const client = apiClient(context)
+  if (subcommand === "list") {
+    parseArguments(rest).requireNoPositionals()
+    await printJson(context, {
+      items: await client.projects.principals({ signal: context.signal }),
+    })
+    return
+  }
+  if (subcommand === "create") {
+    const parsed = parseArguments(rest, { values: ["name", "kind"] })
+    parsed.requireNoPositionals()
+    const kind = parsed.one("kind") ?? "person"
+    if (kind !== "person" && kind !== "service") {
+      throw argumentError("--kind must be person or service")
+    }
+    await printJson(context, {
+      principal: await client.projects.createPrincipal(
+        { kind, displayName: requiredOption(parsed, "name") },
+        { signal: context.signal },
+      ),
+    })
+    return
+  }
+  throw argumentError("Expected: principals create|list")
+}
+
+async function projectsCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  const client = apiClient(context)
+  if (subcommand === "list") {
+    parseArguments(rest).requireNoPositionals()
+    await printJson(context, { items: await client.projects.list({ signal: context.signal }) })
+    return
+  }
+  if (subcommand === "get") {
+    const projectId = parseArguments(rest).onlyPositional()
+    await printJson(context, {
+      project: await client.projects.get(projectId, { signal: context.signal }),
+    })
+    return
+  }
+  if (subcommand === "create") {
+    const parsed = parseArguments(rest, { values: ["name", "slug"] })
+    parsed.requireNoPositionals()
+    await printJson(context, {
+      project: await client.projects.create(
+        { name: requiredOption(parsed, "name"), slug: requiredOption(parsed, "slug") },
+        { signal: context.signal },
+      ),
+    })
+    return
+  }
+  if (subcommand === "members") {
+    const projectId = parseArguments(rest).onlyPositional()
+    await printJson(context, {
+      items: await client.projects.members(projectId, { signal: context.signal }),
+    })
+    return
+  }
+  if (subcommand === "add-member") {
+    const parsed = parseArguments(rest, { values: ["role"] })
+    const [projectId, principalId] = parsed.requirePositionals(2)
+    const role = parsed.one("role") ?? "member"
+    if (role !== "member" && role !== "maintainer") {
+      throw argumentError("--role must be member or maintainer")
+    }
+    await printJson(context, {
+      member: await client.projects.addMember(projectId as string, principalId as string, role, {
+        signal: context.signal,
+      }),
+    })
+    return
+  }
+  if (subcommand === "remove-member") {
+    const [projectId, principalId] = parseArguments(rest).requirePositionals(2)
+    await client.projects.removeMember(projectId as string, principalId as string, {
+      signal: context.signal,
+    })
+    await printJson(context, { removed: true, projectId, principalId })
+    return
+  }
+  throw argumentError("Expected: projects create|list|get|members|add-member|remove-member")
 }
 
 async function providersCommand(args: readonly string[], context: CliContext): Promise<void> {
@@ -1429,7 +1529,15 @@ Usage:
   meanwhile deployments get DEPLOYMENT_ID
   meanwhile deployments logs DEPLOYMENT_ID [--after N] [--limit N]
   meanwhile audit list [--resource-type TYPE] [--resource-id ID] [--action ACTION]
-  meanwhile api-keys create --name NAME
+  meanwhile principals create --name NAME [--kind person|service]
+  meanwhile principals list
+  meanwhile projects create --name NAME --slug SLUG
+  meanwhile projects list
+  meanwhile projects get PROJECT_ID
+  meanwhile projects members PROJECT_ID
+  meanwhile projects add-member PROJECT_ID PRINCIPAL_ID [--role member|maintainer]
+  meanwhile projects remove-member PROJECT_ID PRINCIPAL_ID
+  meanwhile api-keys create --name NAME [--principal PRINCIPAL_ID]
   meanwhile api-keys list
   meanwhile api-keys revoke KEY_ID
   meanwhile providers test PROVIDER
@@ -1441,6 +1549,7 @@ Usage:
   meanwhile data gc (--dry-run | --apply)
 
 Run options:
+  --project PROJECT_ID        Bind the Run to one shared Project
   --provider NAME             Runtime provider (default: MEANWHILE_DEFAULT_PROVIDER or local)
   --revision REVISION         Repository revision
   --credential-ref env://VAR  Repository credential reference
@@ -1452,6 +1561,7 @@ Run options:
   --idempotency-key KEY       Safe retry identity
 
 Session options:
+  --project PROJECT_ID        Bind the AgentSession to one shared Project
   --idle-timeout 30s|10m|1h   Close an inactive live session and release compute
   --brief BRIEF_ID            Curated prior evidence for this turn; repeatable
   --conflict POLICY           reject, enqueue, or interrupt_and_send

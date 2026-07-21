@@ -50,6 +50,8 @@ The source now implements:
 - Principal-scoped Run, Session, and Deployment idempotency;
 - opaque expiring browser sessions that are read-only and revocable;
 - a typed Project namespace in the public client;
+- public CLI commands for Principal, Project, membership, and per-Principal key
+  administration, plus explicit `--project` binding for Runs and Sessions;
 - the selected Project Watch master-detail Board with per-person login;
 - an explicit v0.1.3 offline migration command and unknown-schema refusal;
 - HTTP integration coverage for shared visibility, attribution, denial,
@@ -63,34 +65,27 @@ system evidence, not evidence that two real people in different locations used
 one deployed Project Watch. That external acceptance remains the release
 boundary.
 
-## Current Board audit
+## Current Board experience
 
-The existing product surface establishes useful design material:
+The implemented surface now carries the selected decisions into the real
+member journey:
 
-- verdict-first hierarchy is calmer and more legible than a generic dashboard;
-- quiet inventory avoids turning execution into a card grid;
-- one item can open directly into durable agent output;
-- the Board is physically isolated from the control-plane package and consumes
-  public client contracts.
+- verdict-first hierarchy remains calmer and more legible than a generic
+  dashboard;
+- shared inventory stays visible even when no item needs attention;
+- completed, active, and ready work never claims that it needs its delegator;
+- failed and timed-out work attributes attention to the delegator without
+  assigning it to another viewer;
+- the empty Project explains where delegated work comes from instead of showing
+  an inert list or a misleading Board-owned launch action;
+- task detail shows durable delegator attribution, authoritative condition,
+  trustworthy timing, and the ordered conversation;
+- the Board remains physically isolated from the control plane and consumes
+  only public client contracts.
 
-It also exposes assumptions that break in a shared Project:
-
-- **“Nothing needs you” is viewer-specific without viewer identity.** The same
-  Project fact may need Alice but only inform Bob.
-- **“Idle means waiting on you” is not always true.** An idle session may simply
-  be ready for another turn; execution state and human attention are different
-  projections.
-- **Quiet inventory hides the collaboration proof.** Collapsing all healthy
-  work makes sense for one anxious delegator, but teammates also need to see
-  who is doing what even when nothing is wrong.
-- **The primary `+ delegate` action changes the product.** The remembered hook is
-  shared visibility across work delegated from many entry points, not
-  necessarily another place to launch agents.
-- **Task detail lacks shared context.** It does not show Project, delegator,
-  workspace identity, trustworthy timing, or a clear information hierarchy.
-
-The existing Board should therefore be treated as a visual prototype of one
-state, not the approved information architecture for the team product.
+Member provisioning remains an operator CLI journey. Adding invitations or an
+administration UI would create a new write-authority and delivery contract and
+is intentionally not hidden inside this read-only milestone.
 
 ## Decisions already safe to lock
 

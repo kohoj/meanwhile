@@ -7,6 +7,8 @@ import { issueApiKey } from "../../src/auth"
 import { type CliOptions, runCli } from "../../src/cli"
 import {
   API_OWNER_ID,
+  API_PRINCIPAL_ID,
+  API_PROJECT_ID,
   API_RUN_ID,
   API_SESSION_ID,
   API_TIMESTAMP,
@@ -61,6 +63,8 @@ describe("Meanwhile CLI", () => {
           workspace,
           "--agent",
           "demo",
+          "--project",
+          API_PROJECT_ID,
           "--artifact",
           "dist",
           "--brief",
@@ -80,6 +84,7 @@ describe("Meanwhile CLI", () => {
       expect(observed.idempotencyKey).toBe("cli-test")
       expect(observed.requestBody).toMatchObject({
         agentType: "demo",
+        projectId: API_PROJECT_ID,
         prompt: "make it work",
         provider: "local",
         briefIds: ["f".repeat(64)],
@@ -181,6 +186,8 @@ describe("Meanwhile CLI", () => {
             workspace,
             "--agent",
             "demo",
+            "--project",
+            API_PROJECT_ID,
             "--idle-timeout",
             "10m",
             "--idempotency-key",
@@ -218,7 +225,12 @@ describe("Meanwhile CLI", () => {
         {
           path: "/sessions",
           idempotency: "session-once",
-          body: { agentType: "demo", idleTimeoutMs: 600_000, workspace: { type: "files" } },
+          body: {
+            agentType: "demo",
+            projectId: API_PROJECT_ID,
+            idleTimeoutMs: 600_000,
+            workspace: { type: "files" },
+          },
         },
         {
           path: `/sessions/${API_SESSION_ID}/turns`,
@@ -229,6 +241,112 @@ describe("Meanwhile CLI", () => {
             conflictPolicy: "interrupt_and_send",
             timeoutMs: 120_000,
           },
+        },
+      ])
+    } finally {
+      await server.stop(true)
+    }
+  })
+
+  test("administers shared Projects and issues a key for the selected Principal", async () => {
+    const principal = {
+      id: API_PRINCIPAL_ID,
+      ownerId: API_OWNER_ID,
+      kind: "person" as const,
+      displayName: "Bob Li",
+      ownerRole: "member" as const,
+      createdAt: API_TIMESTAMP,
+      disabledAt: null,
+    }
+    const member = {
+      projectId: API_PROJECT_ID,
+      principal: {
+        id: API_PRINCIPAL_ID,
+        kind: "person" as const,
+        displayName: "Bob Li",
+      },
+      role: "member" as const,
+      joinedAt: API_TIMESTAMP,
+    }
+    const apiKey = {
+      id: "00000000-0000-4000-8000-000000000099",
+      ownerId: API_OWNER_ID,
+      principalId: API_PRINCIPAL_ID,
+      prefix: `mwk_${"a".repeat(12)}`,
+      name: "Bob laptop",
+      createdAt: API_TIMESTAMP,
+      lastUsedAt: null,
+      revokedAt: null,
+    }
+    const secret = `mwk_${"a".repeat(12)}_${"b".repeat(43)}`
+    const requests: Array<{ path: string; method: string; body: unknown }> = []
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url)
+        const method = request.method
+        const body = method === "POST" ? await request.json() : null
+        requests.push({ path: url.pathname, method, body })
+        if (url.pathname === "/principals" && method === "POST") {
+          return Response.json({ principal }, { status: 201 })
+        }
+        if (url.pathname === `/projects/${API_PROJECT_ID}/members` && method === "POST") {
+          return Response.json({ member }, { status: 201 })
+        }
+        if (url.pathname === "/api-keys" && method === "POST") {
+          return Response.json({ key: apiKey, secret }, { status: 201 })
+        }
+        return new Response("Not Found", { status: 404 })
+      },
+    })
+    const bootstrap = await issueApiKey()
+    const environment = {
+      MEANWHILE_URL: server.url.origin,
+      MEANWHILE_API_KEY: bootstrap.key,
+    }
+    try {
+      const createdPrincipal = capture()
+      expect(
+        await runCli(
+          ["principals", "create", "--name", "Bob Li", "--kind", "person"],
+          createdPrincipal.options(environment),
+        ),
+      ).toBe(0)
+      expect(JSON.parse(createdPrincipal.stdout)).toEqual({ principal })
+
+      const addedMember = capture()
+      expect(
+        await runCli(
+          ["projects", "add-member", API_PROJECT_ID, API_PRINCIPAL_ID, "--role", "member"],
+          addedMember.options(environment),
+        ),
+      ).toBe(0)
+      expect(JSON.parse(addedMember.stdout)).toEqual({ member })
+
+      const issuedKey = capture()
+      expect(
+        await runCli(
+          ["api-keys", "create", "--name", "Bob laptop", "--principal", API_PRINCIPAL_ID],
+          issuedKey.options(environment),
+        ),
+      ).toBe(0)
+      expect(JSON.parse(issuedKey.stdout)).toEqual({ key: apiKey, secret })
+      expect(requests).toEqual([
+        {
+          path: "/principals",
+          method: "POST",
+          body: { kind: "person", displayName: "Bob Li" },
+        },
+        {
+          path: `/projects/${API_PROJECT_ID}/members`,
+          method: "POST",
+          body: { principalId: API_PRINCIPAL_ID, role: "member" },
+        },
+        {
+          path: "/api-keys",
+          method: "POST",
+          body: { name: "Bob laptop", principalId: API_PRINCIPAL_ID },
         },
       ])
     } finally {

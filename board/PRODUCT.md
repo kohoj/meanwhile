@@ -20,6 +20,13 @@ delegator attribution, detail authorization, and lifecycle denial are enforced
 by the control plane. `MEANWHILE_API_KEY` remains an explicit local single-user
 mode, not a team credential-sharing mechanism.
 
+Project Watch does not provision people or deliver credentials. The operator
+uses the public CLI/API to create a stable identity, add it to a Project, and
+issue one revocable key. The login screen explains that every member uses a
+personal key; the empty Project explains that work arrives from agent
+integrations, the CLI, SDK, or API. Neither surface invents Board-owned write
+authority.
+
 ## Who is this human?
 
 **Not the operator who launched the agents — the person who is *waiting on them*.**

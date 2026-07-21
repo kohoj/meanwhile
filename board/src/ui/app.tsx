@@ -2,18 +2,23 @@ import type {
   Principal,
   Project,
   ProjectMember,
-  ProjectWorkItem,
 } from "@kohoz/meanwhile/contracts";
 import { AnimatePresence, motion } from "motion/react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import useSWR from "swr";
+import {
+  displayStatus,
+  humanAgent,
+  type PresentedBoardRow,
+  projectVerdict,
+  statusTone,
+  taskAttention,
+} from "./presentation";
 import { useBoard } from "./store";
 import "./styles.css";
 
-interface BoardRow extends ProjectWorkItem {
-  section: "attention" | "active" | "ready" | "completed";
-}
+type BoardRow = PresentedBoardRow;
 
 interface SessionResponse {
   authenticated: boolean;
@@ -46,25 +51,6 @@ const relativeTime = (value: string): string => {
   return `${Math.round(hours / 24)}d ago`;
 };
 
-const humanAgent = (value: string): string =>
-  value
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-
-const statusTone = (status: string): "alert" | "active" | "ready" | "quiet" => {
-  if (["failed", "timed_out", "continuity_lost"].includes(status)) return "alert";
-  if (status === "idle") return "ready";
-  if (["queued", "provisioning", "running", "closing"].includes(status)) return "active";
-  return "quiet";
-};
-
-const displayStatus = (status: string): string => {
-  if (status === "idle") return "ready";
-  if (status === "succeeded" || status === "closed") return "completed";
-  return status.replace("_", " ");
-};
-
 const Login: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
@@ -94,8 +80,11 @@ const Login: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
       <form className="login-card" onSubmit={submit}>
         <div className="brand">meanwhile</div>
         <h1>Watch work together.</h1>
-        <p>Your key is exchanged once for a short-lived, read-only browser session.</p>
-        <label htmlFor="api-key">API key</label>
+        <p>
+          Use your personal access key. It is exchanged once for a short-lived, read-only
+          browser session and is never stored by Project Watch.
+        </p>
+        <label htmlFor="api-key">Personal access key</label>
         <input
           id="api-key"
           autoFocus
@@ -109,6 +98,7 @@ const Login: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
         <button type="submit" disabled={busy || !apiKey.trim()}>
           {busy ? "Opening…" : "Open Project Watch"}
         </button>
+        <div className="login-help">Need access? Ask a Project maintainer.</div>
       </form>
     </main>
   );
@@ -119,6 +109,20 @@ const TaskList: React.FC<{
   selected: BoardRow | null;
   onSelect: (row: BoardRow) => void;
 }> = ({ rows, selected, onSelect }) => {
+  if (rows.length === 0) {
+    return (
+      <section className="task-list empty" aria-label="Project work">
+        <div className="project-empty">
+          <span>Project work</span>
+          <h2>No delegated work yet.</h2>
+          <p>
+            Tasks appear here when members delegate through an agent integration, the CLI,
+            SDK, or API.
+          </p>
+        </div>
+      </section>
+    );
+  }
   const groups = [
     ["attention", "Needs attention"],
     ["active", "Active"],
@@ -173,7 +177,7 @@ const TaskDetail: React.FC<{ row: BoardRow | null; current: Principal }> = ({ ro
     if (row) void loadHistory(row.kind, row.id);
   }, [row?.kind, row?.id, loadHistory]);
   if (row === null) {
-    return <aside className="task-detail empty">Select a task to read its conversation.</aside>;
+    return <aside className="task-detail empty">Task conversations open here.</aside>;
   }
   const timeline = row.kind === "run" ? runTimeline : sessionTimeline;
   const agentMessages = timeline?.messages ?? [];
@@ -190,7 +194,7 @@ const TaskDetail: React.FC<{ row: BoardRow | null; current: Principal }> = ({ ro
       : []),
   ];
   const visible = expanded ? messages : messages.slice(0, 4);
-  const needsCurrent = row.delegatedBy.id === current.id;
+  const attention = taskAttention(row, current.id);
   return (
     <aside className="task-detail">
       <div className="detail-kicker">Task detail</div>
@@ -200,11 +204,11 @@ const TaskDetail: React.FC<{ row: BoardRow | null; current: Principal }> = ({ ro
         <span className={`tone-${statusTone(row.status)}`}>{displayStatus(row.status)}</span>
         <b>·</b>{relativeTime(row.updatedAt)}
       </div>
-      <div className={`ownership ${needsCurrent ? "mine" : "theirs"}`}>
-        {needsCurrent
-          ? `Needs ${current.displayName}`
-          : `Needs ${row.delegatedBy.displayName}, not ${current.displayName}`}
-      </div>
+      {attention ? (
+        <div className={`ownership ${row.delegatedBy.id === current.id ? "mine" : "theirs"}`}>
+          {attention}
+        </div>
+      ) : null}
       <div className="conversation">
         {loading && messages.length === 1 ? <div className="loading-line">Loading conversation…</div> : null}
         {visible.map((message) => (
@@ -243,15 +247,7 @@ const ProjectWatch: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
   }, [data, projectId]);
   if (isLoading && data === undefined) return <div className="app-loading">meanwhile</div>;
   if (!data) return <div className="app-loading">Project Watch is unavailable.</div>;
-  const needsMe = data.rows.filter(
-    (row) => row.section === "attention" && row.delegatedBy.id === data.principal.id,
-  ).length;
-  const needsOthers = new Map<string, number>();
-  for (const row of data.rows) {
-    if (row.section !== "attention" || row.delegatedBy.id === data.principal.id) continue;
-    needsOthers.set(row.delegatedBy.displayName, (needsOthers.get(row.delegatedBy.displayName) ?? 0) + 1);
-  }
-  const otherVerdict = [...needsOthers.entries()][0];
+  const verdict = projectVerdict(data.rows, data.principal.id, data.members.length);
   return (
     <div className="watch-shell">
       <header className="topbar">
@@ -287,8 +283,10 @@ const ProjectWatch: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
         </div>
       </header>
       <section className="verdict">
-        <h1>{needsMe === 0 ? "Nothing needs you." : `${needsMe} ${needsMe === 1 ? "task needs" : "tasks need"} you.`}</h1>
-        {otherVerdict ? <p><strong>{otherVerdict[1]} {otherVerdict[1] === 1 ? "task needs" : "tasks need"} {otherVerdict[0]}.</strong></p> : <p>Everyone else is clear.</p>}
+        <h1>{verdict.personal}</h1>
+        <p className={verdict.projectNeedsAttention ? "project-alert" : undefined}>
+          {verdict.project}
+        </p>
         <button type="button" className="refresh" onClick={() => mutate()}>Refresh</button>
       </section>
       <main className="work-surface">

@@ -82,6 +82,36 @@ bun run migrate:projects -- --database=/absolute/path/to/meanwhile.sqlite --writ
 
 Unknown or partially modified schema fingerprints fail closed.
 
+### Share one Project
+
+Project Watch is a read-only shared view, not an account or invitation system.
+An installation operator creates the durable identity, adds it to a Project,
+and issues one revocable key for that person or service through the same public
+API used by every other client:
+
+```console
+meanwhile projects list
+meanwhile principals create --name "Bob Li" --kind person
+meanwhile projects add-member <project-id> <principal-id> --role member
+meanwhile api-keys create --name "Bob laptop" --principal <principal-id>
+```
+
+The final command shows the plaintext key once. Deliver it through a secure
+channel; never share the bootstrap key or reuse one person's key for a team.
+Bob opens Project Watch, exchanges that key for a short-lived read-only browser
+session, and can then see work delegated by every active member of the Project.
+
+Runs and durable sessions select their shared Project explicitly:
+
+```console
+meanwhile run --project <project-id> --repo <url> --agent codex -- "Fix and verify the callback race."
+meanwhile sessions create --project <project-id> --repo <url> --agent codex
+```
+
+Omitting `--project` remains convenient only when the caller belongs to exactly
+one active Project. Multi-Project clients should always send the immutable
+Project choice.
+
 To exercise the complete no-account path in one command:
 
 ```console
@@ -567,7 +597,7 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 Meanwhile `v0.1.3` is the current public release baseline. The complete credential-free local product path, durable sessions, the delegator's board, and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
-The current Project Watch Board is a multi-person read surface over control-plane authorization, not a credential-sharing shortcut. In team mode each person exchanges their own Principal-bound API key once for an opaque, expiring, read-only browser session kept in an HttpOnly SameSite cookie. The optional `MEANWHILE_API_KEY` mode remains only for a private local single-user Board.
+The current Project Watch Board is a multi-person read surface over control-plane authorization, not a credential-sharing shortcut. In team mode each person exchanges their own Principal-bound API key once for an opaque, expiring, read-only browser session kept in an HttpOnly SameSite cookie. Project operators can create Principals, Projects, memberships, and per-person keys through the CLI without a private administration endpoint. The optional `MEANWHILE_API_KEY` mode remains only for a private local single-user Board.
 
 The deterministic suite proves interrupt, per-turn timeout, replay, and cleanup semantics against replaceable providers. Local release evidence proves the complete host-process product path. Cloudflare release evidence proves one ACP identity across two turns, event replay, cleanup, and control-plane restart on real remote compute; the separate live lifecycle test proves remote hard termination and credential mediation. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these remain operator/platform assertions rather than remote attestation.
 

@@ -108,6 +108,40 @@ Board origin. Keep 7331 and 7332 private, preserve `X-Forwarded-Proto: https`,
 and do not configure `MEANWHILE_API_KEY` on the Project Watch service in team
 mode.
 
+### Add a Project member
+
+Use an admin Principal's API key with the public CLI. Identity, membership, and
+credentials remain separate resources so rotation never changes attribution
+and membership removal never depends on deleting a person:
+
+```console
+export MEANWHILE_URL='http://127.0.0.1:7331'
+# Load MEANWHILE_API_KEY from operator secret storage.
+
+meanwhile projects list
+meanwhile principals create --name "Bob Li" --kind person
+meanwhile projects add-member <project-id> <principal-id> --role member
+meanwhile api-keys create --name "Bob laptop" --principal <principal-id>
+```
+
+The key secret is returned once. Transfer it through an operator-approved
+secret channel; do not put it in command arguments, tickets, chat transcripts,
+screenshots, or the collaboration acceptance record. Each device credential is
+independently listable and revocable. Removing a Project member revokes Project
+visibility immediately but does not silently revoke unrelated credentials or
+rewrite durable attribution.
+
+Every Run and AgentSession freezes its Project at admission. Use `--project`
+whenever the caller can see more than one Project:
+
+```console
+meanwhile run --project <project-id> --repo <url> --agent codex -- "Verify the release."
+meanwhile sessions create --project <project-id> --repo <url> --agent codex
+```
+
+Project Watch's empty state names these external delegation paths. It does not
+offer a misleading `Delegate` button or acquire lifecycle authority.
+
 `compose.yaml` optionally reads `${MEANWHILE_ENV_FILE:-./compose.env}`. Copy [compose.env.example](../compose.env.example) for Cloudflare bridge settings or local-bootstrap agent secret values named by `MEANWHILE_SECRET_ENV_ALLOWLIST`. The file is ignored by Git and Docker build context. It is not required by shell-only Bun workflows, and production should use an owner-scoped secret broker rather than a plaintext process environment.
 
 ## Shared Project release proof
@@ -361,6 +395,8 @@ Treat all uploaded HTML, JavaScript, SVG, and media as hostile.
 - [ ] Full deterministic test suite passes under the supported Bun version.
 - [ ] `doctor` passes with production configuration.
 - [ ] API keys are provisioned through the persistent hashed-key lifecycle; bootstrap key is disabled.
+- [ ] Every human and service has its own Principal-bound credential; no team shares a bootstrap or browser credential.
+- [ ] Every multi-Project Run and AgentSession supplies an explicit Project ID.
 - [ ] Data root has durable capacity, restrictive ownership, backup, and tested restore.
 - [ ] The data-root lease and deployment topology enforce exactly one active SQLite writer.
 - [ ] Runner binary provenance and execute permissions are verified.

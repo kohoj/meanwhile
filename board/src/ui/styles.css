@@ -104,6 +104,7 @@ button { color: inherit; }
 .verdict h1 { grid-column: 1; margin: 0; font: 43px/1.05 var(--serif); letter-spacing: -.025em; }
 .verdict p { grid-column: 3; margin: 0; font: 42px/1.05 var(--serif); letter-spacing: -.025em; }
 .verdict strong { color: var(--alert); font-weight: 400; }
+.verdict .project-alert { color: var(--alert); }
 .refresh { grid-column: 4; color: var(--quiet); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
 
 .work-surface {
@@ -112,6 +113,11 @@ button { color: inherit; }
   min-height: calc(100dvh - 226px);
 }
 .task-list { padding: 38px 26px 70px; border-right: 1px solid var(--line); overflow: hidden; }
+.task-list.empty { display: grid; place-items: center; }
+.project-empty { width: min(430px, 100%); }
+.project-empty span { color: var(--quiet); font-size: 12px; letter-spacing: .09em; text-transform: uppercase; }
+.project-empty h2 { margin: 14px 0 10px; font: 31px/1.12 var(--serif); letter-spacing: -.018em; }
+.project-empty p { margin: 0; color: var(--muted); font: 17px/1.55 var(--serif); }
 .task-group { margin-bottom: 34px; }
 .task-group h2 {
   margin: 0 0 16px 17px;
@@ -200,6 +206,7 @@ button { color: inherit; }
 .login-card button { width: 100%; margin-top: 18px; border: 1px solid var(--text); background: var(--text); color: var(--bg); padding: 13px; cursor: pointer; }
 .login-card button:disabled { opacity: .45; cursor: default; }
 .login-error { margin-top: 12px; color: var(--alert); font-size: 13px; }
+.login-help { margin-top: 17px; color: var(--quiet); font-size: 12px; text-align: center; }
 
 @media (max-width: 1080px) {
   .topbar { grid-template-columns: 130px minmax(220px, 1fr) auto auto; }
