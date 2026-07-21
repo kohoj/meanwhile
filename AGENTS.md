@@ -4,6 +4,8 @@ This file is the source of truth for Meanwhile and the operating contract for ev
 
 Build an open-source product, not a take-home artifact: small enough to hold in one mind, complete enough to trust, and deep enough that a new runtime, agent, or deployment target does not change the control-plane core.
 
+Open-source friendliness means deployment neutrality, not a self-host-only product. The same product, API, authorization, evidence, and data-ownership contracts must remain viable for local single-machine use, user-operated servers, private infrastructure, public-cloud containers or VMs, and an optional managed service. Packaging, ingress, identity integration, storage, and runtime differences belong behind explicit boundaries; never fork product semantics by topology. Not every topology must ship at once, but foundational choices must not make another legitimate topology impossible.
+
 ## 1. Product
 
 Meanwhile is the open control plane for running any coding agent in any isolated runtime.
@@ -23,7 +25,7 @@ meanwhile sessions watch <session-id> --json
 
 The original challenge is the acceptance floor. The product bar is that a failed remote run can be explained, cancelled, recovered, or cleaned up without SSH access.
 
-The current product milestone is the shared Project watch: people in one Project can see work that any member delegated, open its durable conversation and evidence, and add append-only comments without gaining control of another member's agent. The durable execution core makes that collaboration trustworthy; the Board makes it visible. This outcome is not implemented yet. The controlling route and acceptance gates are in [`docs/project-collaboration.md`](docs/project-collaboration.md).
+The active product outcome is shared Project visibility: people in one Project can see work that any member delegated and open its task detail and conversation without gaining control of another member's agent. Do not introduce `evidence` as a separate collaboration UI concept; the underlying logs, events, artifacts, and audit records remain system facts exposed through task detail where useful. The selected product form is Project Watch. The implementation uses stable Principals, Owner-contained Projects, explicit membership, immutable Project/delegator bindings, delegator-only lifecycle control, Principal-scoped idempotency, revocable read-only browser sessions, and authoritative Project polling. Keep [`docs/project-collaboration.md`](docs/project-collaboration.md), the ADRs, implementation, tests, and Board aligned.
 
 Meanwhile is not a generic shell API, agent/model provider, workflow engine, provider-specific wrapper, secrets manager, CI system, IDE, or dashboard. Do not add Redis, Kafka, a distributed queue, DAG engine, DI container, ORM, MCP facade, second remote provider, or UI merely to look complete.
 
@@ -49,7 +51,7 @@ A `Run` remains the atomic execution and promotion unit. An `AgentSession` is th
 
 A `Brief` is not another execution lifecycle. It is an immutable, owner-curated reference from reusable context back to authoritative artifact evidence.
 
-Project collaboration adds identity and visibility, not another execution lifecycle. `Owner` remains the tenant boundary; a future `Actor` is durable person/service identity; `ProjectMembership` grants Project capabilities; `Run` and `AgentSession` remain execution truth; an append-only `Comment` remains collaboration evidence and never silently becomes agent input. API keys are credentials, not durable people. These target contracts are unimplemented until their matching source and proofs land.
+Project collaboration adds identity and visibility, not another execution lifecycle. `Owner` remains the hard tenant boundary; stable `Principal` records represent people or services; `ProjectMembership` grants Project visibility; new Runs and AgentSessions bind one immutable Project and delegating Principal. Viewing another member's work does not imply lifecycle control. API keys and browser sessions are revocable credentials, not durable people. Comments, mentions, delegated operator control, external identity-provider login, and a durable Project activity stream remain later contracts.
 
 ```text
 User / upstream agent
@@ -256,18 +258,11 @@ The initial contract is deliberately explicit and artifact-to-run/turn. A turn's
 
 ### 5.8 Project collaboration
 
-Project collaboration is the active product milestone. The current source has only owner-wide authorization: bearer authentication yields `ownerId` plus `apiKeyId`, every key under an owner has the same authority, and the Board holds one owner key. It has no Project, stable Actor, membership, immutable delegator identity, comment, mention, or project-scoped stream. Never describe the current Board as multi-person collaboration.
+The first Shared Project vertical slice is implemented. Bearer API keys bind one stable Principal; opaque expiring browser sessions bind the same identity but authorize reads plus self-revocation only. Owner contains Projects, membership is explicit, new Runs and AgentSessions freeze Project and delegator identity, and idempotency includes the Principal. Active Project members may read authoritative work, conversation, artifacts, Briefs, and deployments. Lifecycle commands and deployment creation remain restricted to the immutable original delegator. Inaccessible resources continue to return no existence signal.
 
-The target boundary is defined in [`docs/project-collaboration.md`](docs/project-collaboration.md). Its controlling rules are:
+Project Watch is the selected reference client. It polls the authoritative Project work read model and loads native task events on demand; no second task lifecycle or Project event journal exists. The Board owns no SQL, hidden authorization, or agent control. `MEANWHILE_API_KEY` is an explicit local single-user mode; team mode exchanges each person's API key once for a read-only browser session held in an HttpOnly SameSite cookie.
 
-- collaboration occurs inside one owner; never punch cross-owner sharing exceptions;
-- an API key authenticates one stable Actor but never substitutes for that Actor's identity;
-- Project is an explicit collaboration boundary and never inferred from repository URL or workspace input;
-- new Runs and AgentSessions bind immutable Project and delegating Actor identity while their existing executors remain the only lifecycle owners;
-- Project members may read authorized conversation/evidence and append comments, but another Actor's existing work remains non-operable;
-- comments use a separate append-only collaboration contract and never enter RunEvent, SessionEvent, prompts, or agent context implicitly;
-- every derived resource follows the authoritative Run/Session Project relationship; owner equality alone is insufficient once multiple Actors and Projects exist;
-- Fact discovery and further Brief expansion are frozen until the two-person Project proof passes. The implemented Brief kernel remains supported, but it is not the current roadmap gate.
+The controlling contract and remaining release-proof boundary are in [`docs/project-collaboration.md`](docs/project-collaboration.md). Comments, mentions, invitations, external IdP login, explicit operator grants, and a durable Project activity stream are deferred. Fact discovery and further Brief expansion remain paused until the clean-revision two-person Project proof passes.
 
 ## 6. Run state machine
 
@@ -365,7 +360,7 @@ Concurrent input is explicit policy:
 - `reject` returns a conflict while any queued or running turn exists;
 - `enqueue` commits the turn behind existing work;
 - `interrupt_and_send` atomically queues an interrupt before the replacement turn;
-- each session and each turn has its own owner-scoped idempotency key and canonical request hash.
+- each session and each turn has its own Principal-scoped idempotency key and canonical request hash.
 
 A durable session-runtime provisioning intent precedes lease creation. The runtime lease persists opaque runtime/process handles, provider and runner cursors, command sequence, cleanup state, attempts, safe error, and retry schedule. Provider acknowledgement or a recovered `running` observation records the first `runtime.start` audit idempotently, closing the remote-start-before-audit crash window. Session process-handle materialization commits the lease handle, public process identity, and `agent.start` audit atomically; an exact retry is idempotent and any split identity fails closed. Operational sessions are never cleanup-eligible. Closing is idempotent, terminalizes unfinished turns, and schedules durable bounded-retry destruction. A service restart recovers interrupted create/cleanup claims, reconnects the same process, replays and exactly deduplicates runner evidence, resumes undispatched commands, and preserves the same ACP agent-session identity when provider capabilities permit.
 
@@ -465,9 +460,9 @@ Never return provider bodies, stack traces, SQL text, tokens, secret values, pro
 
 SQLite is the source of truth for a single-active-control-plane topology. Enable foreign keys, WAL, busy timeout, and transactional current-schema initialization; use no ORM.
 
-The store initializes one exact schema only when the database is empty, records its source fingerprint atomically, and rejects every nonempty database whose identity differs. It never upgrades, backfills, repairs, or dual-reads database state. Schema SQL executes statement-by-statement because Bun does not reliably surface every statement-level failure through multi-statement `Database.exec()`.
+The store initializes one exact schema only when the database is empty, records its source fingerprint atomically, and rejects every nonempty database whose identity differs. Startup never upgrades, backfills, repairs, or dual-reads database state. The separate offline `migrate:projects` command recognizes only the exact published v0.1.3 fingerprint, defaults to a dry run, and verifies the resulting current fingerprint plus foreign keys after explicit `--write`; unknown or partially modified schemas fail closed. Schema SQL executes statement-by-statement because Bun does not reliably surface every statement-level failure through multi-statement `Database.exec()`.
 
-The schema includes its exact identity, owners and hashed API keys, runs and durable run events, agent sessions, turns, session commands and events, immutable run-input references, durable runtime-provisioning and run-process-launch intents, runtime instances and session runtime leases with cleanup state, runner/provider cursors, independently scoped idempotency keys, sequenced run logs, artifact metadata, deployments and logs, and append-only audit records.
+The schema includes its exact identity, Owners, stable Principals, Projects and memberships, hashed API keys and Principal bindings, opaque browser sessions, immutable Run/Session Project and delegator bindings, durable run events, turns, session commands and events, immutable run-input references, durable runtime-provisioning and run-process-launch intents, runtime instances and session runtime leases with cleanup state, runner/provider cursors, Principal-scoped admission idempotency, sequenced run logs, artifact metadata, deployments and logs, and append-only audit records.
 
 Do not store artifact bodies or resolved secrets in SQLite. Use relational constraints for ownership, ordering, state, and uniqueness rather than hiding invariants in JSON. Owner-scoped indexes start with `owner_id`. State claims use compare-and-swap predicates or status versions.
 
@@ -591,17 +586,19 @@ src/api/contracts.ts              pure public Zod request/response contract
 src/api/cursor.ts                 shared strict SSE resume cursor boundary
 src/api/                          thin routes and OpenAPI registration
 src/services/run-executor.ts      only run-state owner
-src/services/run-service.ts       owner-scoped run use cases
+src/services/run-service.ts       Project-aware run admission/read/command boundary
 src/services/session-executor.ts  only session/turn execution owner
-src/services/session-service.ts   owner-scoped interactive use cases
+src/services/session-service.ts   Project-aware interactive use cases
 src/services/credential-lease-attacher.ts trusted attach and placeholder boundary
 src/services/credential-lease-reaper.ts durable revocation before compute cleanup
 src/services/workspace-preparer.ts immutable input to provider workspace
 src/services/artifact-collector.ts
-src/services/artifact-service.ts  owner-scoped immutable artifact reads
+src/services/artifact-service.ts  Project-member immutable artifact reads
 src/services/brief-service.ts     curated artifact reference and run-resolution boundary
-src/services/audit-service.ts     owner-scoped audit reads
-src/services/api-key-service.ts   owner-scoped API-key lifecycle
+src/services/project-service.ts   Principal, Project, membership, and work read model
+src/services/browser-session-service.ts opaque read-only browser credential lifecycle
+src/services/audit-service.ts     Owner-admin audit reads
+src/services/api-key-service.ts   Principal-bound API-key lifecycle
 src/services/deployment-executor.ts
 src/services/runtime-reaper.ts
 
@@ -642,7 +639,7 @@ scripts/release-proof-receipt.ts  versioned proof taxonomy, schema, digest, and 
 scripts/verify-release-proof.ts   independent receipt/revision verification
 .github/workflows/remote-proof.yml explicit real-account proof plus signed receipt provenance
 docs/                             architecture, provider authoring, operations
-docs/project-collaboration.md     controlling route for the active product milestone
+docs/project-collaboration.md     controlling Shared Project definition brief
 docs/threat-model.md              trust boundaries, attacker model, residual risk
 ```
 
@@ -670,7 +667,7 @@ Tests must prove:
 - timeout becomes immutable `timed_out` despite a late exit;
 - identical idempotent requests create one run and conflicting reuse returns 409;
 - accepted execution provenance persists, participates in idempotency, and rejects adapter/capability drift before compute;
-- deployment admission is owner-scoped and idempotent, and atomically writes one record, immutable-source reference, and create audit;
+- deployment admission is delegator-authorized and Principal-scoped for idempotency, and atomically writes one record, immutable-source reference, and create audit;
 - an ambiguous deployment success remains `running` and converges through exact-id reconciliation instead of becoming falsely failed;
 - exact secrets and capability placeholders never persist in any log plane, audit metadata, or artifact;
 - secret-bearing agent admission rejects providers without credential mediation;
@@ -697,14 +694,14 @@ Tests must prove:
 - a gated live test creates, starts, executes, reads files/logs, stops, and destroys a real Cloudflare sandbox;
 - Cloudflare deployment proof first observes complete container-application rollout convergence, then live and release proofs gate on bounded authenticated bridge readiness from the production Bun `RuntimeProvider.health()` path. Health does not materialize compute; the first idempotent Sandbox start absorbs provider-classified transient transport errors under the caller's deadline, while replacement after physical-generation acceptance fails closed as `RUNTIME_LOST`;
 - the public client authenticates, validates contract responses, preserves structured safe errors, waits deterministically, and reconnects log streams without gaps or duplicates;
-- artifact inspection/download, deployment listing, audit queries, and API-key lifecycle are owner-scoped through API, SDK, and CLI;
+- artifact inspection/download and deployment listing follow current Project membership; audit is Owner-admin-only; API-key reads are Principal-scoped with admin authority for cross-Principal issuance/revocation;
 - sandbox clock skew cannot control durable log timestamps or runner timeout duration, and the ACP child timezone is UTC;
 - the no-account demo completes create → run → logs → artifact → local deployment;
 - the release proof sends a revision-bound prompt through ACP, downloads the immutable agent-written artifact through the public SDK, promotes one exact entry to a Brief, proves a separate run can reuse that frozen evidence into new immutable output, deploys through the SDK, verifies the returned URL and semantic OTLP signals, byte-scans live and backed-up durable data for exact private values, then proves cleanup, restart, hashed backup, restore, and a second boot;
 - each Cloudflare live-agent proof requires credentialed generation and multi-turn continuity inside the sandbox; a deterministic ACP fixture, image version check, health response, or lifecycle-only test is not accepted as equivalent evidence, and exact model identity is not claimed without attestation;
 - pinned OTel SDK/exporter packages initialize and export under Bun.
 
-Before claiming Project collaboration, one clean revision must additionally prove the complete two-person path in `docs/project-collaboration.md`: distinct Actor credentials, same-Project visibility, delegator attribution, safe conversation/artifact detail, append-only comments and mentions, raw-API denial of another Actor's lifecycle commands, same-owner non-member isolation, cross-owner isolation, stream revocation after member removal, key rotation, restart, backup, and restore. A Project field, multiple owner keys, mock UI, or two browser windows is not equivalent evidence.
+Before claiming Project collaboration, one clean revision must additionally prove the complete two-person path in `docs/project-collaboration.md`: distinct authenticated people, same-Project visibility, delegator attribution, safe conversation/artifact detail, raw-API denial of another member's lifecycle commands, non-member isolation, tenant isolation, stream revocation after member removal, credential rotation, restart, backup, and restore. Comments and mentions are not part of the visibility acceptance floor. A Project field, multiple owner keys, mock UI, or two browser windows is not equivalent evidence.
 
 Assert ordering, error codes, and side effects with injected clocks and deterministic adapters. Do not sleep and hope. A mock proves replaceability; only the gated live test proves real provider integration.
 
@@ -764,7 +761,7 @@ Build in dependency order:
 6. Cloudflare bridge and real remote provider.
 7. CLI, doctor, demo, documentation, containers, complete verification.
 
-The existing execution stack has completed that sequence. Forward product work now proceeds only through the ordered gates in `docs/project-collaboration.md`: durable Actor/Project membership; Project-bound work and derived-resource authorization; shared Project watch; append-only collaboration; two-person product proof; then Project-scoped shared execution intelligence and external integrations. Do not begin a later gate because an earlier schema or UI compiles.
+The existing execution stack has completed that sequence, and the Shared Project Definition Gate plus first schema/API/Board vertical slice are complete. Forward product work now closes the clean-revision release proof in `docs/project-collaboration.md`: same-Project two-person visibility, non-member and tenant isolation, credential rotation, membership revocation, deployed Board access, restart, backup, restore, and current visual acceptance. Do not broaden into comments, presence, task management, operator grants, or another intelligence layer to avoid that proof.
 
 For every change:
 
@@ -782,9 +779,9 @@ For every change:
 Honest current limits:
 
 - local execution is not isolation;
-- API keys currently authenticate only an owner and all keys under that owner have owner-wide authority;
-- the Board is a single-owner reference surface, not a shared multi-person Project;
-- Project identity, Actor identity, memberships, delegator attribution, comments, mentions, and project-scoped authorization are not implemented;
+- API keys and browser sessions are first-party credentials rather than external identity-provider login; invitation delivery and federation are not implemented;
+- Project Watch is implemented as a reference client, but the clean-revision deployed two-person, credential-rotation, restart, backup, and restore proof is not yet complete;
+- Project authorization is Owner-contained; cross-Owner Projects, delegated operator grants, comments, mentions, presence, and a durable Project activity stream are not implemented;
 - SQLite supports one active control-plane writer;
 - in-flight recovery is only as strong as provider process identity and replay;
 - mediated credentials do not make an allowed destination trustworthy or prevent workspace-data exfiltration to it;
@@ -813,8 +810,8 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
 - The local proof is deliberately credential-free and deterministic. Credential-bearing Codex, Claude Code, and Pi proofs run only through the Cloudflare mediation boundary; local execution has no exception path.
 - The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. The image gate proves installation and bootability. Each separate credential-gated acceptance command requires remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup; only its clean current-revision receipt establishes that path as passed.
-- Version `0.1.3` is the current published release baseline. Its Board proves one owner's read/delegate/detail loop, not multi-person Project collaboration.
-- The branch also contains unreleased owner-scoped Brief reuse across one-shot Runs and turn-scoped Sessions with workspace relevance and dispatch-time byte revalidation. That work remains a valid supporting capability, but Fact discovery and further intelligence work are paused behind the Project collaboration gates.
-- The active milestone is Gate 1 of `docs/project-collaboration.md`: durable Actor identity, Project, membership, and credential binding. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
+- Version `0.1.3` is the current published release baseline. Its earlier Board proves one owner's read/delegate/detail loop; the current branch replaces that product surface with the unreleased Project Watch vertical slice.
+- The branch also contains unreleased Brief reuse across one-shot Runs and turn-scoped Sessions with workspace relevance and dispatch-time byte revalidation. Project-member reads now follow the source Run relationship; Fact discovery, ranking, conflict handling, and broader intelligence work remain paused behind the Shared Project release proof.
+- The active milestone is the clean-revision collaboration release proof in `docs/project-collaboration.md`. Stable Principals, Owner-contained Projects, membership, delegator attribution, Project reads, delegator-only control, opaque read-only browser sessions, exact v0.1.3 migration, and the Project Watch form are implemented locally. A durable Project activity journal is deliberately not part of this slice. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

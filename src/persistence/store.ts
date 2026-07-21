@@ -8,6 +8,7 @@ import {
   type Artifact,
   type AuditRecord,
   type Brief,
+  type BrowserSession,
   canTransitionRun,
   type Deployment,
   type DeploymentLogChunk,
@@ -16,6 +17,14 @@ import {
   type ExecutionProvenance,
   isTerminalRunStatus,
   type JsonObject,
+  type OwnerRole,
+  type Principal,
+  type PrincipalKind,
+  type PrincipalSummary,
+  type Project,
+  type ProjectMember,
+  type ProjectRole,
+  type ProjectWorkItem,
   RUN_EVENT_VERSION,
   type Run,
   type RunEvent,
@@ -307,6 +316,67 @@ interface ApiKeyRow extends Record<string, Bind> {
   revoked_at: string | null
 }
 
+interface PrincipalRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  kind: PrincipalKind
+  display_name: string
+  owner_role: OwnerRole
+  created_at: string
+  disabled_at: string | null
+}
+
+interface ProjectRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  name: string
+  slug: string
+  created_at: string
+  archived_at: string | null
+}
+
+interface ProjectMemberRow extends Record<string, Bind> {
+  project_id: string
+  principal_id: string
+  kind: PrincipalKind
+  display_name: string
+  role: ProjectRole
+  joined_at: string
+}
+
+interface WorkBindingRow extends Record<string, Bind> {
+  project_id: string
+  delegated_by_principal_id: string
+  delegated_by_name: string
+  delegated_by_kind: PrincipalKind
+}
+
+interface ProjectWorkRow extends Record<string, Bind> {
+  kind: "run" | "session"
+  id: string
+  project_id: string
+  delegated_by_principal_id: string
+  delegated_by_name: string
+  delegated_by_kind: PrincipalKind
+  title: string
+  agent_type: string
+  status: ProjectWorkItem["status"]
+  created_at: string
+  updated_at: string
+}
+
+interface BrowserSessionRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  principal_id: string
+  prefix: string
+  hash: string
+  created_at: string
+  expires_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
 const stringify = (value: unknown): string => JSON.stringify(value)
 
 const parse = <T>(value: string): T => JSON.parse(value) as T
@@ -351,9 +421,15 @@ const decodeCreatedCursor = (
   }
 }
 
-const runFromRow = (row: RunRow): Run => ({
+const runFromRow = (row: RunRow, binding: WorkBindingRow): Run => ({
   id: row.id,
   ownerId: row.owner_id,
+  projectId: binding.project_id,
+  delegatedBy: {
+    id: binding.delegated_by_principal_id,
+    kind: binding.delegated_by_kind,
+    displayName: binding.delegated_by_name,
+  },
   workspace: parse<WorkspaceSource>(row.workspace_json),
   agentType: row.agent_type,
   agentSpec: parse<AgentLaunchSnapshot>(row.agent_spec_json),
@@ -382,9 +458,15 @@ const runFromRow = (row: RunRow): Run => ({
   exitCode: row.exit_code,
 })
 
-const agentSessionFromRow = (row: AgentSessionRow): AgentSession => ({
+const agentSessionFromRow = (row: AgentSessionRow, binding: WorkBindingRow): AgentSession => ({
   id: row.id,
   ownerId: row.owner_id,
+  projectId: binding.project_id,
+  delegatedBy: {
+    id: binding.delegated_by_principal_id,
+    kind: binding.delegated_by_kind,
+    displayName: binding.delegated_by_name,
+  },
   workspace: parse<WorkspaceSource>(row.workspace_json),
   agentType: row.agent_type,
   agentSpec: parse<AgentLaunchSnapshot>(row.agent_spec_json),
@@ -464,12 +546,53 @@ const sessionEventFromRow = (row: SessionEventRow): SessionEvent =>
     createdAt: row.created_at,
   }) as SessionEvent
 
-const apiKeyFromRow = (row: ApiKeyRow): ApiKey => ({
+const apiKeyFromRow = (row: ApiKeyRow, principalId: string): ApiKey => ({
   id: row.id,
   ownerId: row.owner_id,
+  principalId,
   prefix: row.prefix,
   name: row.name,
   createdAt: row.created_at,
+  lastUsedAt: row.last_used_at,
+  revokedAt: row.revoked_at,
+})
+
+const principalFromRow = (row: PrincipalRow): Principal => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  kind: row.kind,
+  displayName: row.display_name,
+  ownerRole: row.owner_role,
+  createdAt: row.created_at,
+  disabledAt: row.disabled_at,
+})
+
+const projectFromRow = (row: ProjectRow): Project => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  name: row.name,
+  slug: row.slug,
+  createdAt: row.created_at,
+  archivedAt: row.archived_at,
+})
+
+const projectMemberFromRow = (row: ProjectMemberRow): ProjectMember => ({
+  projectId: row.project_id,
+  principal: {
+    id: row.principal_id,
+    kind: row.kind,
+    displayName: row.display_name,
+  },
+  role: row.role,
+  joinedAt: row.joined_at,
+})
+
+const browserSessionFromRow = (row: BrowserSessionRow): BrowserSession => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  principalId: row.principal_id,
+  createdAt: row.created_at,
+  expiresAt: row.expires_at,
   lastUsedAt: row.last_used_at,
   revokedAt: row.revoked_at,
 })
@@ -720,6 +843,9 @@ const eventForLog = (chunk: Omit<RunLogChunk, "sequence"> | RunLogChunk): RunEve
 export interface CreateRunInput {
   readonly id: string
   readonly ownerId: string
+  /** Explicit for every admitted API run; omitted only by pre-Project internal fixtures. */
+  readonly projectId?: string
+  readonly delegatedBy?: PrincipalSummary
   readonly workspace: WorkspaceSource
   readonly agentType: string
   readonly agentSpec: AgentLaunchSnapshot
@@ -875,6 +1001,9 @@ export type BootstrapIdentityStatus =
 export interface CreateAgentSessionInput {
   readonly id: string
   readonly ownerId: string
+  /** Explicit for every admitted API session; omitted only by pre-Project internal fixtures. */
+  readonly projectId?: string
+  readonly delegatedBy?: PrincipalSummary
   readonly workspace: WorkspaceSource
   readonly agentType: string
   readonly agentSpec: AgentLaunchSnapshot
@@ -1142,6 +1271,38 @@ export class Store {
     return identity
   }
 
+  #runFromRow(row: RunRow): Run {
+    const binding = this.database
+      .query<WorkBindingRow, [string, string]>(`
+        SELECT project_id, delegated_by_principal_id, delegated_by_name, delegated_by_kind
+        FROM run_project_bindings WHERE owner_id = ? AND run_id = ?
+      `)
+      .get(row.owner_id, row.id)
+    if (binding === null) throw new Error(`Run ${row.id} has no Project binding`)
+    return runFromRow(row, binding)
+  }
+
+  #agentSessionFromRow(row: AgentSessionRow): AgentSession {
+    const binding = this.database
+      .query<WorkBindingRow, [string, string]>(`
+        SELECT project_id, delegated_by_principal_id, delegated_by_name, delegated_by_kind
+        FROM session_project_bindings WHERE owner_id = ? AND session_id = ?
+      `)
+      .get(row.owner_id, row.id)
+    if (binding === null) throw new Error(`Agent session ${row.id} has no Project binding`)
+    return agentSessionFromRow(row, binding)
+  }
+
+  #apiKeyFromRow(row: ApiKeyRow): ApiKey {
+    const binding = this.database
+      .query<{ principal_id: string }, [string, string]>(
+        "SELECT principal_id FROM api_key_principals WHERE owner_id = ? AND api_key_id = ?",
+      )
+      .get(row.owner_id, row.id)
+    if (binding === null) throw new Error(`API key ${row.id} has no Principal binding`)
+    return apiKeyFromRow(row, binding.principal_id)
+  }
+
   createOwner(input: { id: string; name: string; createdAt: string }): boolean {
     return (
       this.database
@@ -1152,19 +1313,516 @@ export class Store {
     )
   }
 
+  #ensureOwnerDefaultCollaboration(
+    ownerId: string,
+    createdAt: string,
+  ): {
+    readonly principal: Principal
+    readonly project: Project
+  } {
+    let principalRow = this.database
+      .query<PrincipalRow, [string]>(
+        "SELECT * FROM principals WHERE owner_id = ? ORDER BY created_at, id LIMIT 1",
+      )
+      .get(ownerId)
+    const owner = this.database
+      .query<{ name: string }, [string]>("SELECT name FROM owners WHERE id = ?")
+      .get(ownerId)
+    if (owner === null) throw new AppError({ code: "NOT_FOUND", message: "Owner not found" })
+    if (principalRow === null) {
+      const principalId = crypto.randomUUID()
+      this.database
+        .query(`
+          INSERT INTO principals(id,owner_id,kind,display_name,owner_role,created_at)
+          VALUES (?,?,'person',?,'admin',?)
+        `)
+        .run(principalId, ownerId, owner.name, createdAt)
+      principalRow = this.database
+        .query<PrincipalRow, [string]>("SELECT * FROM principals WHERE id = ?")
+        .get(principalId)
+    }
+    if (principalRow === null) throw new Error("Default Principal was not created")
+
+    let projectRow = this.database
+      .query<ProjectRow, [string]>(
+        "SELECT * FROM projects WHERE owner_id = ? ORDER BY created_at, id LIMIT 1",
+      )
+      .get(ownerId)
+    if (projectRow === null) {
+      const projectId = crypto.randomUUID()
+      this.database
+        .query(`
+          INSERT INTO projects(id,owner_id,name,slug,created_at)
+          VALUES (?,?,?,'default',?)
+        `)
+        .run(projectId, ownerId, "Default Project", createdAt)
+      projectRow = this.database
+        .query<ProjectRow, [string]>("SELECT * FROM projects WHERE id = ?")
+        .get(projectId)
+    }
+    if (projectRow === null) throw new Error("Default Project was not created")
+
+    this.database
+      .query(`
+        INSERT INTO project_memberships(owner_id,project_id,principal_id,role,joined_at,removed_at)
+        VALUES (?, ?, ?, 'maintainer', ?, NULL)
+        ON CONFLICT(project_id,principal_id) DO UPDATE SET removed_at=NULL
+      `)
+      .run(ownerId, projectRow.id, principalRow.id, createdAt)
+    return { principal: principalFromRow(principalRow), project: projectFromRow(projectRow) }
+  }
+
+  #resolveWorkCollaboration(input: {
+    readonly ownerId: string
+    readonly projectId: string | undefined
+    readonly delegatedBy: PrincipalSummary | undefined
+    readonly createdAt: string
+  }): { readonly principal: Principal; readonly project: Project } {
+    if (input.projectId === undefined && input.delegatedBy === undefined) {
+      return this.#ensureOwnerDefaultCollaboration(input.ownerId, input.createdAt)
+    }
+    if (input.projectId === undefined || input.delegatedBy === undefined) {
+      throw new AppError({
+        code: "INVALID_REQUEST",
+        message: "projectId and delegatedBy must be persisted together",
+      })
+    }
+    const principal = this.getPrincipal(input.ownerId, input.delegatedBy.id)
+    if (
+      principal === null ||
+      principal.disabledAt !== null ||
+      principal.kind !== input.delegatedBy.kind ||
+      principal.displayName !== input.delegatedBy.displayName
+    ) {
+      throw new AppError({ code: "NOT_FOUND", message: "Delegating Principal not found" })
+    }
+    const project = this.resolveProjectForPrincipal(input.ownerId, principal.id, input.projectId)
+    if (project === null) {
+      throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
+    }
+    return { principal, project }
+  }
+
+  createPrincipal(input: {
+    id: string
+    ownerId: string
+    kind: PrincipalKind
+    displayName: string
+    ownerRole: OwnerRole
+    createdAt: string
+  }): Principal {
+    this.database
+      .query(`
+        INSERT INTO principals(id,owner_id,kind,display_name,owner_role,created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.id,
+        input.ownerId,
+        input.kind,
+        input.displayName.trim(),
+        input.ownerRole,
+        input.createdAt,
+      )
+    return this.getPrincipal(input.ownerId, input.id) as Principal
+  }
+
+  createPrincipalWithAudit(input: {
+    readonly principal: Principal
+    readonly audit: AuditRecord
+  }): Principal {
+    return this.database
+      .transaction(() => {
+        const principal = this.createPrincipal({
+          id: input.principal.id,
+          ownerId: input.principal.ownerId,
+          kind: input.principal.kind,
+          displayName: input.principal.displayName,
+          ownerRole: input.principal.ownerRole,
+          createdAt: input.principal.createdAt,
+        })
+        this.insertAudit(input.audit)
+        return principal
+      })
+      .immediate()
+  }
+
+  getPrincipal(ownerId: string, principalId: string): Principal | null {
+    const row = this.database
+      .query<PrincipalRow, [string, string]>(
+        "SELECT * FROM principals WHERE owner_id = ? AND id = ?",
+      )
+      .get(ownerId, principalId)
+    return row === null ? null : principalFromRow(row)
+  }
+
+  listPrincipals(ownerId: string): readonly Principal[] {
+    return this.database
+      .query<PrincipalRow, [string]>(
+        "SELECT * FROM principals WHERE owner_id = ? ORDER BY created_at, id",
+      )
+      .all(ownerId)
+      .map(principalFromRow)
+  }
+
+  createProject(input: {
+    id: string
+    ownerId: string
+    name: string
+    slug: string
+    createdAt: string
+    createdByPrincipalId: string
+  }): Project {
+    const transaction = this.database.transaction(() => {
+      this.database
+        .query("INSERT INTO projects(id,owner_id,name,slug,created_at) VALUES (?,?,?,?,?)")
+        .run(input.id, input.ownerId, input.name.trim(), input.slug, input.createdAt)
+      this.database
+        .query(`
+          INSERT INTO project_memberships(owner_id,project_id,principal_id,role,joined_at)
+          VALUES (?, ?, ?, 'maintainer', ?)
+        `)
+        .run(input.ownerId, input.id, input.createdByPrincipalId, input.createdAt)
+      return this.getProject(input.ownerId, input.id) as Project
+    })
+    return transaction.immediate()
+  }
+
+  createProjectWithAudit(input: {
+    readonly project: Project
+    readonly createdByPrincipalId: string
+    readonly audit: AuditRecord
+  }): Project {
+    return this.database
+      .transaction(() => {
+        const project = this.createProject({
+          id: input.project.id,
+          ownerId: input.project.ownerId,
+          name: input.project.name,
+          slug: input.project.slug,
+          createdAt: input.project.createdAt,
+          createdByPrincipalId: input.createdByPrincipalId,
+        })
+        this.insertAudit(input.audit)
+        return project
+      })
+      .immediate()
+  }
+
+  getProject(ownerId: string, projectId: string): Project | null {
+    const row = this.database
+      .query<ProjectRow, [string, string]>("SELECT * FROM projects WHERE owner_id = ? AND id = ?")
+      .get(ownerId, projectId)
+    return row === null ? null : projectFromRow(row)
+  }
+
+  listProjectsForPrincipal(ownerId: string, principalId: string): readonly Project[] {
+    return this.database
+      .query<ProjectRow, [string, string]>(`
+        SELECT project.* FROM projects project
+        JOIN project_memberships membership
+          ON membership.owner_id=project.owner_id AND membership.project_id=project.id
+        WHERE project.owner_id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND project.archived_at IS NULL
+        ORDER BY project.created_at,project.id
+      `)
+      .all(ownerId, principalId)
+      .map(projectFromRow)
+  }
+
+  addProjectMember(input: {
+    ownerId: string
+    projectId: string
+    principalId: string
+    role: ProjectRole
+    joinedAt: string
+  }): ProjectMember {
+    this.database
+      .query(`
+        INSERT INTO project_memberships(owner_id,project_id,principal_id,role,joined_at,removed_at)
+        VALUES (?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(project_id,principal_id) DO UPDATE SET
+          role=excluded.role,joined_at=excluded.joined_at,removed_at=NULL
+      `)
+      .run(input.ownerId, input.projectId, input.principalId, input.role, input.joinedAt)
+    const member = this.getProjectMember(input.ownerId, input.projectId, input.principalId)
+    if (member === null) throw new Error("Project member was not created")
+    return member
+  }
+
+  addProjectMemberWithAudit(input: {
+    readonly ownerId: string
+    readonly projectId: string
+    readonly principalId: string
+    readonly role: ProjectRole
+    readonly joinedAt: string
+    readonly audit: AuditRecord
+  }): ProjectMember {
+    return this.database
+      .transaction(() => {
+        const member = this.addProjectMember(input)
+        this.insertAudit(input.audit)
+        return member
+      })
+      .immediate()
+  }
+
+  removeProjectMember(input: {
+    ownerId: string
+    projectId: string
+    principalId: string
+    removedAt: string
+  }): boolean {
+    return (
+      this.database
+        .query(`
+          UPDATE project_memberships SET removed_at=?
+          WHERE owner_id=? AND project_id=? AND principal_id=? AND removed_at IS NULL
+        `)
+        .run(input.removedAt, input.ownerId, input.projectId, input.principalId).changes === 1
+    )
+  }
+
+  removeProjectMemberWithAudit(input: {
+    readonly ownerId: string
+    readonly projectId: string
+    readonly principalId: string
+    readonly removedAt: string
+    readonly audit: AuditRecord
+  }): boolean {
+    return this.database
+      .transaction(() => {
+        const removed = this.removeProjectMember(input)
+        if (removed) this.insertAudit(input.audit)
+        return removed
+      })
+      .immediate()
+  }
+
+  getProjectMember(ownerId: string, projectId: string, principalId: string): ProjectMember | null {
+    const row = this.database
+      .query<ProjectMemberRow, [string, string, string]>(`
+        SELECT membership.project_id,membership.principal_id,principal.kind,
+          principal.display_name,membership.role,membership.joined_at
+        FROM project_memberships membership
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE membership.owner_id=? AND membership.project_id=?
+          AND membership.principal_id=? AND membership.removed_at IS NULL
+          AND principal.disabled_at IS NULL
+      `)
+      .get(ownerId, projectId, principalId)
+    return row === null ? null : projectMemberFromRow(row)
+  }
+
+  listProjectMembers(ownerId: string, projectId: string): readonly ProjectMember[] {
+    return this.database
+      .query<ProjectMemberRow, [string, string]>(`
+        SELECT membership.project_id,membership.principal_id,principal.kind,
+          principal.display_name,membership.role,membership.joined_at
+        FROM project_memberships membership
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE membership.owner_id=? AND membership.project_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+        ORDER BY principal.display_name,principal.id
+      `)
+      .all(ownerId, projectId)
+      .map(projectMemberFromRow)
+  }
+
+  resolveProjectForPrincipal(ownerId: string, principalId: string, projectId?: string): Project {
+    if (projectId !== undefined) {
+      const member = this.getProjectMember(ownerId, projectId, principalId)
+      const project = this.getProject(ownerId, projectId)
+      if (member === null || project === null || project.archivedAt !== null) {
+        throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
+      }
+      return project
+    }
+    const projects = this.listProjectsForPrincipal(ownerId, principalId)
+    if (projects.length === 1) return projects[0] as Project
+    throw new AppError({
+      code: "PROJECT_REQUIRED",
+      status: 400,
+      message: "projectId is required when the caller belongs to multiple Projects",
+    })
+  }
+
+  requireProjectMember(ownerId: string, projectId: string, principalId: string): ProjectMember {
+    const member = this.getProjectMember(ownerId, projectId, principalId)
+    if (member === null) throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
+    return member
+  }
+
+  getRunForPrincipal(ownerId: string, principalId: string, runId: string): Run | null {
+    const allowed = this.database
+      .query<{ allowed: number }, [string, string, string]>(`
+        SELECT 1 AS allowed FROM run_project_bindings binding
+        JOIN project_memberships membership
+          ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE binding.owner_id=? AND binding.run_id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+      `)
+      .get(ownerId, runId, principalId)
+    return allowed === null ? null : this.getRun(ownerId, runId)
+  }
+
+  getArtifactForPrincipal(
+    ownerId: string,
+    principalId: string,
+    artifactId: string,
+  ): Artifact | null {
+    const row = this.database
+      .query<ArtifactRow, [string, string, string]>(`
+        SELECT artifact.* FROM artifacts artifact
+        JOIN run_project_bindings binding
+          ON binding.owner_id=artifact.owner_id AND binding.run_id=artifact.run_id
+        JOIN project_memberships membership
+          ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE artifact.owner_id=? AND artifact.id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+      `)
+      .get(ownerId, artifactId, principalId)
+    return row === null ? null : artifactFromRow(row)
+  }
+
+  getAgentSessionForPrincipal(
+    ownerId: string,
+    principalId: string,
+    sessionId: string,
+  ): AgentSession | null {
+    const allowed = this.database
+      .query<{ allowed: number }, [string, string, string]>(`
+        SELECT 1 AS allowed FROM session_project_bindings binding
+        JOIN project_memberships membership
+          ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE binding.owner_id=? AND binding.session_id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+      `)
+      .get(ownerId, sessionId, principalId)
+    return allowed === null ? null : this.getAgentSession(ownerId, sessionId)
+  }
+
+  requireRunDelegator(ownerId: string, principalId: string, runId: string): Run {
+    const run = this.getRunForPrincipal(ownerId, principalId, runId)
+    if (run === null || run.delegatedBy.id !== principalId) {
+      throw new AppError({ code: "NOT_FOUND", message: "Run not found" })
+    }
+    return run
+  }
+
+  requireSessionDelegator(ownerId: string, principalId: string, sessionId: string): AgentSession {
+    const session = this.getAgentSessionForPrincipal(ownerId, principalId, sessionId)
+    if (session === null || session.delegatedBy.id !== principalId) {
+      throw new AppError({ code: "NOT_FOUND", message: "Session not found" })
+    }
+    return session
+  }
+
+  listProjectWork(
+    ownerId: string,
+    principalId: string,
+    projectId: string,
+  ): readonly ProjectWorkItem[] {
+    this.requireProjectMember(ownerId, projectId, principalId)
+    return this.database
+      .query<ProjectWorkRow, [string, string, string, string]>(`
+        SELECT * FROM (
+          SELECT 'run' AS kind,run.id,binding.project_id,
+            binding.delegated_by_principal_id,binding.delegated_by_name,
+            binding.delegated_by_kind,run.prompt AS title,run.agent_type,
+            run.status,run.created_at,run.updated_at
+          FROM runs run
+          JOIN run_project_bindings binding
+            ON binding.owner_id=run.owner_id AND binding.run_id=run.id
+          WHERE run.owner_id=? AND binding.project_id=?
+          UNION ALL
+          SELECT 'session' AS kind,session.id,binding.project_id,
+            binding.delegated_by_principal_id,binding.delegated_by_name,
+            binding.delegated_by_kind,
+            COALESCE(
+              (SELECT turn.prompt FROM session_turns turn
+                WHERE turn.owner_id=session.owner_id AND turn.session_id=session.id
+                ORDER BY turn.sequence LIMIT 1),
+              'An open ' || session.agent_type || ' session'
+            ) AS title,
+            session.agent_type,session.status,session.created_at,session.updated_at
+          FROM agent_sessions session
+          JOIN session_project_bindings binding
+            ON binding.owner_id=session.owner_id AND binding.session_id=session.id
+          WHERE session.owner_id=? AND binding.project_id=?
+        )
+        ORDER BY updated_at DESC,kind DESC,id DESC LIMIT 100
+      `)
+      .all(ownerId, projectId, ownerId, projectId)
+      .map((row) => ({
+        kind: row.kind,
+        id: row.id,
+        projectId: row.project_id,
+        delegatedBy: {
+          id: row.delegated_by_principal_id,
+          displayName: row.delegated_by_name,
+          kind: row.delegated_by_kind,
+        },
+        title: row.title,
+        agentType: row.agent_type,
+        status: row.status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }))
+  }
+
   createApiKey(input: {
     id: string
     ownerId: string
+    principalId?: string
     prefix: string
     hash: string
     name: string
     createdAt: string
   }): void {
-    this.database
-      .query(
-        "INSERT INTO api_keys(id, owner_id, prefix, hash, name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .run(input.id, input.ownerId, input.prefix, input.hash, input.name, input.createdAt)
+    const transaction = this.database.transaction(() => {
+      let principalId = input.principalId
+      if (principalId === undefined) {
+        const principals = this.listPrincipals(input.ownerId).filter(
+          (principal) => principal.disabledAt === null,
+        )
+        if (principals.length === 0) {
+          principalId = this.#ensureOwnerDefaultCollaboration(input.ownerId, input.createdAt)
+            .principal.id
+        } else if (principals.length === 1) {
+          principalId = principals[0]?.id
+        } else {
+          throw new AppError({
+            code: "PRINCIPAL_REQUIRED",
+            message: "principalId is required when an Owner has multiple Principals",
+          })
+        }
+      }
+      const principal = this.getPrincipal(input.ownerId, principalId as string)
+      if (principal === null || principal.disabledAt !== null) {
+        throw new AppError({ code: "NOT_FOUND", message: "Principal not found" })
+      }
+      this.database
+        .query(
+          "INSERT INTO api_keys(id, owner_id, prefix, hash, name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(input.id, input.ownerId, input.prefix, input.hash, input.name, input.createdAt)
+      this.database
+        .query(`
+          INSERT INTO api_key_principals(api_key_id,owner_id,principal_id,created_at)
+          VALUES (?, ?, ?, ?)
+        `)
+        .run(input.id, input.ownerId, principal.id, input.createdAt)
+    })
+    transaction.immediate()
   }
 
   createApiKeyWithAudit(input: {
@@ -1175,6 +1833,7 @@ export class Store {
       this.createApiKey({
         id: input.key.id,
         ownerId: input.key.ownerId,
+        principalId: input.key.principalId,
         prefix: input.key.prefix,
         hash: input.key.hash,
         name: input.key.name,
@@ -1187,6 +1846,7 @@ export class Store {
     return {
       id: created.id,
       ownerId: created.ownerId,
+      principalId: created.principalId,
       prefix: created.prefix,
       name: created.name,
       createdAt: created.createdAt,
@@ -1201,7 +1861,27 @@ export class Store {
         "SELECT * FROM api_keys WHERE owner_id = ? ORDER BY created_at DESC, id",
       )
       .all(ownerId)
-      .map(apiKeyFromRow)
+      .map((row) => this.#apiKeyFromRow(row))
+  }
+
+  listApiKeysForPrincipal(ownerId: string, principalId: string): readonly ApiKey[] {
+    return this.database
+      .query<ApiKeyRow, [string, string]>(`
+        SELECT key.* FROM api_keys key
+        JOIN api_key_principals binding
+          ON binding.owner_id=key.owner_id AND binding.api_key_id=key.id
+        WHERE key.owner_id=? AND binding.principal_id=?
+        ORDER BY key.created_at DESC,key.id
+      `)
+      .all(ownerId, principalId)
+      .map((row) => this.#apiKeyFromRow(row))
+  }
+
+  getApiKey(ownerId: string, id: string): ApiKey | null {
+    const row = this.database
+      .query<ApiKeyRow, [string, string]>("SELECT * FROM api_keys WHERE owner_id=? AND id=?")
+      .get(ownerId, id)
+    return row === null ? null : this.#apiKeyFromRow(row)
   }
 
   revokeApiKeyWithAudit(input: {
@@ -1215,7 +1895,7 @@ export class Store {
         .query<ApiKeyRow, [string, string]>("SELECT * FROM api_keys WHERE owner_id = ? AND id = ?")
         .get(input.ownerId, input.id)
       if (key === null) return null
-      if (key.revoked_at !== null) return apiKeyFromRow(key)
+      if (key.revoked_at !== null) return this.#apiKeyFromRow(key)
       const active = this.database
         .query<{ count: number }, [string]>(
           "SELECT COUNT(*) AS count FROM api_keys WHERE owner_id = ? AND revoked_at IS NULL",
@@ -1232,7 +1912,7 @@ export class Store {
         .query("UPDATE api_keys SET revoked_at = ? WHERE owner_id = ? AND id = ?")
         .run(input.at, input.ownerId, input.id)
       this.insertAudit(input.audit)
-      return { ...apiKeyFromRow(key), revokedAt: input.at }
+      return { ...this.#apiKeyFromRow(key), revokedAt: input.at }
     })
     return transaction.immediate()
   }
@@ -1295,6 +1975,7 @@ export class Store {
       this.database
         .query("INSERT INTO owners(id, name, created_at) VALUES (?, ?, ?)")
         .run(input.ownerId, input.ownerName, input.createdAt)
+      const collaboration = this.#ensureOwnerDefaultCollaboration(input.ownerId, input.createdAt)
       this.database
         .query(`
             INSERT INTO api_keys(id, owner_id, prefix, hash, name, created_at)
@@ -1308,6 +1989,12 @@ export class Store {
           input.apiKeyName,
           input.createdAt,
         )
+      this.database
+        .query(`
+          INSERT INTO api_key_principals(api_key_id,owner_id,principal_id,created_at)
+          VALUES (?, ?, ?, ?)
+        `)
+        .run(input.apiKeyId, input.ownerId, collaboration.principal.id, input.createdAt)
       this.insertAudit({
         id: crypto.randomUUID(),
         ownerId: input.ownerId,
@@ -1337,9 +2024,29 @@ export class Store {
     return transaction.immediate()
   }
 
-  findActiveApiKeysByPrefix(prefix: string): readonly ApiKeyRow[] {
+  findActiveApiKeysByPrefix(prefix: string): readonly (ApiKeyRow & {
+    principal_id: string
+    owner_role: OwnerRole
+    principal_disabled_at: string | null
+  })[] {
     return this.database
-      .query<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE prefix = ? AND revoked_at IS NULL")
+      .query<
+        ApiKeyRow & {
+          principal_id: string
+          owner_role: OwnerRole
+          principal_disabled_at: string | null
+        },
+        [string]
+      >(`
+        SELECT key.*,binding.principal_id,principal.owner_role,
+          principal.disabled_at AS principal_disabled_at
+        FROM api_keys key
+        JOIN api_key_principals binding
+          ON binding.owner_id=key.owner_id AND binding.api_key_id=key.id
+        JOIN principals principal
+          ON principal.owner_id=binding.owner_id AND principal.id=binding.principal_id
+        WHERE key.prefix=? AND key.revoked_at IS NULL
+      `)
       .all(prefix)
   }
 
@@ -1347,17 +2054,24 @@ export class Store {
     readonly {
       id: string
       ownerId: string
+      principalId: string
+      ownerRole: OwnerRole
       prefix: string
       hash: string
       revokedAt?: Date | null
+      principalDisabledAt?: Date | null
     }[]
   > {
     return this.findActiveApiKeysByPrefix(prefix).map((row) => ({
       id: row.id,
       ownerId: row.owner_id,
+      principalId: row.principal_id,
+      ownerRole: row.owner_role,
       prefix: row.prefix,
       hash: row.hash,
       revokedAt: row.revoked_at === null ? null : new Date(row.revoked_at),
+      principalDisabledAt:
+        row.principal_disabled_at === null ? null : new Date(row.principal_disabled_at),
     }))
   }
 
@@ -1383,17 +2097,140 @@ export class Store {
     )
   }
 
+  createBrowserSessionWithAudit(input: {
+    readonly session: BrowserSession & { readonly prefix: string; readonly hash: string }
+    readonly audit: AuditRecord
+  }): BrowserSession {
+    return this.database
+      .transaction(() => {
+        this.database
+          .query(`
+            INSERT INTO browser_sessions(
+              id,owner_id,principal_id,prefix,hash,created_at,expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            input.session.id,
+            input.session.ownerId,
+            input.session.principalId,
+            input.session.prefix,
+            input.session.hash,
+            input.session.createdAt,
+            input.session.expiresAt,
+          )
+        this.insertAudit(input.audit)
+        const row = this.database
+          .query<BrowserSessionRow, [string, string]>(
+            "SELECT * FROM browser_sessions WHERE owner_id=? AND id=?",
+          )
+          .get(input.session.ownerId, input.session.id)
+        if (row === null) throw new Error("Created browser session is missing")
+        return browserSessionFromRow(row)
+      })
+      .immediate()
+  }
+
+  async findBrowserSessionsByPrefix(prefix: string): Promise<
+    readonly {
+      readonly id: string
+      readonly ownerId: string
+      readonly principalId: string
+      readonly ownerRole: OwnerRole
+      readonly prefix: string
+      readonly hash: string
+      readonly expiresAt: Date
+      readonly revokedAt: Date | null
+      readonly principalDisabledAt: Date | null
+    }[]
+  > {
+    return this.database
+      .query<
+        BrowserSessionRow & {
+          owner_role: OwnerRole
+          principal_disabled_at: string | null
+        },
+        [string]
+      >(`
+        SELECT session.*,principal.owner_role,
+          principal.disabled_at AS principal_disabled_at
+        FROM browser_sessions session
+        JOIN principals principal
+          ON principal.owner_id=session.owner_id AND principal.id=session.principal_id
+        WHERE session.prefix=? AND session.revoked_at IS NULL
+      `)
+      .all(prefix)
+      .map((row) => ({
+        id: row.id,
+        ownerId: row.owner_id,
+        principalId: row.principal_id,
+        ownerRole: row.owner_role,
+        prefix: row.prefix,
+        hash: row.hash,
+        expiresAt: new Date(row.expires_at),
+        revokedAt: row.revoked_at === null ? null : new Date(row.revoked_at),
+        principalDisabledAt:
+          row.principal_disabled_at === null ? null : new Date(row.principal_disabled_at),
+      }))
+  }
+
+  touchBrowserSession(id: string, at: string): void {
+    const timestamp = Date.parse(at)
+    if (!Number.isFinite(timestamp)) {
+      throw new TypeError("Browser-session usage timestamp must be valid")
+    }
+    const threshold = new Date(timestamp - 60_000).toISOString()
+    this.database
+      .query(`
+        UPDATE browser_sessions SET last_used_at=?
+        WHERE id=? AND revoked_at IS NULL AND expires_at>?
+          AND (last_used_at IS NULL OR last_used_at<=?)
+      `)
+      .run(at, id, at, threshold)
+  }
+
+  revokeBrowserSessionWithAudit(input: {
+    readonly ownerId: string
+    readonly id: string
+    readonly at: string
+    readonly audit: AuditRecord
+  }): BrowserSession | null {
+    return this.database
+      .transaction(() => {
+        const changed = this.database
+          .query(`
+            UPDATE browser_sessions SET revoked_at=?
+            WHERE owner_id=? AND id=? AND revoked_at IS NULL
+          `)
+          .run(input.at, input.ownerId, input.id)
+        if (changed.changes !== 1) return null
+        this.insertAudit(input.audit)
+        const row = this.database
+          .query<BrowserSessionRow, [string, string]>(
+            "SELECT * FROM browser_sessions WHERE owner_id=? AND id=?",
+          )
+          .get(input.ownerId, input.id)
+        return row === null ? null : browserSessionFromRow(row)
+      })
+      .immediate()
+  }
+
   createRun(input: CreateRunInput): { run: Run; replayed: boolean } {
     const transaction = this.database.transaction(() => {
+      const collaboration = this.#resolveWorkCollaboration({
+        ownerId: input.ownerId,
+        projectId: input.projectId,
+        delegatedBy: input.delegatedBy,
+        createdAt: input.createdAt,
+      })
       if (input.idempotencyKey !== undefined) {
         if (input.requestHash === undefined) {
           throw new AppError({ code: "INVALID_REQUEST", message: "Request hash is required" })
         }
         const existing = this.database
-          .query<{ request_hash: string; run_id: string }, [string, string]>(
-            "SELECT request_hash, run_id FROM run_idempotency_keys WHERE owner_id = ? AND key = ?",
+          .query<{ request_hash: string; run_id: string }, [string, string, string]>(
+            "SELECT request_hash, run_id FROM run_idempotency_keys WHERE owner_id = ? AND principal_id = ? AND key = ?",
           )
-          .get(input.ownerId, input.idempotencyKey)
+          .get(input.ownerId, collaboration.principal.id, input.idempotencyKey)
         if (existing !== null) {
           if (existing.request_hash !== input.requestHash) {
             throw new AppError({
@@ -1437,6 +2274,22 @@ export class Store {
         )
       this.database
         .query(`
+          INSERT INTO run_project_bindings(
+            run_id,owner_id,project_id,delegated_by_principal_id,
+            delegated_by_name,delegated_by_kind,created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          input.id,
+          input.ownerId,
+          collaboration.project.id,
+          collaboration.principal.id,
+          collaboration.principal.displayName,
+          collaboration.principal.kind,
+          input.createdAt,
+        )
+      this.database
+        .query(`
           INSERT INTO run_status_events(
             id, owner_id, run_id, from_status, to_status, status_version, reason, created_at
           ) VALUES (?, ?, ?, NULL, 'queued', 1, 'run.created', ?)
@@ -1458,9 +2311,16 @@ export class Store {
       if (input.idempotencyKey !== undefined && input.requestHash !== undefined) {
         this.database
           .query(
-            "INSERT INTO run_idempotency_keys(owner_id, key, request_hash, run_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO run_idempotency_keys(owner_id, principal_id, key, request_hash, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
           )
-          .run(input.ownerId, input.idempotencyKey, input.requestHash, input.id, input.createdAt)
+          .run(
+            input.ownerId,
+            collaboration.principal.id,
+            input.idempotencyKey,
+            input.requestHash,
+            input.id,
+            input.createdAt,
+          )
       }
       this.insertAudit({
         id: crypto.randomUUID(),
@@ -1481,12 +2341,17 @@ export class Store {
     return transaction()
   }
 
-  getIdempotentRun(ownerId: string, key: string, requestHash: string): Run | null {
+  getIdempotentRun(
+    ownerId: string,
+    principalId: string,
+    key: string,
+    requestHash: string,
+  ): Run | null {
     const existing = this.database
-      .query<{ request_hash: string; run_id: string }, [string, string]>(
-        "SELECT request_hash, run_id FROM run_idempotency_keys WHERE owner_id = ? AND key = ?",
+      .query<{ request_hash: string; run_id: string }, [string, string, string]>(
+        "SELECT request_hash, run_id FROM run_idempotency_keys WHERE owner_id = ? AND principal_id = ? AND key = ?",
       )
-      .get(ownerId, key)
+      .get(ownerId, principalId, key)
     if (existing === null) return null
     if (existing.request_hash !== requestHash) {
       throw new AppError({
@@ -1505,12 +2370,12 @@ export class Store {
     const row = this.database
       .query<RunRow, [string, string]>("SELECT * FROM runs WHERE owner_id = ? AND id = ?")
       .get(ownerId, runId)
-    return row === null ? null : runFromRow(row)
+    return row === null ? null : this.#runFromRow(row)
   }
 
   getRunInternal(runId: string): Run | null {
     const row = this.database.query<RunRow, [string]>("SELECT * FROM runs WHERE id = ?").get(runId)
-    return row === null ? null : runFromRow(row)
+    return row === null ? null : this.#runFromRow(row)
   }
 
   listRuns(ownerId: string, options: { limit: number; before?: string }): Page<Run> {
@@ -1531,9 +2396,50 @@ export class Store {
             )
             .all(ownerId, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
     const hasMore = rows.length > limit
-    const items = rows.slice(0, limit).map(runFromRow)
+    const items = rows.slice(0, limit).map((row) => this.#runFromRow(row))
     const last = items.at(-1)
     return { items, nextCursor: hasMore && last !== undefined ? encodeCreatedCursor(last) : null }
+  }
+
+  listRunsForPrincipal(
+    ownerId: string,
+    principalId: string,
+    options: { limit: number; before?: string },
+  ): Page<Run> {
+    const limit = Math.min(Math.max(options.limit, 1), 100)
+    const cursor = options.before === undefined ? null : decodeCreatedCursor(options.before, "Run")
+    const rows = this.database
+      .query<
+        RunRow,
+        [string, string, string | null, string | null, string | null, string, number]
+      >(`
+        SELECT run.* FROM runs run
+        JOIN run_project_bindings binding
+          ON binding.owner_id=run.owner_id AND binding.run_id=run.id
+        JOIN project_memberships membership
+          ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE run.owner_id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+          AND (? IS NULL OR run.created_at < ? OR (run.created_at = ? AND run.id < ?))
+        ORDER BY run.created_at DESC,run.id DESC LIMIT ?
+      `)
+      .all(
+        ownerId,
+        principalId,
+        cursor?.createdAt ?? null,
+        cursor?.createdAt ?? null,
+        cursor?.createdAt ?? null,
+        cursor?.id ?? "",
+        limit + 1,
+      )
+    const items = rows.slice(0, limit).map((row) => this.#runFromRow(row))
+    const last = items.at(-1)
+    return {
+      items,
+      nextCursor: rows.length > limit && last !== undefined ? encodeCreatedCursor(last) : null,
+    }
   }
 
   listClaimableRuns(limit: number): readonly Run[] {
@@ -1542,7 +2448,7 @@ export class Store {
         "SELECT * FROM runs WHERE status = 'queued' ORDER BY created_at LIMIT ?",
       )
       .all(Math.min(Math.max(limit, 1), 100))
-      .map(runFromRow)
+      .map((row) => this.#runFromRow(row))
   }
 
   listRecoverableRuns(): readonly Run[] {
@@ -1551,7 +2457,7 @@ export class Store {
         "SELECT * FROM runs WHERE status IN ('provisioning','running') ORDER BY updated_at",
       )
       .all()
-      .map(runFromRow)
+      .map((row) => this.#runFromRow(row))
   }
 
   countOperationalState(): {
@@ -3435,6 +4341,23 @@ export class Store {
     return row === null ? null : briefFromRow(row)
   }
 
+  getBriefForPrincipal(ownerId: string, principalId: string, briefId: string): Brief | null {
+    const row = this.database
+      .query<BriefRow, [string, string, string]>(`
+        SELECT brief.* FROM briefs brief
+        JOIN run_project_bindings binding
+          ON binding.owner_id=brief.owner_id AND binding.run_id=brief.source_run_id
+        JOIN project_memberships membership
+          ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE brief.owner_id=? AND brief.id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+      `)
+      .get(ownerId, briefId, principalId)
+    return row === null ? null : briefFromRow(row)
+  }
+
   listBriefs(ownerId: string, options: { limit: number; before?: string }): Page<Brief> {
     const limit = Math.min(Math.max(options.limit, 1), 100)
     const cursor =
@@ -3459,14 +4382,67 @@ export class Store {
     return { items, nextCursor: hasMore && last !== undefined ? encodeCreatedCursor(last) : null }
   }
 
+  listBriefsForPrincipal(
+    ownerId: string,
+    principalId: string,
+    options: { limit: number; before?: string },
+  ): Page<Brief> {
+    const limit = Math.min(Math.max(options.limit, 1), 100)
+    const cursor =
+      options.before === undefined ? null : decodeCreatedCursor(options.before, "Brief")
+    const base = `
+      FROM briefs brief
+      JOIN run_project_bindings binding
+        ON binding.owner_id=brief.owner_id AND binding.run_id=brief.source_run_id
+      JOIN project_memberships membership
+        ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+      JOIN principals principal
+        ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+      WHERE brief.owner_id=? AND membership.principal_id=?
+        AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+    `
+    const rows =
+      cursor === null
+        ? this.database
+            .query<BriefRow, [string, string, number]>(
+              `SELECT brief.* ${base} ORDER BY brief.created_at DESC,brief.id DESC LIMIT ?`,
+            )
+            .all(ownerId, principalId, limit + 1)
+        : this.database
+            .query<BriefRow, [string, string, string, string, string, number]>(`
+              SELECT brief.* ${base}
+                AND (brief.created_at<? OR (brief.created_at=? AND brief.id<?))
+              ORDER BY brief.created_at DESC,brief.id DESC LIMIT ?
+            `)
+            .all(ownerId, principalId, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
+    const hasMore = rows.length > limit
+    const items = rows.slice(0, limit).map(briefFromRow)
+    const last = items.at(-1)
+    return { items, nextCursor: hasMore && last !== undefined ? encodeCreatedCursor(last) : null }
+  }
+
   createDeployment(
     deployment: Deployment,
     audit: AuditRecord,
-    idempotency: { readonly key: string; readonly requestHash: string },
+    idempotency: {
+      readonly principalId?: string
+      readonly key: string
+      readonly requestHash: string
+    },
   ): { readonly deployment: Deployment; readonly replayed: boolean } {
     const transaction = this.database.transaction(() => {
+      const principalId =
+        idempotency.principalId ??
+        this.database
+          .query<{ delegated_by_principal_id: string }, [string, string]>(`
+            SELECT delegated_by_principal_id FROM run_project_bindings
+            WHERE owner_id=? AND run_id=?
+          `)
+          .get(deployment.ownerId, deployment.runId)?.delegated_by_principal_id
+      if (principalId === undefined) throw new Error("Deployment Principal is missing")
       const existing = this.getIdempotentDeployment(
         deployment.ownerId,
+        principalId,
         idempotency.key,
         idempotency.requestHash,
       )
@@ -3500,11 +4476,12 @@ export class Store {
       this.database
         .query(`
           INSERT INTO deployment_idempotency_keys(
-            owner_id, key, request_hash, deployment_id, created_at
-          ) VALUES (?, ?, ?, ?, ?)
+            owner_id, principal_id, key, request_hash, deployment_id, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
         `)
         .run(
           deployment.ownerId,
+          principalId,
           idempotency.key,
           idempotency.requestHash,
           deployment.id,
@@ -3518,13 +4495,18 @@ export class Store {
     return transaction()
   }
 
-  getIdempotentDeployment(ownerId: string, key: string, requestHash: string): Deployment | null {
+  getIdempotentDeployment(
+    ownerId: string,
+    principalId: string,
+    key: string,
+    requestHash: string,
+  ): Deployment | null {
     const existing = this.database
-      .query<{ request_hash: string; deployment_id: string }, [string, string]>(`
+      .query<{ request_hash: string; deployment_id: string }, [string, string, string]>(`
         SELECT request_hash, deployment_id FROM deployment_idempotency_keys
-        WHERE owner_id = ? AND key = ?
+        WHERE owner_id = ? AND principal_id = ? AND key = ?
       `)
-      .get(ownerId, key)
+      .get(ownerId, principalId, key)
     if (existing === null) return null
     if (existing.request_hash !== requestHash) {
       throw new AppError({
@@ -3548,6 +4530,27 @@ export class Store {
         "SELECT * FROM deployments WHERE owner_id = ? AND id = ?",
       )
       .get(ownerId, deploymentId)
+    return row === null ? null : deploymentFromRow(row)
+  }
+
+  getDeploymentForPrincipal(
+    ownerId: string,
+    principalId: string,
+    deploymentId: string,
+  ): Deployment | null {
+    const row = this.database
+      .query<DeploymentRow, [string, string, string]>(`
+        SELECT deployment.* FROM deployments deployment
+        JOIN run_project_bindings binding
+          ON binding.owner_id=deployment.owner_id AND binding.run_id=deployment.run_id
+        JOIN project_memberships membership
+          ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE deployment.owner_id=? AND deployment.id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+      `)
+      .get(ownerId, deploymentId, principalId)
     return row === null ? null : deploymentFromRow(row)
   }
 
@@ -3577,6 +4580,47 @@ export class Store {
               ORDER BY created_at DESC, id DESC LIMIT ?
             `)
             .all(ownerId, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
+    const items = rows.slice(0, limit).map(deploymentFromRow)
+    const last = items.at(-1)
+    return {
+      items,
+      nextCursor: rows.length > limit && last !== undefined ? encodeCreatedCursor(last) : null,
+    }
+  }
+
+  listDeploymentsForPrincipal(
+    ownerId: string,
+    principalId: string,
+    options: { limit: number; before?: string },
+  ): Page<Deployment> {
+    const limit = Math.min(Math.max(options.limit, 1), 100)
+    const cursor =
+      options.before === undefined ? null : decodeCreatedCursor(options.before, "Deployment")
+    const base = `
+      FROM deployments deployment
+      JOIN run_project_bindings binding
+        ON binding.owner_id=deployment.owner_id AND binding.run_id=deployment.run_id
+      JOIN project_memberships membership
+        ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+      JOIN principals principal
+        ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+      WHERE deployment.owner_id=? AND membership.principal_id=?
+        AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+    `
+    const rows =
+      cursor === null
+        ? this.database
+            .query<DeploymentRow, [string, string, number]>(
+              `SELECT deployment.* ${base} ORDER BY deployment.created_at DESC,deployment.id DESC LIMIT ?`,
+            )
+            .all(ownerId, principalId, limit + 1)
+        : this.database
+            .query<DeploymentRow, [string, string, string, string, string, number]>(`
+              SELECT deployment.* ${base}
+                AND (deployment.created_at<? OR (deployment.created_at=? AND deployment.id<?))
+              ORDER BY deployment.created_at DESC,deployment.id DESC LIMIT ?
+            `)
+            .all(ownerId, principalId, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
     const items = rows.slice(0, limit).map(deploymentFromRow)
     const last = items.at(-1)
     return {
@@ -3781,12 +4825,18 @@ export class Store {
 
   createAgentSession(input: CreateAgentSessionInput): boolean {
     return this.database.transaction(() => {
+      const collaboration = this.#resolveWorkCollaboration({
+        ownerId: input.ownerId,
+        projectId: input.projectId,
+        delegatedBy: input.delegatedBy,
+        createdAt: input.createdAt,
+      })
       if (input.idempotencyKey !== undefined) {
         const existing = this.database
-          .query<{ request_hash: string; session_id: string }, [string, string]>(
-            "SELECT request_hash, session_id FROM session_idempotency_keys WHERE owner_id = ? AND key = ?",
+          .query<{ request_hash: string; session_id: string }, [string, string, string]>(
+            "SELECT request_hash, session_id FROM session_idempotency_keys WHERE owner_id = ? AND principal_id = ? AND key = ?",
           )
-          .get(input.ownerId, input.idempotencyKey)
+          .get(input.ownerId, collaboration.principal.id, input.idempotencyKey)
         if (existing) {
           if (existing.request_hash !== input.requestHash) {
             throw new AppError({
@@ -3822,6 +4872,22 @@ export class Store {
           input.createdAt,
           input.createdAt,
         )
+      this.database
+        .query(`
+          INSERT INTO session_project_bindings(
+            session_id,owner_id,project_id,delegated_by_principal_id,
+            delegated_by_name,delegated_by_kind,created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          input.id,
+          input.ownerId,
+          collaboration.project.id,
+          collaboration.principal.id,
+          collaboration.principal.displayName,
+          collaboration.principal.kind,
+          input.createdAt,
+        )
       this.#insertSessionEvent({
         ownerId: input.ownerId,
         sessionId: input.id,
@@ -3834,11 +4900,13 @@ export class Store {
       if (input.idempotencyKey !== undefined) {
         this.database
           .query(`
-            INSERT INTO session_idempotency_keys(owner_id,key,request_hash,session_id,created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO session_idempotency_keys(
+              owner_id,principal_id,key,request_hash,session_id,created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
           `)
           .run(
             input.ownerId,
+            collaboration.principal.id,
             input.idempotencyKey,
             input.requestHash as string,
             input.id,
@@ -3864,28 +4932,29 @@ export class Store {
         "SELECT * FROM agent_sessions WHERE owner_id = ? AND id = ?",
       )
       .get(ownerId, sessionId)
-    return row ? agentSessionFromRow(row) : null
+    return row ? this.#agentSessionFromRow(row) : null
   }
 
   getAgentSessionInternal(sessionId: string): AgentSession | null {
     const row = this.database
       .query<AgentSessionRow, [string]>("SELECT * FROM agent_sessions WHERE id = ?")
       .get(sessionId)
-    return row ? agentSessionFromRow(row) : null
+    return row ? this.#agentSessionFromRow(row) : null
   }
 
   getIdempotentAgentSession(
     ownerId: string,
+    principalId: string,
     key: string,
   ): { readonly requestHash: string; readonly session: AgentSession } | null {
     const row = this.database
-      .query<AgentSessionRow & { request_hash: string }, [string, string]>(`
+      .query<AgentSessionRow & { request_hash: string }, [string, string, string]>(`
         SELECT s.*, i.request_hash FROM session_idempotency_keys i
         JOIN agent_sessions s ON s.owner_id = i.owner_id AND s.id = i.session_id
-        WHERE i.owner_id = ? AND i.key = ?
+        WHERE i.owner_id = ? AND i.principal_id = ? AND i.key = ?
       `)
-      .get(ownerId, key)
-    return row ? { requestHash: row.request_hash, session: agentSessionFromRow(row) } : null
+      .get(ownerId, principalId, key)
+    return row ? { requestHash: row.request_hash, session: this.#agentSessionFromRow(row) } : null
   }
 
   listAgentSessions(
@@ -3910,7 +4979,50 @@ export class Store {
               ORDER BY created_at DESC,id DESC LIMIT ?
             `)
             .all(ownerId, cursor.createdAt, cursor.createdAt, cursor.id, limit + 1)
-    const items = rows.slice(0, limit).map(agentSessionFromRow)
+    const items = rows.slice(0, limit).map((row) => this.#agentSessionFromRow(row))
+    const last = items.at(-1)
+    return {
+      items,
+      nextCursor: rows.length > limit && last !== undefined ? encodeCreatedCursor(last) : null,
+    }
+  }
+
+  listAgentSessionsForPrincipal(
+    ownerId: string,
+    principalId: string,
+    options: { readonly limit: number; readonly before?: string },
+  ): Page<AgentSession> {
+    const limit = Math.min(Math.max(options.limit, 1), 100)
+    const cursor =
+      options.before === undefined ? null : decodeCreatedCursor(options.before, "Agent session")
+    const rows = this.database
+      .query<
+        AgentSessionRow,
+        [string, string, string | null, string | null, string | null, string, number]
+      >(`
+        SELECT session.* FROM agent_sessions session
+        JOIN session_project_bindings binding
+          ON binding.owner_id=session.owner_id AND binding.session_id=session.id
+        JOIN project_memberships membership
+          ON membership.owner_id=binding.owner_id AND membership.project_id=binding.project_id
+        JOIN principals principal
+          ON principal.owner_id=membership.owner_id AND principal.id=membership.principal_id
+        WHERE session.owner_id=? AND membership.principal_id=?
+          AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
+          AND (? IS NULL OR session.created_at < ?
+            OR (session.created_at = ? AND session.id < ?))
+        ORDER BY session.created_at DESC,session.id DESC LIMIT ?
+      `)
+      .all(
+        ownerId,
+        principalId,
+        cursor?.createdAt ?? null,
+        cursor?.createdAt ?? null,
+        cursor?.createdAt ?? null,
+        cursor?.id ?? "",
+        limit + 1,
+      )
+    const items = rows.slice(0, limit).map((row) => this.#agentSessionFromRow(row))
     const last = items.at(-1)
     return {
       items,
@@ -3926,7 +5038,7 @@ export class Store {
         ORDER BY updated_at, id
       `)
       .all()
-      .map(agentSessionFromRow)
+      .map((row) => this.#agentSessionFromRow(row))
   }
 
   listClaimableAgentSessions(limit: number): readonly AgentSession[] {
@@ -3935,7 +5047,7 @@ export class Store {
         SELECT * FROM agent_sessions WHERE status='queued' ORDER BY created_at, id LIMIT ?
       `)
       .all(Math.min(Math.max(limit, 1), 100))
-      .map(agentSessionFromRow)
+      .map((row) => this.#agentSessionFromRow(row))
   }
 
   claimAgentSessionProvisioning(sessionId: string, at: string): AgentSession | null {
@@ -4598,8 +5710,8 @@ export class Store {
         .get(input.ownerId, input.sessionId)
       if (!row) throw new AppError({ code: "NOT_FOUND", message: "Session not found" })
       if (["closed", "failed", "continuity_lost"].includes(row.status))
-        return agentSessionFromRow(row)
-      if (row.status === "closing") return agentSessionFromRow(row)
+        return this.#agentSessionFromRow(row)
+      if (row.status === "closing") return this.#agentSessionFromRow(row)
       if (row.active_turn_id)
         this.#queueSessionCommand(
           input.ownerId,

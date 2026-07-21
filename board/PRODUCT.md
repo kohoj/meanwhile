@@ -6,17 +6,19 @@ interaction decision traces back to this. (Format follows the ui-skills
 
 ## Product boundary and current status
 
-The intended product is one shared Project watch: every Project member can see
-work that any member delegated, open the agent conversation and durable
-evidence, and add an append-only comment or mention without controlling another
-member's agent.
+The implemented product outcome is shared Project visibility: every Project member
+can see work that any member delegated and open its task detail and agent
+conversation without controlling another member's agent. The exact product
+home, attention semantics, delegation entry point, role model, and browser
+authentication follow the decisions recorded in `docs/decisions/0001` through
+`0005`.
 
-The current implementation is only the visual and read-side precursor. One
-Board server holds one owner API key and shows that owner's Runs and Sessions.
-It has no Project, member identity, membership authorization, delegator
-attribution, comment, or mention. Do not deploy it with one shared key and call
-that team collaboration. The control-plane route that must land first is
-defined in [Project collaboration](../docs/project-collaboration.md).
+The Board is now the Project Watch reference client. In team mode each person
+exchanges their own API key for a short-lived opaque browser session; the Board
+keeps only that session in an HttpOnly, SameSite cookie. Project membership,
+delegator attribution, detail authorization, and lifecycle denial are enforced
+by the control plane. `MEANWHILE_API_KEY` remains an explicit local single-user
+mode, not a team credential-sharing mechanism.
 
 ## Who is this human?
 
@@ -31,7 +33,7 @@ Three faces of one role, "the delegator":
 - A **reviewer / on-call** who inherited someone else's running work and must
   tell, in three seconds, whether anything is stuck, unsafe, or on fire.
 
-In the final Project surface these are distinct authenticated people, not
+In the Project surface these are distinct authenticated people, not
 different personas sharing one owner credential.
 
 They are **anxious, interrupt-driven, and low-context**. They did not type the
@@ -93,6 +95,6 @@ Feeling in one line: **"I can look away, because it will grab me if it matters."
   motion are spent only where a human is actually needed.
 - **Read-only is honest, not apologetic.** This is a watch post, not a control
   panel. It never shows a disabled button or a "you can't do this here" — it
-  simply presents evidence, like a monitor.
+  simply presents the current state and detail, like a monitor.
 - **No cards-by-reflex.** Rows are strips, not cards. Density is a feature: a
   delegator scanning 20 items needs a scannable list, not 20 padded boxes.

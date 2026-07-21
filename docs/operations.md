@@ -99,7 +99,38 @@ docker compose up --build
 
 Mount the ownership parent of `MEANWHILE_DATA_DIR` on durable storage and ensure the container's service user owns it. The supplied image mounts `/data` and places the actual root at `/data/state`, so the adjacent `/data/state.lock` lease stays inside the same writable, durable ownership volume without becoming part of the replaceable data root. The supplied Compose topology publishes API and preview ports on host loopback only. It deliberately sets `MEANWHILE_LOCAL_PROVIDER=enabled` and `MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER=true` because container-internal listeners bind all interfaces; it is for trusted local work and must not be exposed to untrusted tenants.
 
+Compose also starts Project Watch on host loopback port 7333. The Board process
+holds no API key and no database connection; it exchanges each person's API
+key once with the private control plane and returns an opaque read-only session
+in an HttpOnly SameSite cookie. To serve people in different locations, place a
+host-level HTTPS reverse proxy in front of `127.0.0.1:7333`. Publish only the
+Board origin. Keep 7331 and 7332 private, preserve `X-Forwarded-Proto: https`,
+and do not configure `MEANWHILE_API_KEY` on the Project Watch service in team
+mode.
+
 `compose.yaml` optionally reads `${MEANWHILE_ENV_FILE:-./compose.env}`. Copy [compose.env.example](../compose.env.example) for Cloudflare bridge settings or local-bootstrap agent secret values named by `MEANWHILE_SECRET_ENV_ALLOWLIST`. The file is ignored by Git and Docker build context. It is not required by shell-only Bun workflows, and production should use an owner-scoped secret broker rather than a plaintext process environment.
+
+## Shared Project release proof
+
+The collaboration proof launches the production control-plane and Board entry
+points on ephemeral local ports. It creates Alice, Bob, and Carol as distinct
+Principals; proves Alice/Bob visibility and Carol isolation; exercises Project
+Watch through two independent cookie sessions; rejects cross-member lifecycle
+control; rotates Alice's API key; removes Bob; restarts; backs up; restores; and
+rechecks current authorization and durable attribution. Exact plaintext
+credentials are byte-scanned out of the live root, backup, and restored root.
+
+```console
+bun run proof:project-collaboration
+bun run proof:project-collaboration:verify -- \
+  .proof/project-collaboration.json \
+  --require-clean \
+  --commit="$(git rev-parse HEAD)"
+```
+
+The first command may run on a dirty tree for diagnosis, but its receipt records
+`dirty: true`. Only the second command with both clean-revision gates upgrades
+the result to collaboration release evidence.
 
 ## Shutdown and restart
 

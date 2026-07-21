@@ -48,16 +48,16 @@ export const createArtifactRoutes = (
   const routes = createApiRouter()
 
   routes.openapi(getArtifactRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id } = context.req.valid("param")
-    return context.json(ArtifactDetailSchema.parse(await service.get(ownerId, id)), 200)
+    return context.json(ArtifactDetailSchema.parse(await service.get(request, id)), 200)
   })
 
   routes.openapi(downloadArtifactRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id } = context.req.valid("param")
     const { path } = context.req.valid("query")
-    const content = await service.read(ownerId, id, path)
+    const content = await service.read(request, id, path)
     const filename = content.path.split("/").at(-1) ?? "artifact"
     return new Response(Uint8Array.from(content.bytes).buffer, {
       headers: {

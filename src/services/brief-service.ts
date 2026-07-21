@@ -12,7 +12,15 @@ export interface CreateBriefCommand {
 }
 
 export interface BriefServiceOptions {
-  readonly store: Pick<Store, "createBrief" | "getBrief" | "listBriefs">
+  readonly store: Pick<
+    Store,
+    | "createBrief"
+    | "getBrief"
+    | "listBriefs"
+    | "getBriefForPrincipal"
+    | "listBriefsForPrincipal"
+    | "getArtifactForPrincipal"
+  >
   readonly executionContext: Pick<ExecutionContext, "resolve">
   readonly clock?: () => Date
 }
@@ -36,6 +44,15 @@ export class BriefService {
     context: RequestContext,
     input: CreateBriefCommand,
   ): Promise<{ readonly brief: Brief; readonly replayed: boolean }> {
+    if (
+      this.#store.getArtifactForPrincipal(
+        context.ownerId,
+        context.principalId,
+        input.artifactId,
+      ) === null
+    ) {
+      throw notFound()
+    }
     const [source] = await this.#executionContext.resolve(context.ownerId, [
       {
         artifactId: input.artifactId,
@@ -84,22 +101,28 @@ export class BriefService {
     })
   }
 
-  get(ownerId: string, briefId: string): Brief {
-    const brief = this.#store.getBrief(ownerId, briefId)
+  get(scope: string | RequestContext, briefId: string): Brief {
+    const brief =
+      typeof scope === "string"
+        ? this.#store.getBrief(scope, briefId)
+        : this.#store.getBriefForPrincipal(scope.ownerId, scope.principalId, briefId)
     if (brief === null) throw notFound()
     return brief
   }
 
-  list(ownerId: string, options: { limit: number; before?: string }): Page<Brief> {
-    return this.#store.listBriefs(ownerId, options)
+  list(scope: string | RequestContext, options: { limit: number; before?: string }): Page<Brief> {
+    return typeof scope === "string"
+      ? this.#store.listBriefs(scope, options)
+      : this.#store.listBriefsForPrincipal(scope.ownerId, scope.principalId, options)
   }
 
   /** Resolves public brief identities into the exact evidence frozen on a Run. */
   async resolve(
-    ownerId: string,
+    scope: string | RequestContext,
     briefIds: readonly string[],
   ): Promise<readonly ExecutionContextArtifact[]> {
-    const briefs = briefIds.map((briefId) => this.get(ownerId, briefId))
+    const ownerId = typeof scope === "string" ? scope : scope.ownerId
+    const briefs = briefIds.map((briefId) => this.get(scope, briefId))
     const observed = await this.#executionContext.resolve(
       ownerId,
       briefs.map((brief) => ({ artifactId: brief.artifactId, path: brief.path })),

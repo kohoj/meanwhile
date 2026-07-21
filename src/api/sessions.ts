@@ -190,10 +190,15 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
                 ? {}
                 : { credentialRef: input.workspace.credentialRef }),
             }
-    const { provider, ...sessionInput } = input
+    const { projectId, provider, ...sessionInput } = input
     const result = await service.create(
       request,
-      { ...sessionInput, workspace, ...(provider === undefined ? {} : { provider }) },
+      {
+        ...sessionInput,
+        workspace,
+        ...(projectId === undefined ? {} : { projectId }),
+        ...(provider === undefined ? {} : { provider }),
+      },
       context.req.valid("header")["idempotency-key"],
     )
     const response = { session: AgentSessionSchema.parse(result.session) }
@@ -201,9 +206,9 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
   })
 
   routes.openapi(listSessionsRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const query = context.req.valid("query")
-    const page = service.list(ownerId, {
+    const page = service.list(request, {
       limit: query.limit,
       ...(query.before === undefined ? {} : { before: query.before }),
     })
@@ -217,9 +222,9 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
   })
 
   routes.openapi(getSessionRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     return context.json(
-      { session: AgentSessionSchema.parse(service.get(ownerId, context.req.valid("param").id)) },
+      { session: AgentSessionSchema.parse(service.get(request, context.req.valid("param").id)) },
       200,
     )
   })
@@ -237,10 +242,10 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
   })
 
   routes.openapi(listTurnsRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const id = context.req.valid("param").id
     const query = context.req.valid("query")
-    const page = service.turns(ownerId, id, query)
+    const page = service.turns(request, id, query)
     return context.json(
       {
         items: page.items.map((turn) => SessionTurnSchema.parse(turn)),
@@ -251,10 +256,10 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
   })
 
   routes.openapi(getTurnRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id, turnId } = context.req.valid("param")
     return context.json(
-      { turn: SessionTurnSchema.parse(service.getTurn(ownerId, id, turnId)) },
+      { turn: SessionTurnSchema.parse(service.getTurn(request, id, turnId)) },
       200,
     )
   })
@@ -281,11 +286,10 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
 
   routes.openapi(getSessionEventsRoute, async (context) => {
     const request = context.get("requestContext")
-    const { ownerId } = request
     const id = context.req.valid("param").id
     const { follow, after, limit } = context.req.valid("query")
     if (!follow) {
-      const page = service.events(ownerId, id, { after, limit })
+      const page = service.events(request, id, { after, limit })
       return context.json(
         {
           items: page.items.map((item) => SessionEventSchema.parse(item)),
@@ -295,7 +299,7 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
       )
     }
     const resumeAt = Math.max(after, parseLastEventId(context.req.valid("header")["Last-Event-ID"]))
-    service.get(ownerId, id)
+    service.get(request, id)
     return streamSSE(
       context,
       async (stream) => {
@@ -307,7 +311,7 @@ export const createSessionRoutes = (service: SessionService): OpenAPIHono<ApiEnv
         try {
           await stream.writeSSE({ event: "ready", data: "{}", retry: 1_000 })
           for await (const event of service.followEvents(
-            ownerId,
+            request,
             id,
             resumeAt,
             cancellation.signal,

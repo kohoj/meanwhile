@@ -12,7 +12,7 @@ You hand a task to an AI agent. Then what? You want to know it finished, see wha
 
 Meanwhile is the durable layer under the agent, not another agent. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose.
 
-> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime ship today (`v0.1.3`). Its isolated [`board/`](board/PRODUCT.md) workspace is a verified single-owner reference surface for reading, delegating, and opening durable task detail. Multi-person Project identity, membership, authorization, attribution, and comments are not implemented; they are the [active product milestone](docs/project-collaboration.md).
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source also implements the first Shared Project vertical slice: stable member identity, Project membership and attribution, visibility without cross-member lifecycle control, opaque read-only browser sessions, typed Project APIs, an offline v0.1.3 migration, and the selected [`Project Watch`](board/PRODUCT.md) reference client. A collaboration release claim still requires the complete clean-revision two-person, restart, backup, and restore proof in [Shared Project definition](docs/project-collaboration.md).
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -71,6 +71,16 @@ bun run dev
 ```
 
 Startup initializes the exact current SQLite schema on an empty database and rejects every non-matching database before readiness. OpenAPI is available at `/openapi.json`.
+
+For an existing exact `v0.1.3` database, take and verify a data-root backup,
+stop the control plane, inspect the dry run, then apply the explicit migration:
+
+```console
+bun run migrate:projects -- --database=/absolute/path/to/meanwhile.sqlite
+bun run migrate:projects -- --database=/absolute/path/to/meanwhile.sqlite --write
+```
+
+Unknown or partially modified schema fingerprints fail closed.
 
 To exercise the complete no-account path in one command:
 
@@ -294,6 +304,8 @@ All failures use one safe envelope:
 
 | Resource | Routes |
 | --- | --- |
+| Identity and Projects | `GET /me`, `POST/GET /principals`, `POST/GET /projects`, Project members and work |
+| Browser sessions | `POST /browser-sessions`, `DELETE /browser-sessions/current` |
 | Runs | `POST /runs`, `GET /runs`, `GET /runs/:id`, `POST /runs/:id/cancel` |
 | Run evidence | `GET /runs/:id/events`, `GET /runs/:id/logs`, `GET /runs/:id/artifacts` |
 | Sessions | `POST /sessions`, `GET /sessions`, `GET /sessions/:id` |
@@ -414,7 +426,7 @@ To add Daytona, Fly Machines, Modal, or another backend, implement `RuntimeProvi
 
 `POST /deployments` resolves exactly one `artifactPath` or logical `workspacePath` to immutable stored bytes before invoking a target adapter. It never reads an arbitrary host path or a runtime that may already have been destroyed.
 
-Deployment creation requires an owner-scoped `Idempotency-Key`. The canonical request binds the normalized source selector, target, caller configuration, and secret references. First admission resolves that selector to immutable bytes and atomically commits the binding, deployment record, and create audit. Exact retries return the original record before consulting mutable adapters; conflicting reuse returns `409`.
+Deployment creation requires an `Idempotency-Key` scoped to the authenticated Principal and is allowed only for the immutable original delegator. The canonical request binds the normalized source selector, target, caller configuration, and secret references. First admission resolves that selector to immutable bytes and atomically commits the binding, deployment record, and create audit. Exact retries return the original record before consulting mutable adapters; conflicting reuse returns `409`.
 
 ```console
 curl --fail-with-body \
@@ -474,7 +486,7 @@ queued → provisioning → running → succeeded
 | Admission | One-shot runs and new session leases have independent configurable concurrency; already-live sessions are always reattached after restart, and cleanup has its own bounded lane |
 | Timezones | Durable timestamps are UTC instants accepted by the control plane; agent processes receive `TZ=UTC`; local rendering belongs to clients |
 
-Session and turn creation use the same owner-scoped idempotency rule independently. Session events bind runner evidence, control-plane transitions, and turn identity to one contiguous durable sequence. A session runtime is never cleanup-eligible while its session is operational; a timed-out or interrupted turn does not destroy continuity.
+Session and turn creation use independent Principal-scoped idempotency keys. Session events bind runner facts, control-plane transitions, and turn identity to one contiguous durable sequence. A session runtime is never cleanup-eligible while its session is operational; a timed-out or interrupted turn does not destroy continuity.
 
 The `SecretResolver` owns resource-bound control-plane material; the independent `RuntimeCredentialBroker` owns agent-phase egress grants and revocation. Run/session admission rejects secret references when the selected provider cannot mediate them. Cloudflare stores lease material encrypted in bridge Durable Object state, gives the agent only deterministic opaque placeholders, substitutes values inside the trusted Worker outbound handler, stream-redacts exact values from the upstream response, and revokes the lease before runtime destruction. Recovery reattaches the same lease identity and fails closed on conflicting policy or credential material.
 
@@ -489,7 +501,14 @@ export MEANWHILE_API_KEY='<local bootstrap key>'
 docker compose up --build
 ```
 
-The supplied image mounts `/data` as the writable ownership volume and uses `/data/state` as the actual data root, keeping its adjacent single-writer lease durable and writable. Do not run multiple control-plane writers against the same SQLite root.
+The Compose topology starts two processes from the same image: the private
+control plane and the credential-free Project Watch BFF. Open
+`http://127.0.0.1:7333`; each person signs in once with their own
+Principal-bound API key. For people on different networks, terminate HTTPS in
+a host reverse proxy and publish only Project Watch. Keep ports 7331 and 7332
+private: browsers do not need direct control-plane or preview access.
+
+The supplied image mounts `/data` as the writable ownership volume and uses `/data/state` as the actual data root, keeping its adjacent single-writer lease durable and writable. Project Watch is stateless; scaling or restarting it does not create another SQLite writer. Do not run multiple control-plane writers against the same data root.
 
 Maintenance commands acquire the same exclusive lease:
 
@@ -503,7 +522,7 @@ bun run cli -- data gc --apply
 
 Backup includes a normalized SQLite snapshot, all referenced workspace/artifact objects, and only previews referenced by successful local deployment rows. Preview verification proves the canonical manifest, exact file set, and every size/digest; orphan or tampered publication bytes make backup/verification fail rather than entering the archive. Restore accepts only an absent or empty destination; garbage collection is explicit dry-run/apply mark-and-sweep.
 
-Meanwhile has one current database schema and no upgrade path. A new empty database is initialized atomically and records the exact schema fingerprint; any nonempty database with a missing or different identity is rejected without modification. Schema changes require a fresh data root. Carrying durable data forward requires a separately designed export/import boundary, which does not exist today; Meanwhile never guesses with SQL backfills or dual reads.
+Meanwhile has one current database schema. A new empty database is initialized atomically and records the exact schema fingerprint; any nonempty database with a missing or different identity is rejected without modification. The only supported historical transition is the offline, exact-fingerprint v0.1.3 Project migration documented above. Unknown or partially modified schemas fail closed; Meanwhile never guesses with opportunistic startup backfills or dual reads.
 
 ## Observability
 
@@ -521,6 +540,8 @@ Prompts, process output, credentials, file contents, and raw provider bodies are
 bun run check                       # Biome, types, notices, runner builds, deterministic suite
 bun run demo                        # no-account product path
 bun run proof:release               # semantic round trip, telemetry, restart, backup/restore
+bun run proof:project-collaboration # two people, Project Watch, auth, restart, backup/restore
+bun run proof:project-collaboration:verify -- .proof/project-collaboration.json --require-clean --commit="$(git rev-parse HEAD)"
 bun run cloudflare:check            # bridge package and protocol contract
 bun run test:live:cloudflare        # explicit real-account lifecycle
 bun run proof:release:cloudflare    # deterministic remote compatibility proof
@@ -546,13 +567,13 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 Meanwhile `v0.1.3` is the current public release baseline. The complete credential-free local product path, durable sessions, the delegator's board, and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
-The current Board is not a multi-user security boundary. Its server holds one owner API key, and every key under that owner currently has owner-wide authority. Sharing that Board or key with a team does not create member identity, Project isolation, or safe read-only collaboration.
+The current Project Watch Board is a multi-person read surface over control-plane authorization, not a credential-sharing shortcut. In team mode each person exchanges their own Principal-bound API key once for an opaque, expiring, read-only browser session kept in an HttpOnly SameSite cookie. The optional `MEANWHILE_API_KEY` mode remains only for a private local single-user Board.
 
 The deterministic suite proves interrupt, per-turn timeout, replay, and cleanup semantics against replaceable providers. Local release evidence proves the complete host-process product path. Cloudflare release evidence proves one ACP identity across two turns, event replay, cleanup, and control-plane restart on real remote compute; the separate live lifecycle test proves remote hard termination and credential mediation. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these remain operator/platform assertions rather than remote attestation.
 
 Before broad multi-tenant production use, the project still needs:
 
-- durable Actor identity, Project membership, project-scoped authorization, delegator attribution, and append-only comments before claiming a shared team Board;
+- the complete Shared Project release proof: distinct people, same-Project visibility, non-member isolation, credential rotation, membership revocation, deployed Board access, restart, backup, and restore on one clean revision;
 - automated package publication tied to verified release receipts;
 - a Pi ACP adapter that propagates an internal model/RPC failure as prompt failure. The exact pinned `pi-acp@0.0.31` currently maps its internal `error` result to ACP `end_turn`; Meanwhile's semantic proof rejects the resulting empty response and publishes no receipt, but that path is not accepted as passed until the adapter boundary is corrected and a clean `remote-live-agent` receipt succeeds;
 - continuous real-account verification for every released remote-provider revision;
@@ -569,9 +590,10 @@ These are evolution triggers, not reasons to add distributed machinery to the cu
 
 Meanwhile's direction is to be the durable, trustworthy layer *under* agent work — the thing an application, a team, or the person who requested the work can rely on — rather than another agent or another agent console. Concretely:
 
-- **Shipped (`v0.1.3`).** The durable control plane, durable sessions and turns, credential-free local runtime, packaged Cloudflare runtime, and a single-owner Board projection over durable Run/Session evidence.
-- **Landed but paused.** Explicit owner-scoped Brief reuse spans one-shot Runs and turn-scoped Sessions with immutable provenance, workspace relevance, idempotency, restart persistence, and dispatch-time byte revalidation. It is a supporting capability, not the active product milestone; Fact discovery and further intelligence expansion are frozen.
-- **Now — Project collaboration.** Introduce stable Actor identity, Project membership and roles, immutable delegator attribution, Project-scoped authorization across every derived resource, a shared Project watch, and append-only comments. Completion requires the two-person positive and negative proof in [Project collaboration](docs/project-collaboration.md), not merely a Project field or updated Board copy.
+- **Published (`v0.1.3`).** The durable control plane, durable sessions and turns, credential-free local runtime, packaged Cloudflare runtime, and the earlier single-owner Board.
+- **Landed but paused.** Explicit Brief reuse spans one-shot Runs and turn-scoped Sessions with immutable provenance, workspace relevance, Project-member source authorization, idempotency, restart persistence, and dispatch-time byte revalidation. It is a supporting capability, not the active product milestone; Fact discovery and further intelligence expansion are frozen.
+- **Implemented vertical slice — Shared Project Watch.** Project Watch, stable Principals, membership, immutable delegator attribution, Project-scoped reads, delegator-only control, read-only browser sessions, typed Project APIs, and exact-schema migration are in source with local integration coverage.
+- **Now — collaboration release proof.** Close non-member isolation, credential rotation, deployed two-browser use, restart, backup, restore, and visual acceptance on one clean revision before calling Shared Project shipped.
 - **Then — Project-scoped execution intelligence.** Bind Brief discovery and reuse to the source Project before adding fact discovery, conflict/supersession, or explicit cross-Project sharing.
 - **Then — an open integration contract.** Let external boards, IDEs, and chat entry points consume the Project and durable execution APIs instead of rebuilding identity, credentials, audit, recovery, and evidence.
 
@@ -580,7 +602,8 @@ Only the *Shipped* line is release evidence. Everything below it is intent, and 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — control path, authority, races, recovery, and extension rules
-- [Project collaboration](docs/project-collaboration.md) — active product route, ownership boundaries, gates, and two-person acceptance proof
+- [Shared Project definition](docs/project-collaboration.md) — selected product, locked decisions, implemented boundary, and release acceptance floor
+- [Shared Project experience](docs/project-collaboration-experience.md) — Alice/Bob storyboard, attention semantics, realistic mock data, and visual comparison contract
 - [Provider contract](docs/provider-contract.md) — implement and prove a runtime adapter
 - [Operations](docs/operations.md) — configuration, backup, recovery, telemetry, and Cloudflare operation
 - [Threat model](docs/threat-model.md) — trust boundaries and residual risks

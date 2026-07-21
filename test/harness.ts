@@ -6,6 +6,10 @@ import { permissiveTestAgentIntents, testExecutionProvenance } from "./fixtures/
 
 export const OWNER_A = "00000000-0000-4000-8000-00000000000a"
 export const OWNER_B = "00000000-0000-4000-8000-00000000000b"
+export const PRINCIPAL_A = "00000000-0000-4000-8000-00000000001a"
+export const PRINCIPAL_B = "00000000-0000-4000-8000-00000000001b"
+export const PROJECT_A = "00000000-0000-4000-8000-00000000002a"
+export const PROJECT_B = "00000000-0000-4000-8000-00000000002b"
 
 export class DeterministicClock {
   #time: number
@@ -77,9 +81,42 @@ export const createRunHarness = (): RunHarness => {
   const createdAt = clock.now().toISOString()
   store.createOwner({ id: OWNER_A, name: "Owner A", createdAt })
   store.createOwner({ id: OWNER_B, name: "Owner B", createdAt })
+  store.createPrincipal({
+    id: PRINCIPAL_A,
+    ownerId: OWNER_A,
+    kind: "person",
+    displayName: "Owner A",
+    ownerRole: "admin",
+    createdAt,
+  })
+  store.createPrincipal({
+    id: PRINCIPAL_B,
+    ownerId: OWNER_B,
+    kind: "person",
+    displayName: "Owner B",
+    ownerRole: "admin",
+    createdAt,
+  })
+  store.createProject({
+    id: PROJECT_A,
+    ownerId: OWNER_A,
+    name: "Project A",
+    slug: "project-a",
+    createdAt,
+    createdByPrincipalId: PRINCIPAL_A,
+  })
+  store.createProject({
+    id: PROJECT_B,
+    ownerId: OWNER_B,
+    name: "Project B",
+    slug: "project-b",
+    createdAt,
+    createdByPrincipalId: PRINCIPAL_B,
+  })
   store.createApiKey({
     id: "20000000-0000-4000-8000-00000000000a",
     ownerId: OWNER_A,
+    principalId: PRINCIPAL_A,
     prefix: "mwk_aaaaaaaaaaaa",
     hash: `sha256:${"a".repeat(64)}`,
     name: "Owner A test key",
@@ -88,6 +125,7 @@ export const createRunHarness = (): RunHarness => {
   store.createApiKey({
     id: "test-api-key",
     ownerId: OWNER_A,
+    principalId: PRINCIPAL_A,
     prefix: "mwk_testtesttest",
     hash: `sha256:${"c".repeat(64)}`,
     name: "HTTP fixture key",
@@ -96,6 +134,7 @@ export const createRunHarness = (): RunHarness => {
   store.createApiKey({
     id: "20000000-0000-4000-8000-00000000000b",
     ownerId: OWNER_B,
+    principalId: PRINCIPAL_B,
     prefix: "mwk_bbbbbbbbbbbb",
     hash: `sha256:${"b".repeat(64)}`,
     name: "Owner B test key",
@@ -130,8 +169,8 @@ export const createRunHarness = (): RunHarness => {
     service,
     commands,
     clock,
-    contextA: requestContext(OWNER_A, "a"),
-    contextB: requestContext(OWNER_B, "b"),
+    contextA: requestContext(OWNER_A, PRINCIPAL_A, "a"),
+    contextB: requestContext(OWNER_B, PRINCIPAL_B, "b"),
     close: () => store.close(),
   }
 }
@@ -148,8 +187,10 @@ export const runInput = (overrides: Partial<CreateRunCommand> = {}): CreateRunCo
   ...overrides,
 })
 
-const requestContext = (ownerId: string, suffix: string): RequestContext => ({
+const requestContext = (ownerId: string, principalId: string, suffix: string): RequestContext => ({
   ownerId,
+  principalId,
+  ownerRole: "admin",
   apiKeyId: `20000000-0000-4000-8000-00000000000${suffix}`,
   requestId: `request-${suffix}`,
   traceId: `trace-${suffix}`,

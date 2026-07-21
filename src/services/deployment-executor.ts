@@ -20,6 +20,7 @@ import type {
   DeploymentStatus,
   JsonObject,
   JsonValue,
+  RequestContext,
   Run,
 } from "../domain"
 import { AppError } from "../errors"
@@ -231,6 +232,7 @@ export type DeploymentAuditRecord = AuditRecord & {
 export interface DeploymentRepository {
   findIdempotent(input: {
     ownerId: string
+    principalId?: string
     idempotencyKey: string
     requestHash: string
   }): Promise<DeploymentRecord | null>
@@ -239,11 +241,23 @@ export interface DeploymentRepository {
     audit: DeploymentAuditRecord
     idempotencyKey: string
     requestHash: string
+    principalId?: string
   }): Promise<CreateDeploymentResult>
   getForOwner(ownerId: string, deploymentId: string): Promise<DeploymentRecord | null>
+  getForPrincipal?(
+    ownerId: string,
+    principalId: string,
+    deploymentId: string,
+  ): Promise<DeploymentRecord | null>
   getForExecution(deploymentId: string): Promise<DeploymentRecord | null>
   listForOwner(input: {
     ownerId: string
+    limit: number
+    before?: string
+  }): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }>
+  listForPrincipal?(input: {
+    ownerId: string
+    principalId: string
     limit: number
     before?: string
   }): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }>
@@ -263,6 +277,13 @@ export interface DeploymentRepository {
     after: number
     limit: number
   }): Promise<DeploymentLogPage | null>
+  listLogsForPrincipal?(input: {
+    ownerId: string
+    principalId: string
+    deploymentId: string
+    after: number
+    limit: number
+  }): Promise<DeploymentLogPage | null>
 }
 
 /** Owner-scoped authorization boundary checked before target or source resolution. */
@@ -271,6 +292,14 @@ export interface DeploymentRunCatalog {
     ownerId: string,
     runId: string,
   ): Pick<Run, "id" | "ownerId"> | null | Promise<Pick<Run, "id" | "ownerId"> | null>
+  getRunForPrincipal?(
+    ownerId: string,
+    principalId: string,
+    runId: string,
+  ):
+    | Pick<Run, "id" | "ownerId" | "delegatedBy">
+    | null
+    | Promise<Pick<Run, "id" | "ownerId" | "delegatedBy"> | null>
 }
 
 /** The production deployment persistence adapter; all SQL remains inside Store. */
@@ -283,11 +312,13 @@ export class StoreDeploymentRepository implements DeploymentRepository {
 
   async findIdempotent(input: {
     ownerId: string
+    principalId?: string
     idempotencyKey: string
     requestHash: string
   }): Promise<DeploymentRecord | null> {
     return this.#store.getIdempotentDeployment(
       input.ownerId,
+      input.principalId ?? this.#deploymentPrincipal(input.ownerId, input.idempotencyKey),
       input.idempotencyKey,
       input.requestHash,
     )
@@ -298,8 +329,10 @@ export class StoreDeploymentRepository implements DeploymentRepository {
     audit: DeploymentAuditRecord
     idempotencyKey: string
     requestHash: string
+    principalId?: string
   }): Promise<CreateDeploymentResult> {
     return this.#store.createDeployment(input.deployment, input.audit, {
+      ...(input.principalId === undefined ? {} : { principalId: input.principalId }),
       key: input.idempotencyKey,
       requestHash: input.requestHash,
     })
@@ -307,6 +340,10 @@ export class StoreDeploymentRepository implements DeploymentRepository {
 
   async getForOwner(ownerId: string, deploymentId: string): Promise<DeploymentRecord | null> {
     return this.#store.getDeployment(ownerId, deploymentId)
+  }
+
+  async getForPrincipal(ownerId: string, principalId: string, deploymentId: string) {
+    return this.#store.getDeploymentForPrincipal(ownerId, principalId, deploymentId)
   }
 
   async getForExecution(deploymentId: string): Promise<DeploymentRecord | null> {
@@ -319,6 +356,18 @@ export class StoreDeploymentRepository implements DeploymentRepository {
     before?: string
   }): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }> {
     return this.#store.listDeployments(input.ownerId, {
+      limit: input.limit,
+      ...(input.before === undefined ? {} : { before: input.before }),
+    })
+  }
+
+  async listForPrincipal(input: {
+    ownerId: string
+    principalId: string
+    limit: number
+    before?: string
+  }) {
+    return this.#store.listDeploymentsForPrincipal(input.ownerId, input.principalId, {
       limit: input.limit,
       ...(input.before === undefined ? {} : { before: input.before }),
     })
@@ -381,6 +430,44 @@ export class StoreDeploymentRepository implements DeploymentRepository {
       nextCursor: items.length === input.limit ? (items.at(-1)?.sequence ?? null) : null,
     }
   }
+
+  async listLogsForPrincipal(input: {
+    ownerId: string
+    principalId: string
+    deploymentId: string
+    after: number
+    limit: number
+  }): Promise<DeploymentLogPage | null> {
+    if (
+      this.#store.getDeploymentForPrincipal(
+        input.ownerId,
+        input.principalId,
+        input.deploymentId,
+      ) === null
+    ) {
+      return null
+    }
+    const items = this.#store
+      .listDeploymentLogs(input.ownerId, input.deploymentId, input.after, input.limit)
+      .map(decodeStoredDeploymentLog)
+    return {
+      items,
+      nextCursor: items.length === input.limit ? (items.at(-1)?.sequence ?? null) : null,
+    }
+  }
+
+  #deploymentPrincipal(ownerId: string, _key: string): string {
+    const principals = this.#store
+      .listPrincipals(ownerId)
+      .filter((principal) => principal.disabledAt === null)
+    if (principals.length !== 1) {
+      throw new AppError({
+        code: "PRINCIPAL_REQUIRED",
+        message: "Deployment Principal is required",
+      })
+    }
+    return (principals[0] as (typeof principals)[number]).id
+  }
 }
 
 interface EncodedDeploymentLog {
@@ -404,6 +491,7 @@ interface DeploymentExecutionOptions {
 
 export interface CreateDeploymentInput extends DeploymentMutationContext {
   ownerId: string
+  principalId?: string
   idempotencyKey: string
   runId: string
   source: DeploymentSourceSelector
@@ -486,12 +574,22 @@ export class DeploymentExecutor {
     })
     const existing = await this.#repository.findIdempotent({
       ownerId: input.ownerId,
+      ...(input.principalId === undefined ? {} : { principalId: input.principalId }),
       idempotencyKey: input.idempotencyKey,
       requestHash,
     })
     if (existing !== null) return { deployment: existing, replayed: true }
 
-    if ((await this.#runs.getRun(input.ownerId, input.runId)) === null) throw notFound()
+    if (input.principalId === undefined) {
+      if ((await this.#runs.getRun(input.ownerId, input.runId)) === null) throw notFound()
+    } else {
+      const run = await this.#runs.getRunForPrincipal?.(
+        input.ownerId,
+        input.principalId,
+        input.runId,
+      )
+      if (run == null || run.delegatedBy.id !== input.principalId) throw notFound()
+    }
     const adapter = this.#adapters.get(input.targetName)
     let targetConfig: Readonly<Record<string, unknown>>
     try {
@@ -545,6 +643,7 @@ export class DeploymentExecutor {
       deployment,
       idempotencyKey: input.idempotencyKey,
       requestHash,
+      ...(input.principalId === undefined ? {} : { principalId: input.principalId }),
       audit: auditRecord("deployment.create", deployment, input, timestamp, {
         runId: input.runId,
         target: input.targetName,
@@ -552,25 +651,33 @@ export class DeploymentExecutor {
     })
   }
 
-  async get(ownerId: string, deploymentId: string): Promise<DeploymentRecord> {
-    const deployment = await this.#repository.getForOwner(ownerId, deploymentId)
-    if (deployment === null) throw notFound()
+  async get(scope: string | RequestContext, deploymentId: string): Promise<DeploymentRecord> {
+    const deployment =
+      typeof scope === "string"
+        ? await this.#repository.getForOwner(scope, deploymentId)
+        : await this.#repository.getForPrincipal?.(scope.ownerId, scope.principalId, deploymentId)
+    if (deployment == null) throw notFound()
     return deployment
   }
 
   async list(
-    ownerId: string,
+    scope: string | RequestContext,
     options: { limit: number; before?: string },
   ): Promise<{ readonly items: readonly DeploymentRecord[]; readonly nextCursor: string | null }> {
-    return this.#repository.listForOwner({
-      ownerId,
+    const input = {
+      ownerId: typeof scope === "string" ? scope : scope.ownerId,
       limit: options.limit,
       ...(options.before === undefined ? {} : { before: options.before }),
-    })
+    }
+    return typeof scope === "string"
+      ? this.#repository.listForOwner(input)
+      : (this.#repository.listForPrincipal?.({ ...input, principalId: scope.principalId }) ??
+          Promise.reject(notFound()))
   }
 
   async logs(input: {
     ownerId: string
+    principalId?: string
     deploymentId: string
     after?: number
     limit?: number
@@ -589,13 +696,22 @@ export class DeploymentExecutor {
         "Deployment log cursor or limit is invalid.",
       )
     }
-    const page = await this.#repository.listLogsForOwner({
-      ownerId: input.ownerId,
-      deploymentId: input.deploymentId,
-      after,
-      limit,
-    })
-    if (page === null) throw notFound()
+    const page =
+      input.principalId === undefined
+        ? await this.#repository.listLogsForOwner({
+            ownerId: input.ownerId,
+            deploymentId: input.deploymentId,
+            after,
+            limit,
+          })
+        : await this.#repository.listLogsForPrincipal?.({
+            ownerId: input.ownerId,
+            principalId: input.principalId,
+            deploymentId: input.deploymentId,
+            after,
+            limit,
+          })
+    if (page == null) throw notFound()
     return page
   }
 

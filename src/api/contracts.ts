@@ -13,6 +13,49 @@ const safeJson = z.unknown()
 export const IdentifierSchema = z.string().uuid()
 export const ArtifactIdentifierSchema = z.string().regex(/^[a-f0-9]{64}$/)
 
+export const PrincipalSummarySchema = z
+  .object({
+    id: IdentifierSchema,
+    kind: z.enum(["person", "service"]),
+    displayName: z.string().min(1).max(120),
+  })
+  .strict()
+  .meta({ id: "PrincipalSummary" })
+
+export const PrincipalSchema = PrincipalSummarySchema.extend({
+  ownerId: IdentifierSchema,
+  ownerRole: z.enum(["admin", "member"]),
+  createdAt: timestamp,
+  disabledAt: timestamp.nullable(),
+})
+  .strict()
+  .meta({ id: "Principal" })
+
+export const ProjectSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    name: z.string().min(1).max(120),
+    slug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+    createdAt: timestamp,
+    archivedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "Project" })
+
+export const ProjectMemberSchema = z
+  .object({
+    projectId: IdentifierSchema,
+    principal: PrincipalSummarySchema,
+    role: z.enum(["maintainer", "member"]),
+    joinedAt: timestamp,
+  })
+  .strict()
+  .meta({ id: "ProjectMember" })
+
 const boundedEnvironment = z
   .record(environmentName, z.string().max(32_768))
   .superRefine((value, context) => {
@@ -246,6 +289,8 @@ export const RunSchema = z
   .object({
     id: IdentifierSchema,
     ownerId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    delegatedBy: PrincipalSummarySchema,
     workspace: WorkspaceSourceSchema,
     agentType: z.string(),
     agentSpec: AgentLaunchSnapshotSchema,
@@ -503,6 +548,7 @@ export const ErrorEnvelopeSchema = z
 
 export const CreateRunRequestSchema = z
   .object({
+    projectId: IdentifierSchema.optional(),
     workspace: CreateWorkspaceSourceSchema,
     agentType: z
       .string()
@@ -574,6 +620,7 @@ export const RunEventPageSchema = z.object({
 
 export const CreateSessionRequestSchema = z
   .object({
+    projectId: IdentifierSchema.optional(),
     workspace: CreateWorkspaceSourceSchema,
     agentType: z
       .string()
@@ -630,6 +677,8 @@ export const AgentSessionSchema = z
   .object({
     id: IdentifierSchema,
     ownerId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    delegatedBy: PrincipalSummarySchema,
     workspace: WorkspaceSourceSchema,
     agentType: z.string(),
     agentSpec: AgentLaunchSnapshotSchema,
@@ -783,10 +832,62 @@ export const SessionEventPageSchema = z.object({
 })
 export const ArtifactPageSchema = z.object({ items: z.array(ArtifactSchema).readonly() })
 
+export const ProjectWorkItemSchema = z
+  .object({
+    kind: z.enum(["run", "session"]),
+    id: IdentifierSchema,
+    projectId: IdentifierSchema,
+    delegatedBy: PrincipalSummarySchema,
+    title: z.string(),
+    agentType: z.string(),
+    status: z.union([z.enum(RUN_STATUSES), AgentSessionStatusSchema]),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  })
+  .strict()
+  .meta({ id: "ProjectWorkItem" })
+
+export const CreatePrincipalRequestSchema = z
+  .object({
+    kind: z.enum(["person", "service"]),
+    displayName: z.string().trim().min(1).max(120),
+  })
+  .strict()
+  .meta({ id: "CreatePrincipalRequest" })
+
+export const CreateProjectRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    slug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+  })
+  .strict()
+  .meta({ id: "CreateProjectRequest" })
+
+export const AddProjectMemberRequestSchema = z
+  .object({ principalId: IdentifierSchema, role: z.enum(["maintainer", "member"]) })
+  .strict()
+  .meta({ id: "AddProjectMemberRequest" })
+
+export const MeResponseSchema = z.object({
+  principal: PrincipalSchema,
+  projects: z.array(ProjectSchema).readonly(),
+})
+export const PrincipalResponseSchema = z.object({ principal: PrincipalSchema })
+export const PrincipalPageSchema = z.object({ items: z.array(PrincipalSchema).readonly() })
+export const ProjectResponseSchema = z.object({ project: ProjectSchema })
+export const ProjectPageSchema = z.object({ items: z.array(ProjectSchema).readonly() })
+export const ProjectMemberResponseSchema = z.object({ member: ProjectMemberSchema })
+export const ProjectMemberPageSchema = z.object({ items: z.array(ProjectMemberSchema).readonly() })
+export const ProjectWorkPageSchema = z.object({ items: z.array(ProjectWorkItemSchema).readonly() })
+
 export const ApiKeySchema = z
   .object({
     id: IdentifierSchema,
     ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
     prefix: z.string().regex(/^mwk_[A-Za-z0-9_-]{12}$/),
     name: z.string().min(1).max(128),
     createdAt: timestamp,
@@ -797,7 +898,10 @@ export const ApiKeySchema = z
   .meta({ id: "ApiKey" })
 
 export const CreateApiKeyRequestSchema = z
-  .object({ name: z.string().trim().min(1).max(128) })
+  .object({
+    name: z.string().trim().min(1).max(128),
+    principalId: IdentifierSchema.optional(),
+  })
   .strict()
   .meta({ id: "CreateApiKeyRequest" })
 
@@ -808,6 +912,25 @@ export const CreatedApiKeyResponseSchema = z.object({
 })
 export const ApiKeyPageSchema = z.object({ items: z.array(ApiKeySchema).readonly() })
 
+export const BrowserSessionSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
+    createdAt: timestamp,
+    expiresAt: timestamp,
+    lastUsedAt: timestamp.nullable(),
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "BrowserSession" })
+
+export const CreatedBrowserSessionResponseSchema = z.object({
+  session: BrowserSessionSchema,
+  secret: z.string().regex(/^mws_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/),
+})
+export const BrowserSessionResponseSchema = z.object({ session: BrowserSessionSchema })
+
 export const AuditRecordSchema = z
   .object({
     id: IdentifierSchema,
@@ -816,6 +939,10 @@ export const AuditRecordSchema = z
     action: z.string(),
     resourceType: z.enum([
       "owner",
+      "principal",
+      "project",
+      "project_membership",
+      "browser_session",
       "api_key",
       "run",
       "session",
@@ -839,6 +966,10 @@ export const AuditQuerySchema = CreatedPageQuerySchema.extend({
   resourceType: z
     .enum([
       "owner",
+      "principal",
+      "project",
+      "project_membership",
+      "browser_session",
       "api_key",
       "run",
       "session",
@@ -956,6 +1087,13 @@ export const ProviderDiagnosticsSchema = z
   .meta({ id: "ProviderDiagnostics" })
 
 export type CreateRunRequest = z.input<typeof CreateRunRequestSchema>
+export type Principal = z.output<typeof PrincipalSchema>
+export type Project = z.output<typeof ProjectSchema>
+export type ProjectMember = z.output<typeof ProjectMemberSchema>
+export type ProjectWorkItem = z.output<typeof ProjectWorkItemSchema>
+export type CreatePrincipalRequest = z.input<typeof CreatePrincipalRequestSchema>
+export type CreateProjectRequest = z.input<typeof CreateProjectRequestSchema>
+export type AddProjectMemberRequest = z.input<typeof AddProjectMemberRequestSchema>
 export type Run = z.output<typeof RunSchema>
 export type RunLog = z.output<typeof RunLogSchema>
 export type RunEvent = z.output<typeof RunEventSchema>
@@ -966,6 +1104,7 @@ export type CreateBriefRequest = z.input<typeof CreateBriefRequestSchema>
 export type Brief = z.output<typeof BriefSchema>
 export type BriefPage = z.output<typeof BriefPageSchema>
 export type ApiKey = z.output<typeof ApiKeySchema>
+export type BrowserSession = z.output<typeof BrowserSessionSchema>
 export type AuditRecord = z.output<typeof AuditRecordSchema>
 export type AuditPage = z.output<typeof AuditPageSchema>
 export type RunPage = z.output<typeof RunPageSchema>

@@ -21,6 +21,41 @@ services:
       - "127.0.0.1:7332:7332"
     volumes:
       - meanwhile-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - fetch('http://127.0.0.1:7331/readyz').then(r=>{if(!r.ok)throw new Error(String(r.status))})
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  project-watch:
+    build: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      meanwhile:
+        condition: service_healthy
+    command: ["bun", "board/src/main.ts"]
+    environment:
+      MEANWHILE_URL: http://meanwhile:7331
+      MEANWHILE_BOARD_HOST: 0.0.0.0
+      MEANWHILE_BOARD_PORT: 7333
+    ports:
+      - "127.0.0.1:7333:7333"
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - fetch('http://127.0.0.1:7333/').then(r=>{if(!r.ok)throw new Error(String(r.status))})
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
 volumes:
   meanwhile-data:

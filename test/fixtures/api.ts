@@ -14,6 +14,8 @@ export const API_OWNER_ID = "00000000-0000-4000-8000-000000000002"
 export const API_DEPLOYMENT_ID = "00000000-0000-4000-8000-000000000003"
 export const API_SESSION_ID = "00000000-0000-4000-8000-000000000004"
 export const API_TURN_ID = "00000000-0000-4000-8000-000000000005"
+export const API_PROJECT_ID = "00000000-0000-4000-8000-000000000006"
+export const API_PRINCIPAL_ID = "00000000-0000-4000-8000-000000000007"
 export const API_TIMESTAMP = "2026-07-13T00:00:00.000Z"
 
 export function apiRun(status: Run["status"] = "queued"): Run {
@@ -34,6 +36,8 @@ export function apiRun(status: Run["status"] = "queued"): Run {
   return {
     id: API_RUN_ID,
     ownerId: API_OWNER_ID,
+    projectId: API_PROJECT_ID,
+    delegatedBy: { id: API_PRINCIPAL_ID, kind: "person", displayName: "Ada" },
     workspace: { type: "bundle", artifactId: "a".repeat(64) },
     agentType: "demo",
     agentSpec: {
@@ -131,6 +135,8 @@ export function apiSession(status: AgentSession["status"] = "idle"): AgentSessio
   return {
     id: API_SESSION_ID,
     ownerId: API_OWNER_ID,
+    projectId: run.projectId,
+    delegatedBy: run.delegatedBy,
     workspace: run.workspace,
     agentType: run.agentType,
     agentSpec: run.agentSpec,

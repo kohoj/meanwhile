@@ -186,12 +186,13 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
                 ? {}
                 : { credentialRef: input.workspace.credentialRef }),
             }
-    const { provider, ...runInput } = input
+    const { projectId, provider, ...runInput } = input
     const result = await service.create(
       request,
       {
         ...runInput,
         workspace,
+        ...(projectId === undefined ? {} : { projectId }),
         ...(provider === undefined ? {} : { provider }),
       },
       idempotencyKey,
@@ -201,9 +202,9 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
   })
 
   routes.openapi(listRunsRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const query = context.req.valid("query")
-    const page = await service.list(ownerId, {
+    const page = await service.list(request, {
       limit: query.limit,
       ...(query.before === undefined ? {} : { before: query.before }),
     })
@@ -214,9 +215,9 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
   })
 
   routes.openapi(getRunRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id } = context.req.valid("param")
-    return context.json({ run: RunSchema.parse(await service.get(ownerId, id)) }, 200)
+    return context.json({ run: RunSchema.parse(await service.get(request, id)) }, 200)
   })
 
   routes.openapi(cancelRunRoute, async (context) => {
@@ -227,18 +228,17 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
 
   routes.openapi(getRunLogsRoute, async (context) => {
     const request = context.get("requestContext")
-    const { ownerId } = request
     const { id } = context.req.valid("param")
     const { follow, after, limit } = context.req.valid("query")
     if (!follow) {
-      const page = await service.logs(ownerId, id, { after, limit })
+      const page = await service.logs(request, id, { after, limit })
       return context.json(
         { items: page.items.map((item) => RunLogSchema.parse(item)), nextCursor: page.nextCursor },
         200,
       )
     }
 
-    await service.get(ownerId, id)
+    await service.get(request, id)
     const resumeAt = Math.max(after, parseLastEventId(context.req.valid("header")["Last-Event-ID"]))
     return streamSSE(
       context,
@@ -250,7 +250,7 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
         if (context.req.raw.signal.aborted) abort()
         try {
           await stream.writeSSE({ event: "ready", data: "{}", retry: 1_000 })
-          for await (const item of service.followLogs(ownerId, id, resumeAt, cancellation.signal)) {
+          for await (const item of service.followLogs(request, id, resumeAt, cancellation.signal)) {
             if (item === null) {
               await stream.writeSSE({ event: "heartbeat", data: "{}" })
               continue
@@ -279,11 +279,10 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
 
   routes.openapi(getRunEventsRoute, async (context) => {
     const request = context.get("requestContext")
-    const { ownerId } = request
     const { id } = context.req.valid("param")
     const { follow, after, limit } = context.req.valid("query")
     if (!follow) {
-      const page = await service.events(ownerId, id, { after, limit })
+      const page = await service.events(request, id, { after, limit })
       return context.json(
         {
           items: page.items.map((item) => RunEventSchema.parse(item)),
@@ -293,7 +292,7 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
       )
     }
 
-    await service.get(ownerId, id)
+    await service.get(request, id)
     const resumeAt = Math.max(after, parseLastEventId(context.req.valid("header")["Last-Event-ID"]))
     return streamSSE(
       context,
@@ -306,7 +305,7 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
         try {
           await stream.writeSSE({ event: "ready", data: "{}", retry: 1_000 })
           for await (const item of service.followEvents(
-            ownerId,
+            request,
             id,
             resumeAt,
             cancellation.signal,
@@ -338,9 +337,9 @@ export const createRunRoutes = (service: RunApi): OpenAPIHono<ApiEnv> => {
   })
 
   routes.openapi(getRunArtifactsRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id } = context.req.valid("param")
-    const artifacts = await service.artifacts(ownerId, id)
+    const artifacts = await service.artifacts(request, id)
     return context.json({ items: artifacts.map((artifact) => ArtifactSchema.parse(artifact)) }, 200)
   })
 

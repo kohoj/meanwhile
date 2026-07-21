@@ -1,608 +1,335 @@
+import type {
+  Principal,
+  Project,
+  ProjectMember,
+  ProjectWorkItem,
+} from "@kohoz/meanwhile/contracts";
 import { AnimatePresence, motion } from "motion/react";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import useSWR from "swr";
-import type { Brief } from "@kohoz/meanwhile/contracts";
-import { type BoardRow, connectStream, useBoard } from "./store";
+import { useBoard } from "./store";
 import "./styles.css";
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json());
-const EASE = [0.22, 1, 0.36, 1] as const;
-
-interface PromotableArtifactEntry {
-  artifactId: string;
-  path: string;
-  mediaType: string;
-  byteSize: number;
-  brief: Brief | null;
+interface BoardRow extends ProjectWorkItem {
+  section: "attention" | "active" | "ready" | "completed";
 }
 
-// Plain-words relative time for the trust anchor — never a raw timestamp.
-const ago = (iso: string | null): string | null => {
-  if (!iso) return null;
-  const diff = Date.now() - Date.parse(iso);
-  if (Number.isNaN(diff) || diff < 0) return null;
-  const m = Math.round(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+interface SessionResponse {
+  authenticated: boolean;
+  principal?: Principal;
+  projects?: readonly Project[];
+}
+
+interface BoardResponse {
+  principal: Principal;
+  project: Project;
+  projects: readonly Project[];
+  members: readonly ProjectMember[];
+  rows: readonly BoardRow[];
+  updatedAt: string;
+}
+
+const fetchJson = async <T,>(url: string): Promise<T> => {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(response.status === 401 ? "UNAUTHENTICATED" : "REQUEST_FAILED");
+  return (await response.json()) as T;
 };
 
-// ── Read-side classification. Only two things "need a human": a pending
-// decision (waiting) or a break (crash). Everything else is background.
-type Class = "wait" | "crash" | "running" | "done";
-const classify = (kind: string, status: string): Class => {
-  if (kind === "run") {
-    if (status === "failed" || status === "timed_out") return "crash";
-    if (status === "succeeded" || status === "cancelled") return "done";
-    return "running";
-  }
-  if (status === "continuity_lost" || status === "failed") return "crash";
-  if (status === "closed") return "done";
-  if (status === "idle") return "wait";
-  return "running";
-};
-const NEEDS_HUMAN = (c: Class) => c === "wait" || c === "crash";
-const TONE: Record<Class, string> = {
-  wait: "var(--color-wait)",
-  crash: "var(--color-crash)",
-  running: "var(--color-ink-3)",
-  done: "var(--color-ink-4)",
+const relativeTime = (value: string): string => {
+  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(value)) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
 };
 
-const useLiveStatus = (row: BoardRow) =>
-  useBoard((s) => s.liveStatus[`${row.kind}:${row.id}`]) ?? row.status;
+const humanAgent = (value: string): string =>
+  value
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 
-// ── The one item that needs you: stated with weight, and with evidence. ──────
-const Demand: React.FC<{ row: BoardRow; onOpen: () => void }> = ({ row, onOpen }) => {
-  const status = useLiveStatus(row);
-  const cls = classify(row.kind, status);
-  const tone = TONE[cls];
-  return (
-    <motion.button
-      type="button"
-      onClick={onOpen}
-      layout="position"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
-      transition={{ duration: 0.24, ease: EASE }}
-      className="group block w-full rounded-2xl bg-[var(--color-raise)] p-6 text-left transition-transform duration-150 active:scale-[0.995]"
-    >
-      <div className="flex items-center gap-2.5">
-        <span
-          className="size-2 rounded-full"
-          style={{ backgroundColor: tone, animation: "breathe 1.9s ease-in-out infinite" }}
-        />
-        <span
-          className="font-[var(--font-mono)] text-[11px] uppercase tracking-[0.1em]"
-          style={{ color: tone }}
-        >
-          {cls === "crash" ? "broke · holding" : "waiting on you"}
-        </span>
-      </div>
-      <div className="mt-3 text-pretty text-[19px] font-medium leading-snug text-[var(--color-ink)]">
-        {row.title || row.id}
-      </div>
-      <div className="mt-3 font-[var(--font-mono)] text-[12px] text-[var(--color-ink-3)]">
-        {row.agentType} · {status} · open to see where →
-      </div>
-    </motion.button>
-  );
+const statusTone = (status: string): "alert" | "active" | "ready" | "quiet" => {
+  if (["failed", "timed_out", "continuity_lost"].includes(status)) return "alert";
+  if (status === "idle") return "ready";
+  if (["queued", "provisioning", "running", "closing"].includes(status)) return "active";
+  return "quiet";
 };
 
-// ── Background inventory: near-invisible proof-of-existence, opt-in to read. ──
-const QuietRow: React.FC<{ row: BoardRow; onOpen: () => void }> = ({ row, onOpen }) => {
-  const status = useLiveStatus(row);
-  const cls = classify(row.kind, status);
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left transition-colors duration-150 hover:bg-[var(--color-raise)]"
-    >
-      <span className="size-1 rounded-full" style={{ backgroundColor: TONE[cls] }} />
-      <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--color-ink-3)]">
-        {row.title || row.id}
-      </span>
-      <span className="tnum shrink-0 font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
-        {status}
-      </span>
-    </button>
-  );
+const displayStatus = (status: string): string => {
+  if (status === "idle") return "ready";
+  if (status === "succeeded" || status === "closed") return "completed";
+  return status.replace("_", " ");
 };
 
-// ── Detail — a focused reading of the agent's evidence. ──────────────────────
-const Detail: React.FC<{ row: BoardRow; onClose: () => void }> = ({ row, onClose }) => {
-  const runTl = useBoard((s) => s.runTimelines[row.id]);
-  const sessTl = useBoard((s) => s.sessionTimelines[row.id]);
-  const loadHistory = useBoard((s) => s.loadHistory);
-  const messages = row.kind === "run" ? runTl?.messages : sessTl?.messages;
-  const status = useLiveStatus(row);
-  const [loading, setLoading] = useState(!messages);
-  const [promoting, setPromoting] = useState<string | null>(null);
-  const [promotionError, setPromotionError] = useState<string | null>(null);
-  const artifactUrl = row.kind === "run" ? `/task/run/${row.id}/artifacts` : null;
-  const { data: artifactData, mutate: refreshArtifacts } = useSWR<{
-    items: PromotableArtifactEntry[];
-  }>(artifactUrl, fetcher);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  useEffect(() => {
-    let alive = true;
-    if (!messages || messages.length === 0) {
-      setLoading(true);
-      loadHistory(row.kind, row.id).finally(() => alive && setLoading(false));
-    } else setLoading(false);
-    return () => {
-      alive = false;
-    };
-  }, [row.kind, row.id, loadHistory, messages]);
-
-  const promote = async (entry: PromotableArtifactEntry) => {
-    const identity = `${entry.artifactId}:${entry.path}`;
-    setPromoting(identity);
-    setPromotionError(null);
-    const title = `${entry.path} · ${row.title || row.id}`.slice(0, 160);
-    try {
-      const response = await fetch("/briefs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, artifactId: entry.artifactId, path: entry.path }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({ error: "Could not keep this output." }));
-        setPromotionError(body.error ?? "Could not keep this output.");
-      } else {
-        await refreshArtifacts();
-      }
-    } catch {
-      setPromotionError("Could not reach the control plane.");
-    } finally {
-      setPromoting(null);
-    }
-  };
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.16 }}
-      onClick={onClose}
-      className="fixed inset-0 z-[var(--z-backdrop)] flex items-end justify-center bg-black/60 p-4 sm:items-center sm:p-6"
-    >
-      <motion.div
-        role="dialog"
-        aria-modal
-        initial={{ opacity: 0, y: 16, scale: 0.99 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 12 }}
-        transition={{ duration: 0.22, ease: EASE }}
-        onClick={(e) => e.stopPropagation()}
-        className="z-[var(--z-modal)] flex max-h-[82dvh] w-full max-w-lg flex-col overflow-hidden rounded-3xl bg-[var(--color-raise)] shadow-[var(--shadow-modal)]"
-      >
-        <header className="px-7 pb-4 pt-6">
-          <h2 className="text-balance text-[17px] font-semibold leading-snug text-[var(--color-ink)]">
-            {row.title || row.id}
-          </h2>
-          <p className="mt-1.5 font-[var(--font-mono)] text-[11px] text-[var(--color-ink-3)]">
-            {row.kind} · {row.agentType} · {status}
-          </p>
-        </header>
-        <div className="flex-1 overflow-y-auto px-7 pb-3">
-          {messages && messages.length > 0 ? (
-            <ol className="flex flex-col gap-5">
-              {messages.map((m) => (
-                <li key={`${m.role}:${m.id}`}>
-                  <div className="mb-1 font-[var(--font-mono)] text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
-                    {m.role}
-                  </div>
-                  <p
-                    className={`text-pretty text-[14px] leading-relaxed ${m.role === "thought" ? "italic text-[var(--color-ink-3)]" : "text-[var(--color-ink-2)]"}`}
-                  >
-                    {m.text}
-                  </p>
-                </li>
-              ))}
-            </ol>
-          ) : loading ? (
-            <div className="flex flex-col gap-5">
-              {[0, 1, 2].map((i) => (
-                <div key={i} className="flex flex-col gap-2">
-                  <div className="h-2 w-12 animate-pulse rounded bg-[var(--color-hair)]" />
-                  <div className="h-3 w-11/12 animate-pulse rounded bg-[var(--color-hair)]" />
-                  <div className="h-3 w-3/5 animate-pulse rounded bg-[var(--color-hair)]" />
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="py-16 text-center text-[13px] text-[var(--color-ink-3)]">
-              No agent output was recorded.
-            </p>
-          )}
-          {artifactData && artifactData.items.length > 0 ? (
-            <section className="mt-8 border-t border-[var(--color-hair)] pt-5">
-              <div className="font-[var(--font-mono)] text-[10px] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
-                reusable output
-              </div>
-              <div className="mt-2 flex flex-col gap-1">
-                {artifactData.items.map((entry) => {
-                  const identity = `${entry.artifactId}:${entry.path}`;
-                  return (
-                    <div
-                      key={identity}
-                      className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 hover:bg-[var(--color-bg)]"
-                    >
-                      <span className="min-w-0 truncate font-[var(--font-mono)] text-[12px] text-[var(--color-ink-3)]">
-                        {entry.path}
-                      </span>
-                      {entry.brief ? (
-                        <span className="shrink-0 font-[var(--font-mono)] text-[10px] text-[var(--color-ink-4)]">
-                          kept
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => promote(entry)}
-                          disabled={promoting !== null}
-                          className="shrink-0 font-[var(--font-mono)] text-[10px] text-[var(--color-ink-3)] transition-colors hover:text-[var(--color-ink)] disabled:opacity-40"
-                        >
-                          {promoting === identity ? "keeping…" : "+ keep"}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              {promotionError ? (
-                <p className="mt-2 text-[12px]" style={{ color: "var(--color-crash)" }}>
-                  {promotionError}
-                </p>
-              ) : null}
-            </section>
-          ) : null}
-        </div>
-        <footer className="px-7 pb-6 pt-3">
-          <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
-            task lifecycle is read-only · credentials never leave the runtime · esc to close
-          </span>
-        </footer>
-      </motion.div>
-    </motion.div>
-  );
-};
-
-// ── Delegate — the one thing you can start here. Intent first: the ask is the
-// hero input; agent and repo are secondary. ─────────────────────────────────
-const DelegateDialog: React.FC<{ onClose: () => void; onDone: () => void }> = ({
-  onClose,
-  onDone,
-}) => {
-  const [prompt, setPrompt] = useState("");
-  const [agentType, setAgentType] = useState("demo");
-  const [repo, setRepo] = useState("");
-  const [selectedBriefIds, setSelectedBriefIds] = useState<string[]>([]);
-  const [showBriefs, setShowBriefs] = useState(false);
+const Login: React.FC<{ onLogin: () => void }> = ({ onLogin }) => {
+  const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { data: briefData } = useSWR<{ items: Brief[] }>("/briefs", fetcher);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const submit = async () => {
-    if (!prompt.trim() || busy) return;
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!apiKey.trim() || busy) return;
     setBusy(true);
     setError(null);
-    try {
-      const res = await fetch("/delegate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: prompt.trim(),
-          agentType,
-          repo: repo.trim(),
-          kind: "run",
-          briefIds: selectedBriefIds,
-        }),
-      });
-      if (!res.ok) {
-        const { error } = await res.json().catch(() => ({ error: "Could not delegate." }));
-        setError(error ?? "Could not delegate.");
-        setBusy(false);
-        return;
-      }
-      onDone();
-    } catch {
-      setError("Could not reach the control plane.");
+    const response = await fetch("/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: apiKey.trim() }),
+    }).catch(() => null);
+    if (response?.ok) onLogin();
+    else {
       setBusy(false);
+      setError(
+        response?.status === 502
+          ? "The control plane is unavailable."
+          : "That key could not open a Project session.",
+      );
     }
   };
-
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.16 }}
-      onClick={onClose}
-      className="fixed inset-0 z-[var(--z-backdrop)] flex items-end justify-center bg-black/60 p-4 sm:items-center sm:p-6"
-    >
-      <motion.div
-        role="dialog"
-        aria-modal
-        initial={{ opacity: 0, y: 16, scale: 0.99 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 12 }}
-        transition={{ duration: 0.22, ease: EASE }}
-        onClick={(e) => e.stopPropagation()}
-        className="z-[var(--z-modal)] w-full max-w-lg overflow-hidden rounded-3xl bg-[var(--color-raise)] p-7 shadow-[var(--shadow-modal)]"
-      >
-        <h2 className="text-[17px] font-semibold text-[var(--color-ink)]">Delegate work</h2>
-        <p className="mt-1 text-[13px] text-[var(--color-ink-3)]">
-          Describe the task. An agent picks it up; it shows up on your board.
-        </p>
-
-        <textarea
+    <main className="login-shell">
+      <form className="login-card" onSubmit={submit}>
+        <div className="brand">meanwhile</div>
+        <h1>Watch work together.</h1>
+        <p>Your key is exchanged once for a short-lived, read-only browser session.</p>
+        <label htmlFor="api-key">API key</label>
+        <input
+          id="api-key"
           autoFocus
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
-          }}
-          rows={3}
-          placeholder="e.g. Fix the failing auth tests and open a PR"
-          className="mt-5 w-full resize-none rounded-xl bg-[var(--color-bg)] p-4 text-[15px] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-1 focus:ring-[var(--color-hair)]"
+          type="password"
+          autoComplete="off"
+          value={apiKey}
+          onChange={(event) => setApiKey(event.target.value)}
+          placeholder="mwk_…"
         />
+        {error ? <div className="login-error">{error}</div> : null}
+        <button type="submit" disabled={busy || !apiKey.trim()}>
+          {busy ? "Opening…" : "Open Project Watch"}
+        </button>
+      </form>
+    </main>
+  );
+};
 
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-          <label className="flex-1">
-            <span className="font-[var(--font-mono)] text-[11px] uppercase tracking-[0.08em] text-[var(--color-ink-4)]">
-              agent
-            </span>
-            <input
-              value={agentType}
-              onChange={(e) => setAgentType(e.target.value)}
-              className="tnum mt-1 w-full rounded-lg bg-[var(--color-bg)] px-3 py-2 font-[var(--font-mono)] text-[13px] text-[var(--color-ink-2)] focus:outline-none focus:ring-1 focus:ring-[var(--color-hair)]"
-            />
-          </label>
-          <label className="flex-[2]">
-            <span className="font-[var(--font-mono)] text-[11px] uppercase tracking-[0.08em] text-[var(--color-ink-4)]">
-              repository — optional
-            </span>
-            <input
-              value={repo}
-              onChange={(e) => setRepo(e.target.value)}
-              placeholder="https://github.com/…"
-              className="mt-1 w-full rounded-lg bg-[var(--color-bg)] px-3 py-2 font-[var(--font-mono)] text-[13px] text-[var(--color-ink-2)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-1 focus:ring-[var(--color-hair)]"
-            />
-          </label>
-        </div>
-
-        {briefData && briefData.items.length > 0 ? (
-          <div className="mt-4 border-t border-[var(--color-hair)] pt-3">
-            <button
-              type="button"
-              onClick={() => setShowBriefs((value) => !value)}
-              className="flex w-full items-center justify-between font-[var(--font-mono)] text-[11px] text-[var(--color-ink-3)]"
-            >
-              <span>
-                prior briefs{selectedBriefIds.length > 0 ? ` · ${selectedBriefIds.length} selected` : ""}
-              </span>
-              <span>{showBriefs ? "▾" : "▸"}</span>
-            </button>
-            {showBriefs ? (
-              <div className="mt-2 max-h-36 overflow-y-auto rounded-lg bg-[var(--color-bg)] p-1">
-                {briefData.items.map((brief) => {
-                  const selected = selectedBriefIds.includes(brief.id);
-                  return (
-                    <label
-                      key={brief.id}
-                      className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-[12px] text-[var(--color-ink-2)] hover:bg-[var(--color-raise)]"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={() =>
-                          setSelectedBriefIds((current) =>
-                            selected
-                              ? current.filter((id) => id !== brief.id)
-                              : [...current, brief.id],
-                          )
-                        }
-                        className="accent-[var(--color-ink)]"
-                      />
-                      <span className="min-w-0 truncate">{brief.title}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            ) : null}
+const TaskList: React.FC<{
+  rows: readonly BoardRow[];
+  selected: BoardRow | null;
+  onSelect: (row: BoardRow) => void;
+}> = ({ rows, selected, onSelect }) => {
+  const groups = [
+    ["attention", "Needs attention"],
+    ["active", "Active"],
+    ["ready", "Ready"],
+    ["completed", "Completed"],
+  ] as const;
+  return (
+    <section className="task-list" aria-label="Project work">
+      {groups.map(([section, label]) => {
+        const items = rows.filter((row) => row.section === section);
+        if (items.length === 0) return null;
+        return (
+          <div className="task-group" key={section}>
+            <h2>{label}</h2>
+            <div className="task-group-rows">
+              {items.map((row) => {
+                const tone = statusTone(row.status);
+                const isSelected = selected?.id === row.id && selected.kind === row.kind;
+                return (
+                  <button
+                    type="button"
+                    key={`${row.kind}:${row.id}`}
+                    className={`task-row ${isSelected ? "selected" : ""} tone-${tone}`}
+                    onClick={() => onSelect(row)}
+                  >
+                    <span className="delegator">{row.delegatedBy.displayName}</span>
+                    <span className="task-title">{row.title}</span>
+                    <span className="agent">{humanAgent(row.agentType)}</span>
+                    <span className="status"><i />{displayStatus(row.status)}</span>
+                    <span className="time">{relativeTime(row.updatedAt)}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        ) : null}
+        );
+      })}
+    </section>
+  );
+};
 
-        {error ? (
-          <p className="mt-4 text-[13px]" style={{ color: "var(--color-crash)" }}>
-            {error}
-          </p>
-        ) : null}
+const TaskDetail: React.FC<{ row: BoardRow | null; current: Principal }> = ({ row, current }) => {
+  const loadHistory = useBoard((state) => state.loadHistory);
+  const runTimeline = useBoard((state) => (row?.kind === "run" ? state.runTimelines[row.id] : undefined));
+  const sessionTimeline = useBoard((state) =>
+    row?.kind === "session" ? state.sessionTimelines[row.id] : undefined,
+  );
+  const loading = useBoard((state) => (row ? state.loading[`${row.kind}:${row.id}`] : false));
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setExpanded(false);
+    if (row) void loadHistory(row.kind, row.id);
+  }, [row?.kind, row?.id, loadHistory]);
+  if (row === null) {
+    return <aside className="task-detail empty">Select a task to read its conversation.</aside>;
+  }
+  const timeline = row.kind === "run" ? runTimeline : sessionTimeline;
+  const agentMessages = timeline?.messages ?? [];
+  const messages = [
+    { id: "delegation", actor: row.delegatedBy.displayName, kind: "person", text: row.title },
+    ...agentMessages.map((message) => ({
+      id: message.id,
+      actor: message.role === "user" ? row.delegatedBy.displayName : humanAgent(row.agentType),
+      kind: message.role === "user" ? "person" : "agent",
+      text: message.text,
+    })),
+    ...(["failed", "timed_out", "continuity_lost"].includes(row.status)
+      ? [{ id: "terminal", actor: "System", kind: "system", text: `Task ${displayStatus(row.status)}.` }]
+      : []),
+  ];
+  const visible = expanded ? messages : messages.slice(0, 4);
+  const needsCurrent = row.delegatedBy.id === current.id;
+  return (
+    <aside className="task-detail">
+      <div className="detail-kicker">Task detail</div>
+      <h2>{row.title}</h2>
+      <div className="detail-meta">
+        Delegated by {row.delegatedBy.displayName}<b>·</b>{humanAgent(row.agentType)}<b>·</b>
+        <span className={`tone-${statusTone(row.status)}`}>{displayStatus(row.status)}</span>
+        <b>·</b>{relativeTime(row.updatedAt)}
+      </div>
+      <div className={`ownership ${needsCurrent ? "mine" : "theirs"}`}>
+        {needsCurrent
+          ? `Needs ${current.displayName}`
+          : `Needs ${row.delegatedBy.displayName}, not ${current.displayName}`}
+      </div>
+      <div className="conversation">
+        {loading && messages.length === 1 ? <div className="loading-line">Loading conversation…</div> : null}
+        {visible.map((message) => (
+          <div className={`conversation-row ${message.kind}`} key={message.id}>
+            <div className="conversation-rail"><i /></div>
+            <div className="conversation-actor">{message.actor}</div>
+            <div className="conversation-time">{relativeTime(row.createdAt)}</div>
+            <div className="conversation-copy">{message.text}</div>
+          </div>
+        ))}
+      </div>
+      {messages.length > 4 ? (
+        <button type="button" className="full-conversation" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "Show concise conversation" : "Open full conversation"}
+        </button>
+      ) : null}
+    </aside>
+  );
+};
 
-        <div className="mt-6 flex items-center justify-between">
-          <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-ink-4)]">
-            ⌘↵ to delegate · esc to cancel
-          </span>
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!prompt.trim() || busy}
-            className="rounded-lg bg-[var(--color-ink)] px-4 py-2 text-[13px] font-medium text-[var(--color-bg)] transition-opacity duration-150 hover:opacity-90 disabled:opacity-40"
+const ProjectWatch: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const { data, mutate, isLoading } = useSWR<BoardResponse>(
+    `/board${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+    fetchJson,
+    { refreshInterval: 5_000, keepPreviousData: true },
+  );
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = useMemo(() => {
+    const exact = data?.rows.find((row) => `${row.kind}:${row.id}` === selectedId);
+    return exact ?? data?.rows.find((row) => row.section === "attention") ?? data?.rows[0] ?? null;
+  }, [data, selectedId]);
+  useEffect(() => {
+    if (data && projectId === null) setProjectId(data.project.id);
+  }, [data, projectId]);
+  if (isLoading && data === undefined) return <div className="app-loading">meanwhile</div>;
+  if (!data) return <div className="app-loading">Project Watch is unavailable.</div>;
+  const needsMe = data.rows.filter(
+    (row) => row.section === "attention" && row.delegatedBy.id === data.principal.id,
+  ).length;
+  const needsOthers = new Map<string, number>();
+  for (const row of data.rows) {
+    if (row.section !== "attention" || row.delegatedBy.id === data.principal.id) continue;
+    needsOthers.set(row.delegatedBy.displayName, (needsOthers.get(row.delegatedBy.displayName) ?? 0) + 1);
+  }
+  const otherVerdict = [...needsOthers.entries()][0];
+  return (
+    <div className="watch-shell">
+      <header className="topbar">
+        <div className="brand">meanwhile</div>
+        <label className="project-switcher">
+          <span className="sr-only">Project</span>
+          <select
+            value={data.project.id}
+            onChange={(event) => {
+              setProjectId(event.target.value);
+              setSelectedId(null);
+            }}
           >
-            {busy ? "Delegating…" : "Delegate"}
+            {data.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </label>
+        <div className="people-count">{data.members.length} {data.members.length === 1 ? "person" : "people"}</div>
+        <div className="account">
+          <button
+            className="identity"
+            type="button"
+            aria-expanded={accountOpen}
+            onClick={() => setAccountOpen((value) => !value)}
+          >
+            {data.principal.displayName}
           </button>
+          {accountOpen ? (
+            <div className="account-menu">
+              <span>Signed in as {data.principal.displayName}</span>
+              <button type="button" onClick={onLogout}>Sign out</button>
+            </div>
+          ) : null}
         </div>
-      </motion.div>
-    </motion.div>
+      </header>
+      <section className="verdict">
+        <h1>{needsMe === 0 ? "Nothing needs you." : `${needsMe} ${needsMe === 1 ? "task needs" : "tasks need"} you.`}</h1>
+        {otherVerdict ? <p><strong>{otherVerdict[1]} {otherVerdict[1] === 1 ? "task needs" : "tasks need"} {otherVerdict[0]}.</strong></p> : <p>Everyone else is clear.</p>}
+        <button type="button" className="refresh" onClick={() => mutate()}>Refresh</button>
+      </section>
+      <main className="work-surface">
+        <TaskList
+          rows={data.rows}
+          selected={selected}
+          onSelect={(row) => setSelectedId(`${row.kind}:${row.id}`)}
+        />
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={selected ? `${selected.kind}:${selected.id}` : "empty"}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.16 }}
+            className="detail-motion"
+          >
+            <TaskDetail row={selected} current={data.principal} />
+          </motion.div>
+        </AnimatePresence>
+      </main>
+    </div>
   );
 };
 
 const App: React.FC = () => {
-  const { data, isLoading, mutate } = useSWR<{ rows: BoardRow[]; lastClosedAt: string | null }>(
-    "/board",
-    fetcher,
-    { refreshInterval: 5000 },
-  );
-  const liveStatus = useBoard((s) => s.liveStatus);
-  const [open, setOpen] = useState<BoardRow | null>(null);
-  const [showQuiet, setShowQuiet] = useState(false);
-  const [delegating, setDelegating] = useState(false);
-  useEffect(() => connectStream(), []);
-
-  const rows = data?.rows ?? [];
-  const { demands, running, done } = useMemo(() => {
-    const demands: BoardRow[] = [];
-    const running: BoardRow[] = [];
-    const done: BoardRow[] = [];
-    for (const row of rows) {
-      const status = liveStatus[`${row.kind}:${row.id}`] ?? row.status;
-      const c = classify(row.kind, status);
-      if (NEEDS_HUMAN(c)) demands.push(row);
-      else if (c === "running") running.push(row);
-      else done.push(row);
-    }
-    return { demands, running, done };
-    // biome-ignore lint/correctness/useExhaustiveDependencies: liveStatus regroups
-  }, [rows, liveStatus]);
-
-  const calm = demands.length === 0;
-  const quietCount = running.length + done.length;
-  const lastDelivered = ago(data?.lastClosedAt ?? null);
-
+  const { data, error, isLoading, mutate } = useSWR<SessionResponse>("/session", fetchJson, {
+    shouldRetryOnError: false,
+  });
+  if (isLoading) return <div className="app-loading">meanwhile</div>;
+  if (error instanceof Error && error.message !== "UNAUTHENTICATED") {
+    return <div className="app-loading">Project Watch is unavailable.</div>;
+  }
+  if (!data?.authenticated) return <Login onLogin={() => mutate()} />;
   return (
-    <div className="mx-auto flex min-h-dvh max-w-xl flex-col px-6 py-14 sm:py-20">
-      {/* Masthead — whisper-quiet; the verdict is the hero, not the brand. */}
-      <div className="mb-14 flex items-center justify-between">
-        <span className="font-[var(--font-mono)] text-[12px] tracking-[0.04em] text-[var(--color-ink-3)]">
-          meanwhile
-        </span>
-        <button
-          type="button"
-          onClick={() => setDelegating(true)}
-          className="font-[var(--font-mono)] text-[11px] tracking-[0.04em] text-[var(--color-ink-3)] transition-colors duration-150 hover:text-[var(--color-ink)]"
-        >
-          + delegate
-        </button>
-      </div>
-
-      {/* ── The Verdict ── */}
-      {isLoading ? (
-        <div className="h-12 w-3/4 animate-pulse rounded-lg bg-[var(--color-raise)]" />
-      ) : (
-        <AnimatePresence mode="wait">
-          {calm ? (
-            <motion.div
-              key="calm"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.3 }}
-            >
-              <h1 className="text-balance text-[34px] font-semibold leading-[1.1] tracking-[-0.02em] text-[var(--color-ink)] sm:text-[40px]">
-                Nothing needs you.
-              </h1>
-              <p className="mt-4 text-[15px] text-[var(--color-ink-3)]">
-                {quietCount === 0
-                  ? "No delegated work yet."
-                  : `${quietCount} ${quietCount === 1 ? "task is" : "tasks are"} handling themselves.`}
-              </p>
-              {/* Trust anchor — "fine" is believable next to recent evidence. */}
-              {lastDelivered ? (
-                <p className="mt-2 font-[var(--font-mono)] text-[12px] text-[var(--color-ink-4)]">
-                  last delivered · {lastDelivered}
-                </p>
-              ) : null}
-            </motion.div>
-          ) : (
-            <motion.div
-              key="alert"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.3 }}
-            >
-              <h1 className="text-balance text-[30px] font-semibold leading-[1.12] tracking-[-0.02em] text-[var(--color-ink)] sm:text-[34px]">
-                <span className="tnum" style={{ color: "var(--color-wait)" }}>
-                  {demands.length}
-                </span>{" "}
-                {demands.length === 1 ? "task needs" : "tasks need"} your call.
-              </h1>
-              <div className="mt-8 flex flex-col gap-3">
-                <AnimatePresence initial={false}>
-                  {demands.map((row) => (
-                    <Demand key={`${row.kind}:${row.id}`} row={row} onOpen={() => setOpen(row)} />
-                  ))}
-                </AnimatePresence>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      )}
-
-      {/* ── Background inventory — collapsed by default, opt-in to read ── */}
-      {!isLoading && quietCount > 0 ? (
-        <div className="mt-auto pt-16">
-          <button
-            type="button"
-            onClick={() => setShowQuiet((v) => !v)}
-            className="flex items-center gap-2 font-[var(--font-mono)] text-[11px] uppercase tracking-[0.08em] text-[var(--color-ink-4)] transition-colors hover:text-[var(--color-ink-3)]"
-          >
-            <span>{showQuiet ? "▾" : "▸"}</span>
-            <span>
-              {running.length} running · {done.length} closed
-            </span>
-          </button>
-          <AnimatePresence initial={false}>
-            {showQuiet ? (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 0.24, ease: EASE }}
-                style={{ overflow: "hidden" }}
-              >
-                <div className="mt-3 flex flex-col gap-0.5">
-                  {[...running, ...done].map((row) => (
-                    <QuietRow key={`${row.kind}:${row.id}`} row={row} onOpen={() => setOpen(row)} />
-                  ))}
-                </div>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-        </div>
-      ) : null}
-
-      <AnimatePresence>
-        {open ? <Detail row={open} onClose={() => setOpen(null)} /> : null}
-      </AnimatePresence>
-      <AnimatePresence>
-        {delegating ? (
-          <DelegateDialog
-            onClose={() => setDelegating(false)}
-            onDone={() => {
-              setDelegating(false);
-              mutate();
-            }}
-          />
-        ) : null}
-      </AnimatePresence>
-    </div>
+    <ProjectWatch
+      onLogout={async () => {
+        await fetch("/logout", { method: "POST" });
+        await mutate({ authenticated: false }, { revalidate: false });
+      }}
+    />
   );
 };
 

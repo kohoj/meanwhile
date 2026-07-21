@@ -9,21 +9,21 @@ This document states the implemented model and its residual risks. It is not a c
 Meanwhile aims to provide:
 
 1. **Owner isolation** — one authenticated owner cannot discover, read, cancel, interrupt, deploy, or fetch evidence/artifacts from another owner's resources.
-2. **Control-plane integrity** — workload code cannot choose durable run/session/turn state, forge authorization, supply provider handles, or reach the database directly.
-3. **Credential minimization** — agent source credentials remain behind a trusted, revocable egress boundary; setup/deployment values enter only their trusted operation; no value or placeholder becomes durable output.
-4. **Remote workload isolation** — untrusted code runs in a provider isolation boundary, not in the control-plane process.
-5. **Artifact integrity** — captured output is declared, bounded, traversal-safe, immutable, content-addressed, and owner-scoped.
-6. **Deployment integrity** — deployment promotes an authorized immutable source; it never executes from an arbitrary host or live runtime path.
-7. **Explainable mutation** — security-sensitive actions and state changes leave append-only audit evidence correlated to requests and traces.
-8. **Safe failure** — public errors and diagnostics do not reveal credentials, provider bodies, SQL, stack traces, prompts, private paths, or cross-owner existence.
+2. **Project isolation** — a Principal sees another member's work only through an active shared Project membership and never gains that member's lifecycle authority.
+3. **Control-plane integrity** — workload code cannot choose durable run/session/turn state, forge authorization, supply provider handles, or reach the database directly.
+4. **Credential minimization** — agent source credentials remain behind a trusted, revocable egress boundary; setup/deployment values enter only their trusted operation; no value or placeholder becomes durable output.
+5. **Remote workload isolation** — untrusted code runs in a provider isolation boundary, not in the control-plane process.
+6. **Artifact integrity** — captured output is declared, bounded, traversal-safe, immutable, content-addressed, and owner-scoped.
+7. **Deployment integrity** — deployment promotes an authorized immutable source; it never executes from an arbitrary host or live runtime path.
+8. **Explainable mutation** — security-sensitive actions and state changes leave append-only audit evidence correlated to requests and traces.
+9. **Safe failure** — public errors and diagnostics do not reveal credentials, provider bodies, SQL, stack traces, prompts, private paths, or cross-owner existence.
 
 ## Explicit non-goals
 
 The initial architecture does not claim to:
 
-- provide stable person identity, Project membership, role enforcement, or a
-  safe multi-person Board; all API keys under one owner currently have the same
-  owner-wide authority;
+- provide cross-Owner Projects, external identity-provider login, invitation
+  delivery, delegated operator grants, or browser mutation authority;
 - make the local provider a sandbox;
 - make an explicitly authorized model/API destination trustworthy;
 - prevent an agent from exfiltrating workspace data to an explicitly allowed destination;
@@ -55,7 +55,7 @@ High-value assets include:
 
 | Actor | Trust |
 | --- | --- |
-| Authenticated owner | Trusted for its own resources, untrusted across tenants and toward infrastructure |
+| Authenticated Principal | Trusted only for capabilities granted inside its Owner and active Projects |
 | Upstream agent/client | Equivalent to the API key it holds; may send hostile input |
 | Repository/workspace | Untrusted code and data |
 | ACP agent/model output | Untrusted execution decisions and content |
@@ -66,12 +66,10 @@ High-value assets include:
 | Local host administrator | Fully trusted; can read or alter local state |
 | Internet client | Unauthenticated and hostile by default |
 
-An API key is authority, not identity proof beyond its owner binding. Anyone holding it acts as that owner until revocation.
-
-Consequently the current Board must not be shared with a team through one
-common API key. Multi-person collaboration requires the Actor, Project, and
-membership boundary defined in [Project collaboration](project-collaboration.md);
-UI filtering alone cannot provide it.
+An API key is authority for its bound stable Principal. Anyone holding it acts
+as that Principal until revocation. Team members must not share one key. The
+Board exchanges each person's key once for an opaque, expiring, revocable,
+read-only browser session; UI filtering is never the authorization boundary.
 
 ## Trust boundaries
 
@@ -125,12 +123,15 @@ If an assumption is false, the associated guarantee is invalid; fail closed wher
 
 | Threat | Control | Residual risk |
 | --- | --- | --- |
-| Guess or steal API key | High-entropy bearer keys, shown once, persisted as hashes with safe prefixes, revocable key identity, and non-cacheable protected responses | Bearer theft grants owner authority until revocation |
+| Guess or steal API key | High-entropy bearer keys, shown once, persisted as hashes with safe prefixes, revocable Principal binding, and non-cacheable protected responses | Bearer theft grants that Principal's authority until revocation |
+| Share or steal a browser credential | Opaque high-entropy sessions are hashed, expire, are revocable, bind one Principal, and are accepted only for reads plus self-revocation; the Board stores them in HttpOnly SameSite cookies | Theft grants that Principal's Project reads until expiry or revocation |
 | Submit another `ownerId` | Public bodies never accept owner identity; auth context supplies it | Compromised auth middleware affects all routes |
 | Enumerate another owner's ID | Every public store method scopes by owner; cross-owner result is `NOT_FOUND` | Timing and aggregate-capacity side channels require separate review |
+| Read another Project | Run/Session bindings join active membership at each derived-resource read; removal immediately denies new reads | Already rendered browser content cannot be recalled |
+| Control another member's agent | Lifecycle commands and deployment creation require the immutable original delegator even for maintainers | A stolen delegator credential carries that delegator's authority |
 | Use leaked provider/storage handle | Handles never cross public APIs and are validated by adapter/bridge | Trusted logs or database compromise can expose handles |
 | Cross-owner artifact dedup leak | Authorization and owner-scoped storage key precede byte lookup; no public global digest oracle | Storage-level aggregate side channels remain possible to operators |
-| Reuse another owner's brief or execution context | Brief promotion, listing, selection, and source resolution are owner-scoped and return `NOT_FOUND` across owners | A stolen owner key authorizes all resources for that owner until revocation |
+| Reuse another Project's brief or execution context | Brief promotion, listing, selection, and source resolution require current membership in the immutable source Run's Project and return `NOT_FOUND` when inaccessible | A stolen Principal credential carries that Principal's current Project visibility until revocation |
 
 Authorization must be structural. A route-level precheck followed by an unscoped SQL read is not sufficient.
 

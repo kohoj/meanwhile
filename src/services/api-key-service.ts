@@ -14,13 +14,28 @@ export class ApiKeyService {
   constructor(
     private readonly store: Pick<
       Store,
-      "createApiKeyWithAudit" | "listApiKeys" | "revokeApiKeyWithAudit"
+      | "createApiKeyWithAudit"
+      | "listApiKeysForPrincipal"
+      | "getApiKey"
+      | "getPrincipal"
+      | "revokeApiKeyWithAudit"
     >,
     private readonly now: () => Date = () => new Date(),
     private readonly id: () => string = () => crypto.randomUUID(),
   ) {}
 
-  async create(request: RequestContext, name: string): Promise<CreatedApiKey> {
+  async create(
+    request: RequestContext,
+    name: string,
+    principalId = request.principalId,
+  ): Promise<CreatedApiKey> {
+    if (principalId !== request.principalId && request.ownerRole !== "admin") {
+      throw new AppError({ code: "NOT_FOUND", message: "Principal not found" })
+    }
+    const principal = this.store.getPrincipal(request.ownerId, principalId)
+    if (principal === null || principal.disabledAt !== null) {
+      throw new AppError({ code: "NOT_FOUND", message: "Principal not found" })
+    }
     const issued = await issueApiKey()
     const createdAt = this.now().toISOString()
     const id = this.id()
@@ -28,6 +43,7 @@ export class ApiKeyService {
       key: {
         id,
         ownerId: request.ownerId,
+        principalId,
         prefix: issued.prefix,
         hash: issued.hash,
         name: name.trim(),
@@ -44,18 +60,25 @@ export class ApiKeyService {
         resourceId: id,
         requestId: request.requestId,
         traceId: request.traceId,
-        metadata: { prefix: issued.prefix },
+        metadata: { prefix: issued.prefix, principalId },
         createdAt,
       },
     })
     return { key, secret: issued.key }
   }
 
-  list(ownerId: string): readonly ApiKey[] {
-    return this.store.listApiKeys(ownerId)
+  list(request: RequestContext): readonly ApiKey[] {
+    return this.store.listApiKeysForPrincipal(request.ownerId, request.principalId)
   }
 
   revoke(request: RequestContext, id: string): ApiKey {
+    const existing = this.store.getApiKey(request.ownerId, id)
+    if (
+      existing === null ||
+      (existing.principalId !== request.principalId && request.ownerRole !== "admin")
+    ) {
+      throw new AppError({ code: "NOT_FOUND", message: "API key not found" })
+    }
     const at = this.now().toISOString()
     const key = this.store.revokeApiKeyWithAudit({
       ownerId: request.ownerId,

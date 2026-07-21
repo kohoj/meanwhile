@@ -5,6 +5,7 @@ const API_KEY_DIGEST_BYTES = 32
 const API_KEY_HASH_PREFIX = "sha256:"
 const apiKeyPattern = /^mwk_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
 const storedHashPattern = /^sha256:([0-9a-f]{64})$/
+const browserSessionPattern = /^mws_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
 
 export const LOCAL_BOOTSTRAP_OWNER_ID = "00000000-0000-4000-8000-000000000001"
 export const LOCAL_BOOTSTRAP_API_KEY_ID = "00000000-0000-4000-8000-000000000002"
@@ -12,9 +13,12 @@ export const LOCAL_BOOTSTRAP_API_KEY_ID = "00000000-0000-4000-8000-000000000002"
 export interface StoredApiKey {
   readonly id: string
   readonly ownerId: string
+  readonly principalId: string
+  readonly ownerRole: "admin" | "member"
   readonly prefix: string
   readonly hash: string
   readonly revokedAt?: Date | null
+  readonly principalDisabledAt?: Date | null
 }
 
 export interface ApiKeyLookup {
@@ -30,8 +34,40 @@ export interface IssuedApiKey {
   readonly hash: string
 }
 
+export interface IssuedBrowserSession {
+  readonly secret: string
+  readonly prefix: string
+  readonly hash: string
+}
+
+export interface StoredBrowserSession {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly ownerRole: "admin" | "member"
+  readonly prefix: string
+  readonly hash: string
+  readonly expiresAt: Date
+  readonly revokedAt?: Date | null
+  readonly principalDisabledAt?: Date | null
+}
+
+export interface BrowserSessionLookup {
+  findBrowserSessionsByPrefix(prefix: string): Promise<readonly StoredBrowserSession[]>
+}
+
+export interface AuthenticatedBrowserSession {
+  readonly ownerId: string
+  readonly principalId: string
+  readonly ownerRole: "admin" | "member"
+  readonly browserSessionId: string
+  readonly prefix: string
+}
+
 export interface AuthenticatedOwner {
   readonly ownerId: string
+  readonly principalId: string
+  readonly ownerRole: "admin" | "member"
   readonly apiKeyId: string
   readonly apiKeyPrefix: string
 }
@@ -57,6 +93,12 @@ export async function issueApiKey(): Promise<IssuedApiKey> {
     prefix,
     hash: await hashApiKey(key),
   }
+}
+
+export async function issueBrowserSession(): Promise<IssuedBrowserSession> {
+  const prefix = `mws_${randomBase64Url(API_KEY_PREFIX_BYTES)}`
+  const secret = `${prefix}_${randomBase64Url(API_KEY_SECRET_BYTES)}`
+  return { secret, prefix, hash: await hashApiKey(secret) }
 }
 
 /**
@@ -106,7 +148,7 @@ export async function authenticateBearer(
 
     const storedHash = parseStoredHash(record.hash)
     const matches = constantTimeEqual(candidateHash, storedHash)
-    const active = record.revokedAt == null
+    const active = record.revokedAt == null && record.principalDisabledAt == null
 
     if (matches && active) {
       if (authenticated !== null) {
@@ -120,8 +162,56 @@ export async function authenticateBearer(
     ? null
     : {
         ownerId: authenticated.ownerId,
+        principalId: authenticated.principalId,
+        ownerRole: authenticated.ownerRole,
         apiKeyId: authenticated.id,
         apiKeyPrefix: authenticated.prefix,
+      }
+}
+
+export async function authenticateBrowserSession(
+  authorization: string | null | undefined,
+  lookup: BrowserSessionLookup,
+  now: Date = new Date(),
+): Promise<AuthenticatedBrowserSession | null> {
+  if (authorization === null || authorization === undefined) return null
+  const match = /^Session[\t ]+([^\s]+)$/i.exec(authorization.trim())
+  const secret = match?.[1]
+  if (secret === undefined) return null
+  const parsed = browserSessionPattern.exec(secret)
+  if (parsed === null) return null
+  const prefix = `mws_${parsed[1]}`
+  const candidateHash = parseStoredHash(await hashApiKey(secret))
+  const records = await lookup.findBrowserSessionsByPrefix(prefix)
+  let authenticated: StoredBrowserSession | null = null
+  for (const record of records) {
+    if (record.prefix !== prefix) {
+      throw new AuthenticationDataError(
+        "Browser-session lookup returned a record with a different prefix",
+      )
+    }
+    const matches = constantTimeEqual(candidateHash, parseStoredHash(record.hash))
+    const active =
+      record.revokedAt == null &&
+      record.principalDisabledAt == null &&
+      record.expiresAt.getTime() > now.getTime()
+    if (matches && active) {
+      if (authenticated !== null) {
+        throw new AuthenticationDataError(
+          "Multiple active browser-session records have the same digest",
+        )
+      }
+      authenticated = record
+    }
+  }
+  return authenticated === null
+    ? null
+    : {
+        ownerId: authenticated.ownerId,
+        principalId: authenticated.principalId,
+        ownerRole: authenticated.ownerRole,
+        browserSessionId: authenticated.id,
+        prefix,
       }
 }
 

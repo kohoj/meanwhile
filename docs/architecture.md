@@ -84,22 +84,27 @@ Interactive work adds `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent`
 
 The most important negative rule is simple: neither executor branches on a provider name. Provider choice is resolved by a registry; capability decisions use explicit provider-neutral facts.
 
-## Current collaboration boundary
+## Project collaboration boundary
 
-The implemented authorization model is tenant-wide, not Project-wide. Bearer
-authentication resolves only `ownerId` and `apiKeyId`; every key under one
-owner currently reaches the same owner-scoped resources. The Board is therefore
-one authenticated owner's projection, even when its presentation is useful to
-a stakeholder.
+Authentication resolves an API key or opaque browser session to one stable
+`Principal` inside a hard `Owner` tenant. Projects never cross Owners. Active
+`ProjectMembership` authorizes reading the Project's Runs, AgentSessions,
+conversations, artifacts, Briefs, and deployments. Every Run and AgentSession
+has an immutable Project binding and a snapshotted delegating Principal.
 
-The active architecture milestone introduces stable Actor identity, Project
-membership, immutable delegator attribution, project-scoped derived-resource
-authorization, a shared watch, and append-only comments without changing Run or
-AgentSession lifecycle ownership. `Owner` remains the tenant boundary; Project
-is never inferred from a repository; API keys remain credentials rather than
-people; comments remain separate from execution events and agent input. See
-[Project collaboration](project-collaboration.md) for the ordered gates and
-completion proof.
+Visibility does not grant operation. Existing Run and AgentSession lifecycle
+commands, and deployment creation, require the original delegator even when a
+Project maintainer can manage membership. Principal-scoped idempotency prevents
+two members using the same client key from colliding. Inaccessible resources
+return `NOT_FOUND`.
+
+The Board is a deployment-neutral BFF over the public client. In team mode it
+exchanges a person's API key once for a revocable, expiring control-plane
+browser session, stores only that opaque secret in an HttpOnly SameSite cookie,
+and uses it for read-only Project requests. The authoritative Project work list
+is conditionally polled; task detail reads the native Run or Session event
+journal. There is no second task table or Project activity truth source. See
+[Shared Project definition](project-collaboration.md) and the Project ADRs.
 
 The public contract has one implementation path. Pure Zod schemas define requests and responses, generate OpenAPI through the Hono route layer, and validate SDK traffic at runtime. `src/client.ts` adds the deep consumer semantics that raw HTTP should not force every caller to rebuild: authentication, request correlation, durable waits, structured safe failures, and cursor-correct `AsyncIterable` event following. `src/timeline.ts` is a pure projection from durable events to messages, tool calls, plans, usage, and statuses. The CLI and executable demos are presentation layers over that client. None may call a service or store directly, so local convenience cannot become a second control plane.
 
@@ -111,7 +116,7 @@ The API authenticates the bearer key, derives `ownerId`, validates the body, and
 
 Before the store transaction, the run service resolves the strict agent catalog entry into an immutable launch snapshot. The snapshot contains only non-secret executable, argv, capability, allowlist, and derived permission-policy data plus definition and catalog digests. It also captures a self-verifying execution identity: runner digest when known, provider adapter version, capability digest, pinned image reference/digest when known, and bridge protocol version. Both snapshots are part of the idempotency hash; later catalog, adapter, capability, runner, or image-configuration edits cannot silently change queued or recovering work.
 
-Inline workspace files follow a prepare/publish boundary. Preparation snapshots every caller-owned buffer, validates the complete path/size set, and computes the canonical manifest and content digests without storage writes. The resulting bundle identity is part of the request hash, allowing the owner-scoped idempotency key to be checked before publication. Publication writes idempotent content-addressed blobs and commits the owner-scoped workspace-bundle catalog row; only then may the run transaction commit. An existing bundle reference is validated in the authenticated owner scope before run creation. The SQLite uniqueness constraint remains the concurrency authority; the single-control-plane keyed gate only avoids redundant upload work.
+Inline workspace files follow a prepare/publish boundary. Preparation snapshots every caller-owned buffer, validates the complete path/size set, and computes the canonical manifest and content digests without storage writes. The resulting bundle identity is part of the request hash, allowing the Principal-scoped idempotency key to be checked before publication. Publication writes idempotent content-addressed blobs and commits the owner-scoped workspace-bundle catalog row; only then may the run transaction commit. An existing bundle reference is validated in the authenticated owner scope before run creation. The SQLite uniqueness constraint remains the concurrency authority; the single-control-plane keyed gate only avoids redundant upload work.
 
 `Brief` is the first shared-execution-intelligence resource. It is an immutable, owner-curated reference to one bounded UTF-8 text or JSON entry in an earlier run artifact. Promotion authorizes and validates the exact entry, exposes a human title plus its source identity and credential-free workspace basis, and copies no bytes. A new run or turn accepts only ordered `briefIds`; `BriefService` resolves them under the authenticated owner and `ExecutionContext` snapshots source run, source-workspace basis, artifact, entry path, digest, media type, and byte size into the resource's durable intent and idempotency hash. There is no second memory database: artifact bytes remain authoritative, and no evidence is mined, ranked, or attached implicitly.
 
@@ -119,7 +124,7 @@ An interrupted multi-blob publication may leave unreferenced content-addressed b
 
 The store transaction:
 
-1. reserves `(ownerId, idempotencyKey)` with a canonical request hash;
+1. reserves `(ownerId, principalId, idempotencyKey)` with a canonical request hash;
 2. creates one `queued` run;
 3. appends the initial status event;
 4. appends `run.create` audit evidence.
@@ -191,7 +196,7 @@ Each accepted transition writes the run row, incremented status version, append-
 
 ## Control path of an interactive session
 
-Session creation accepts the same immutable workspace input and snapshots the same agent definition, provider capabilities, and execution provenance as a run. It commits a `queued` `AgentSession`, owner-scoped idempotency binding, initial event, and audit record before provisioning starts.
+Session creation accepts the same immutable workspace input and snapshots the same agent definition, provider capabilities, and execution provenance as a run. It commits a `queued` `AgentSession`, Principal-scoped idempotency binding, initial event, and audit record before provisioning starts.
 
 The session executor requires `processInput`, creates a runtime lease, starts a `SessionRunnerSpec`, and waits for `session.ready` before entering `idle`. The runner initializes one ACP child and one ACP session. It then observes positively sequenced commands from a provider-private mailbox:
 
@@ -259,7 +264,7 @@ owner request
     │ authorize run and requested logical source
     ▼
 resolve captured source → immutable artifact ID + digest
-    │ canonical hash + owner-scoped idempotency claim
+    │ canonical hash + Principal-scoped idempotency claim
     ▼
 atomic deployment + create audit
     ▼
@@ -287,7 +292,7 @@ The data root is one recovery unit. Backup requires quiescent durable work, seri
 
 ## Complete public resource boundary
 
-Runs and agent sessions are the two orchestration resources. The same owner-scoped HTTP/client/CLI boundary exposes run/session event replay, turn commands, artifact inspection and byte streaming, deployment history and logs, append-only audit queries, and API-key create/list/revoke. This keeps operators and upstream agents out of SQLite and local storage. Maintenance is the only intentional local-only CLI surface because it requires exclusive ownership of the data root rather than bearer authorization.
+Runs and agent sessions are the two orchestration resources. The same HTTP/client/CLI boundary exposes run/session event replay, turn commands, artifact inspection and byte streaming, deployment history and logs, append-only audit queries, and API-key create/list/revoke. Owner is the hard tenant boundary; inside it, stable Principal identity and active Project membership authorize shared reads while the immutable original delegator retains lifecycle control. This keeps operators and upstream agents out of SQLite and local storage. Maintenance is the only intentional local-only CLI surface because it requires exclusive ownership of the data root rather than bearer authorization.
 
 The release proof exercises this boundary as a system property: a revision-bound prompt and structurally verified ACP response, SDK download of immutable agent output, explicit promotion of one entry to a Brief, a separate run that freezes and revalidates that evidence into new immutable output, two turns on one ACP identity across control-plane restart, explicit `local-static` deployment and URL verification, semantic OTLP traces/metrics with private-input exclusion, destruction audit, persisted reads, hashed backup, restore, and a second boot. Release receipts distinguish three non-interchangeable classes: deterministic local control-plane evidence, deterministic ACP/provider compatibility on actual remote compute, and credentialed live-agent execution on actual remote compute. A live-agent receipt proves that the configured ACP toolchain created the deployed bytes, reused explicitly selected historical evidence, and preserved continuity; it does not attest the downstream model identity. The provider lifecycle test remains a narrower adapter and credential-mediation proof.
 
@@ -297,7 +302,7 @@ The receipt is a versioned canonical claim bound to the Git commit, worktree cle
 
 | Plane | Audience | Durable | Contains |
 | --- | --- | --- | --- |
-| Product evidence | Owner | Yes | Run logs plus run/session status, ACP updates, stderr, turn identity, artifact and cleanup events |
+| Product evidence | Authorized Project member | Yes | Run logs plus run/session status, ACP updates, stderr, turn identity, artifact and cleanup events |
 | Operational telemetry | Operator | Export-dependent | Structured service logs, manual traces, bounded metrics, diagnostics |
 | Audit | Owner/operator policy | Yes, append-only | Actor, action, resource, request/trace IDs, safe mutation metadata |
 

@@ -1,6 +1,5 @@
-import { mkdir, rename, rm } from "node:fs/promises"
-import { dirname } from "node:path"
 import { z } from "zod"
+import { digestProofPayload, writeProofReceipt } from "./proof-receipt"
 
 export const RELEASE_PROOF_RECEIPT_VERSION = 2 as const
 
@@ -321,14 +320,14 @@ export function createReleaseProofReceipt(
   })
   return releaseProofReceiptSchema.parse({
     ...payload,
-    receiptDigest: digestPayload(payload),
+    receiptDigest: digestProofPayload(payload),
   })
 }
 
 export function verifyReleaseProofReceipt(value: unknown): ReleaseProofReceipt {
   const receipt = releaseProofReceiptSchema.parse(value)
   const { receiptDigest, ...payload } = receipt
-  if (digestPayload(payload) !== receiptDigest) {
+  if (digestProofPayload(payload) !== receiptDigest) {
     throw new TypeError("Release proof receipt digest does not match its evidence")
   }
   return receipt
@@ -338,34 +337,5 @@ export async function writeReleaseProofReceipt(
   path: string,
   receipt: ReleaseProofReceipt,
 ): Promise<void> {
-  const verified = verifyReleaseProofReceipt(receipt)
-  const directory = dirname(path)
-  const temporaryPath = `${path}.${crypto.randomUUID()}.tmp`
-  await mkdir(directory, { recursive: true })
-  try {
-    await Bun.write(temporaryPath, `${JSON.stringify(verified, null, 2)}\n`)
-    await rename(temporaryPath, path)
-  } finally {
-    await rm(temporaryPath, { force: true })
-  }
-}
-
-function digestPayload(payload: unknown): string {
-  const digest = new Bun.CryptoHasher("sha256").update(canonicalJson(payload)).digest("hex")
-  return `sha256:${digest}`
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "number") {
-    return JSON.stringify(value)
-  }
-  if (typeof value === "string") return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
-  if (typeof value !== "object") throw new TypeError("Proof receipt is not JSON serializable")
-
-  const record = value as Readonly<Record<string, unknown>>
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-    .join(",")}}`
+  await writeProofReceipt(path, receipt, verifyReleaseProofReceipt)
 }

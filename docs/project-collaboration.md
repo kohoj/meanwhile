@@ -1,335 +1,348 @@
-# Project collaboration
+# Shared Project definition
 
-This document is the controlling product route for Meanwhile's next milestone.
-It distinguishes the implemented single-owner system from the intended shared
-Project experience and defines the boundaries that must exist before the
-product can claim multi-person collaboration.
+This document is the controlling product and acceptance contract for
+Meanwhile's Shared Project milestone. The Definition Gate is closed: Project
+Watch and ADRs 0001–0005 are selected. The implementation status and remaining
+proof boundary are recorded here rather than hidden behind UI claims.
 
-## Product outcome
+## Why the route is now fixed
 
-People working on the same Project can see work that any Project member has
-delegated to an agent, open one item to read its conversation and durable
-evidence, and add an append-only comment or mention. Observing another member's
-work never grants control over that agent.
+The route was paused until product form, attention semantics, identity,
+authorization, browser authentication, aggregation, and migration were chosen
+together. Those choices are now explicit: Project Watch, stable Principals,
+Owner-contained Projects, two small role axes, delegator-only lifecycle
+authority, opaque read-only browser sessions, polling plus native task events,
+and an additive migration from the exact v0.1.3 schema.
 
-The visible loop is deliberately small:
+## Product north star
+
+> In one shared Project, every member can see work delegated by every other
+> member, understand its current condition at a glance, and open its task
+> detail and conversation without gaining control over somebody else's
+> agent.
+
+The smallest proof is:
 
 ```text
-Alice delegates work
+Alice delegates work through an upstream agent, API, SDK, or CLI
         ↓
-the Project shows one shared, live work item
+Project P shows the work live and attributes it to Alice
         ↓
-Bob opens status, conversation, and evidence
+Bob opens it and reads the prompt, conversation, outcome, and available outputs
         ↓
-Bob comments or mentions Alice without controlling the agent
+Bob cannot issue lifecycle commands against Alice's work
 ```
 
-This is the product hook for Meanwhile's durable control plane. It is not a
-generic task tracker, collaborative IDE, agent console, or new workflow engine.
-Every item on the Project watch is an authoritative `Run` or `AgentSession`,
-not a second task record that can drift from execution truth.
+Comments, mentions, presence, reactions, task assignment, workflow columns,
+agent orchestration, and editing are not part of this acceptance floor. They
+remain later product questions rather than hidden requirements.
 
-## Verified current state
+## Implemented current state
 
-The current source implements the durable execution substrate and a useful
-single-owner Board projection, but not the collaboration outcome above:
+The source now implements:
 
-- authentication resolves one bearer API key to `ownerId` and `apiKeyId`;
-- every API key under an owner currently has the same owner-wide authority;
-- Runs, AgentSessions, Turns, Artifacts, Briefs, Deployments, events, and audit
-  reads are authorized only by `ownerId`;
-- the Board server holds one owner API key and lists that owner's Runs and
-  AgentSessions;
-- task detail can already render durable run/session conversation and evidence;
-- there is no Project, stable person identity, membership, role, immutable
-  delegator identity, project-scoped query, comment, mention, or member-scoped
-  live stream;
-- Brief-based evidence reuse is implemented for Runs and Turns, but remains
-  owner-scoped rather than Project-scoped.
+- API keys bound to stable person/service Principals inside one Owner tenant;
+- Projects, active membership, maintainer/member roles, and member management;
+- immutable Project and delegator bindings on Runs and AgentSessions;
+- Project member reads of work, task conversation, artifacts, Briefs, and
+  deployments, with current membership checked at access time;
+- delegator-only Run/Session lifecycle commands and deployment creation;
+- Principal-scoped Run, Session, and Deployment idempotency;
+- opaque expiring browser sessions that are read-only and revocable;
+- a typed Project namespace in the public client;
+- the selected Project Watch master-detail Board with per-person login;
+- an explicit v0.1.3 offline migration command and unknown-schema refusal;
+- HTTP integration coverage for shared visibility, attribution, denial,
+  membership removal, and browser-session revocation.
 
-Therefore `v0.1.3` proves a single-owner reference watch surface. It does not
-prove that multiple people can safely share one Project, even if its copy names
-teammates or stakeholders.
+The executable collaboration proof now covers the full two-person scenario,
+including non-member isolation, credential rotation, restart, backup, restore,
+and a live Board BFF surface. A diagnostic dirty-tree receipt has passed. The
+remaining release boundary is the same receipt passing `--require-clean` and
+exact-commit verification from one reviewable revision.
 
-## First-principles model
+## Current Board audit
 
-### Owner is the tenant boundary
+The existing product surface establishes useful design material:
 
-`Owner` remains the hard security and storage-isolation boundary. Project
-collaboration happens inside one owner. It must not be implemented through
-cross-owner exceptions, shared owner bearer keys, or routes that accept an
-owner identity from request data.
+- verdict-first hierarchy is calmer and more legible than a generic dashboard;
+- quiet inventory avoids turning execution into a card grid;
+- one item can open directly into durable agent output;
+- the Board is physically isolated from the control-plane package and consumes
+  public client contracts.
 
-### Actor is identity; API key is a credential
+It also exposes assumptions that break in a shared Project:
 
-An API key can be rotated, revoked, or used by automation, so it cannot be the
-durable identity shown beside a delegation or comment. Introduce an owner-scoped
-`Actor` and bind every credential to exactly one Actor. The request context must
-carry all three facts:
+- **“Nothing needs you” is viewer-specific without viewer identity.** The same
+  Project fact may need Alice but only inform Bob.
+- **“Idle means waiting on you” is not always true.** An idle session may simply
+  be ready for another turn; execution state and human attention are different
+  projections.
+- **Quiet inventory hides the collaboration proof.** Collapsing all healthy
+  work makes sense for one anxious delegator, but teammates also need to see
+  who is doing what even when nothing is wrong.
+- **The primary `+ delegate` action changes the product.** The remembered hook is
+  shared visibility across work delegated from many entry points, not
+  necessarily another place to launch agents.
+- **Task detail lacks shared context.** It does not show Project, delegator,
+  workspace identity, trustworthy timing, or a clear information hierarchy.
+
+The existing Board should therefore be treated as a visual prototype of one
+state, not the approved information architecture for the team product.
+
+## Decisions already safe to lock
+
+These are product invariants supported by the original intent and current
+control-plane architecture:
+
+1. **Project is explicit.** Shared visibility is selected by a durable Project
+   relationship, never inferred from repository URL, branch, folder, or agent.
+2. **Execution remains truth.** A visible work item is a projection of a `Run`
+   or `AgentSession`; Meanwhile does not create a second mutable task lifecycle.
+3. **Visibility is broader than control.** Membership may authorize reading
+   another member's work without authorizing cancellation, interruption, input,
+   close, deployment, or secret use.
+4. **Detail is source-backed, not summary prose.** Conversation, status,
+   outputs, and source context remain traceable to durable authoritative
+   records without making `evidence` a separate UI concept.
+5. **Identity survives credential rotation.** A displayed delegator cannot be
+   an API-key ID or key prefix.
+6. **The Board remains a reference client.** Authorization, identity, and
+   lifecycle ownership stay in public control-plane contracts; the Board owns
+   no SQL or hidden execution path.
+7. **The execution stack stays fixed.** Project collaboration must not alter
+   Run, Session, Runtime, Artifact, or Deployment lifecycle ownership.
+
+## Locked architecture decisions
+
+| Concern | Decision | Record |
+| --- | --- | --- |
+| Product home | Project Watch master-detail | experience brief |
+| Identity and tenant | stable Principal; Project contained by Owner | ADR 0001 |
+| Capabilities | member read; maintainer membership; original delegator control | ADR 0002 |
+| Browser authentication | control-plane opaque session in Board HttpOnly cookie; read-only | ADR 0003 |
+| Aggregation | authoritative Project work polling; native task events for detail | ADR 0004 |
+| Schema transition | additive companion tables; exact v0.1.3 offline migration | ADR 0005 |
+
+Comments, mentions, presence, explicit operator grants, and a durable Project
+activity journal remain deferred. They require their own user journey and
+durable contract rather than optional fields in this slice.
+
+## Product-form decision
+
+### A. Project Watch — selected
+
+The home answers two questions in this order:
+
+1. What needs **my** attention?
+2. What work is the **Project** carrying?
+
+The shared work list is always visible and dense. Each row leads with task ask,
+delegator, agent, execution condition, and last trustworthy update. A detail
+sheet or page shows task detail and the ordered conversation. Delegation is absent
+or secondary because tasks may originate from Claude Code, Codex, an IDE, chat,
+the SDK, or the CLI.
+
+This preserves the strongest part of the current Board while correcting its
+single-delegator assumption. The selected desktop composition keeps the shared
+inventory visible beside the opened task detail and conversation.
+
+### B. Project Activity
+
+The home is a chronological stream of delegations, agent transitions,
+completions, and failures. It makes handoffs and recent changes easy to follow,
+but weakens rapid inventory and can make long-running quiet work disappear.
+
+This is a useful secondary view or detail timeline, but a risky primary product
+form for “what is everyone carrying right now?”
+
+### C. Mission Board
+
+The home groups work by condition or person and makes the whole Project visible
+at once. It is familiar and legible at moderate scale, but easily drifts into
+Kanban semantics, manual task movement, assignment, workflow configuration,
+and agent operation that Meanwhile does not own.
+
+This remains a useful rejected comparison rather than the primary surface.
+
+The approved product form is **Project Watch as the primary surface, Activity
+inside task detail, and no Kanban state machine**. The corrected reference image
+is maintained in the [Shared Project experience brief](project-collaboration-experience.md).
+The corresponding ADRs close identity, authorization, browser authentication,
+aggregation, and schema migration for this milestone.
+
+## Selected experience contract
+
+This is the selected product contract implemented by the current vertical slice.
+
+### Project home
+
+- a clear Project identity and member context;
+- a viewer-specific attention verdict only when recipient semantics are true;
+- an always-visible shared inventory, defaulting to everyone rather than “me”;
+- optional person and condition filters that do not hide the default proof;
+- rows showing task ask, delegator, agent, condition, and last durable update;
+- one unambiguous path into detail;
+- no lifecycle controls for another member's work.
+
+### Work detail
+
+- immutable original ask and delegator;
+- current authoritative Run or AgentSession state;
+- durable conversation in human reading order;
+- artifacts and other safe outputs with source context;
+- workspace/revision basis when known;
+- timestamps and recovery/cleanup facts when they affect trust;
+- an explicit distinction between observation and available control.
+
+### Terminology
+
+Product language should use `Project`, `member`, `delegated by`, `agent`,
+`running`, `ready`, `failed`, and `completed`. Internal identity nouns such as
+`Actor` or `Principal` should not leak into the UI.
+
+## Architecture decision frame
+
+The implemented architecture is:
 
 ```text
-ownerId   hard tenant boundary
-actorId   durable person or service identity
-apiKeyId  credential used for this request
+Owner or installation tenant
+        └── Project
+              ├── ProjectMembership ── stable human/service identity
+              └── Run / AgentSession ── immutable project + delegator binding
+                       └── events / artifacts / deployments inherit access
 ```
 
-Audit retains both Actor and credential identity so attribution survives key
-rotation without hiding which credential performed an action.
+This shape preserves a hard tenant boundary and avoids copying mutable Project
+labels onto every derived resource. The stable identity record is `Principal`;
+the UI renders its display name as a person or service, never the internal noun.
 
-An Actor is either a person or a service and has one owner-level role:
-`admin` or `member`. An admin provisions Actors and Projects. Any Actor may
-rotate its own credentials; only an admin may issue or revoke another Actor's
-credentials. Project roles remain independent of owner administration.
-
-### Project is the collaboration boundary
-
-`Project` owns membership and visibility. It does not own compute and it is not
-an execution lifecycle. A personal installation uses the same model with one
-Actor in one Project; there is no separate personal-mode authorization path.
-
-A Project is also not a repository. One Project may delegate work against
-different repositories, bundles, branches, or revisions, and the same
-repository URL may appear in unrelated Projects. Every Run or AgentSession
-continues to snapshot its exact workspace input independently.
-
-### Work retains its existing lifecycle
-
-`Run` and `AgentSession` gain immutable `projectId` and `delegatedByActorId`
-bindings at admission. A Turn records its initiating Actor as well. Project
-membership never decides run/session status and does not add a new task state
-machine. The existing executors remain the only lifecycle owners.
-
-Artifacts, Deployments, Briefs, logs, and event history inherit Project access
-through their authoritative Run or AgentSession relationship. Duplicating a
-mutable project label on every derived resource would create authorization
-drift.
-
-### Comment is collaboration evidence, not agent input
-
-A `Comment` is append-only and binds Project, work kind, work identity, author,
-bounded body, explicit mentioned Actor IDs, and creation time. It belongs to a
-separate collaboration journal. It never mutates a Run/Session event, changes
-execution status, or silently enters the agent's context.
-
-If a human wants a comment to become work, they must explicitly create a new
-Run or Turn. That transition receives its own actor identity, idempotency, audit,
-and execution evidence.
-
-Mentions resolve only to active members of the same Project. Display names are
-presentation; durable identity and notification routing use Actor IDs.
-
-### Project activity is a reference journal
-
-The shared watch needs one resumable Project stream; opening one SSE connection
-per active task is a single-owner prototype, not the final collaboration
-contract. Add a contiguous append-only `ProjectActivity` journal that references
-authoritative Run/Session events, work admission, comments, and membership
-changes. It does not copy full conversations or decide execution state.
-
-When an execution or collaboration transaction changes a Project-visible fact,
-the matching activity reference is committed atomically. The Board consumes the
-Project stream for inventory and attention changes, then reads native RunEvent
-or SessionEvent history when a member opens task detail. This preserves one
-execution truth while giving external consumers bounded, cursor-correct Project
-fan-in.
-
-## Authorization contract
-
-The first complete contract needs only three Project roles:
-
-| Capability | Observer | Delegator | Maintainer |
-| --- | --- | --- | --- |
-| Read Project and members | yes | yes | yes |
-| Read Project work, conversation, and safe evidence | yes | yes | yes |
-| Add comment or mention | yes | yes | yes |
-| Create a Run or AgentSession in the Project | no | yes | yes |
-| Manage Project membership | no | no | yes |
-
-Existing-work commands are a separate ownership rule, not a broad role grant.
-The Actor who delegated a Run or AgentSession may issue its lifecycle commands
-through an authorized control client. Another Project member remains
-read/comment-only for that work, including when they know the resource ID or
-call the raw HTTP API. The Board exposes no existing-work command at all.
-
-Every public resource path must enforce the complete chain:
+The authorization chain must eventually prove:
 
 ```text
-authenticated credential
-  → stable Actor
-  → same Owner
+authenticated credential or browser session
+  → stable identity
+  → tenant boundary
   → active Project membership
-  → resource belongs to Project
-  → requested capability is allowed
+  → authoritative work-to-Project relationship
+  → capability for this operation
 ```
 
-Returning `NOT_FOUND` for an inaccessible resource remains the default to avoid
-existence disclosure.
+Inaccessible resources should continue to return no existence signal. Project
+membership removal must affect new reads and long-lived streams, not merely UI
+navigation.
 
-Member removal must stop new reads immediately and close or re-authorize
-long-lived Project streams; authorization only at SSE connection establishment
-is insufficient.
+## Technology selection
 
-## Security consequences in the current source
+No new framework is justified by the collaboration milestone.
 
-Adding only `projectId` to the Board would be unsafe. The collaboration kernel
-must also close these owner-wide authority gaps:
+### Deployment neutrality
 
-- API-key creation and revocation require Actor/admin authorization;
-- Project members cannot enumerate unrelated Projects inside the same Owner;
-- Artifact, Brief, Deployment, audit, log, event, and existing-bundle access
-  must follow Project membership rather than owner equality alone;
-- idempotency is scoped to the authenticated Actor as well as the owner so two
-  members cannot collide on the same client-generated key;
-- owner-scoped secret references and repository credentials cannot become
-  implicitly usable by every Project member. Non-maintainer secret-bearing
-  admission must fail until an explicit Project/Actor grant exists;
-- Board authentication must preserve the human Actor. A single omnipotent
-  server key shared by every browser cannot provide attribution or isolation.
+Friendly open source does not imply one privileged deployment topology. The
+same shared-Project product and control-plane contracts must remain viable for:
 
-These are control-plane changes, not UI polish. The Board is the final consumer
-of the authorization model, never its substitute.
+- a local single-machine installation;
+- a user-operated server on a private network;
+- a container or VM in private or public cloud infrastructure;
+- an optional managed Meanwhile service.
 
-## Schema transition
+These forms share one API, authorization model, durable evidence model, data
+ownership contract, and Project experience. Packaging, ingress, identity
+integration, storage, and runtime placement may vary behind explicit adapters;
+they must not create separate product semantics. Definition Gate does not
+require every topology to ship simultaneously, but it must reject identity,
+browser-auth, storage, or event contracts that make another legitimate
+topology impossible.
 
-Project collaboration changes the durable identity graph. Requiring every
-operator to discard `v0.1.3` history would contradict Meanwhile's promise that
-intent and evidence survive replaceable infrastructure. Before a collaboration
-release, provide one explicit offline upgrade/export-import path from the known
-published `v0.1.3` schema fingerprint. Startup must continue to reject an
-unknown or mismatched schema; there is no dual read and no opportunistic
-backfill during request handling.
+### Keep
 
-The deterministic legacy mapping is:
+- **Bun + strict TypeScript** for the application runtime and contracts;
+- **Hono + Zod/OpenAPI** for authenticated Project resources;
+- **SQLite WAL** for identity, membership, attribution, and any durable replay
+  contract selected later;
+- **React in the isolated `board/` workspace** for the reference experience;
+- **SWR** for authoritative list/detail snapshots;
+- **Zustand or a smaller local reducer** only for live presentation state;
+- **conditional polling** for the authoritative Project work list and native
+  **SSE/event pagination** for task detail when continuous follow is needed.
 
-- each existing Owner receives one default Actor and one default personal
-  Project;
-- existing API keys bind to that default Actor, preserving their current
-  authority until the operator creates narrower Actors and memberships;
-- existing Runs and AgentSessions bind to the default Project; their derived
-  Artifacts, Briefs, Deployments, events, logs, and audit remain reachable
-  through those authoritative relationships;
-- historical audit retains the original `actorApiKeyId` and records the upgrade
-  provenance rather than fabricating a person who did not yet exist.
+### Do not add yet
 
-The release proof must start from a real `v0.1.3` fixture, upgrade it offline,
-verify every durable reference and byte digest, boot the new schema, and prove
-backup/restore. Development against a fresh data root is not migration proof.
+- WebSocket presence or collaborative cursors;
+- CRDTs, Redis, a message bus, or a workflow engine;
+- Next.js or another server framework;
+- a second task table or UI-owned status model;
+- JWT solely to avoid deciding session ownership;
+- a generalized policy engine before the capability matrix is known.
 
-## Delivery route
+### ADR set
 
-Work proceeds through the following gates in order. A later gate does not begin
-because an earlier API compiles; it begins only after the earlier user outcome
-and its negative authorization cases are proved.
+The decisions are recorded in `docs/decisions/0001` through `0005`. A later
+change to cross-Owner Projects, delegated operator control, browser write
+authority, Project activity persistence, or online migration requires a new
+ADR because each changes a security or lifecycle boundary.
 
-### Gate 0 — route and truth alignment
+## Definition Gate completion
 
-- Keep this document, `AGENTS.md`, README status, Board intent, and the current
-  implementation claims consistent.
-- Describe the existing Board as single-owner until the two-person proof passes.
-- Freeze Fact discovery, ranking, conflict, supersession, and additional Brief
-  expansion. The implemented Brief kernel remains supported but is not the
-  active product milestone.
+The gate closed after all of the following were produced:
 
-### Gate 1 — durable identity and Project membership
+1. one approved product brief naming primary user, trigger, job, and non-goals;
+2. the Alice/Bob journey and failure cases as a screen-by-screen storyboard;
+3. three meaningfully different visual product forms using realistic shared
+   Project data, with one selected direction;
+4. the selected information architecture for Project home and work detail;
+5. an explicit attention semantics table for every Run and Session condition;
+6. a capability matrix covering member, non-member, delegator, and operator;
+7. ADRs for identity/tenant, browser auth, live aggregation, and migration;
+8. an executable two-person acceptance scenario and its negative cases;
+9. alignment of AGENTS, README, architecture, threat model, and Board intent.
 
-- Add Actor, Project, ProjectMembership, and credential-to-Actor binding to the
-  domain, schema, store, HTTP/OpenAPI, SDK, and CLI.
-- Bootstrap a personal Actor and Project through the same final model used by a
-  team.
-- Add the explicit `v0.1.3` offline schema transition described above; never
-  weaken startup fingerprint rejection.
-- Prove key rotation preserves Actor attribution, role enforcement, member
-  removal, owner isolation, restart persistence, and idempotent admission.
+The first schema/API/Board vertical slice is now implemented. The acceptance
+floor below remains stricter than local implementation and must pass before a
+collaboration release claim.
 
-No Run or Session lifecycle behavior changes in this gate.
+The fixed journey, attention hypothesis, mock data, and visual comparison
+contract are maintained in [Shared Project experience brief](project-collaboration-experience.md).
 
-Gate 1 and Gate 2 may be separate development commits, but they are one
-indivisible authorization release. Until Gate 2 closes every derived-resource
-path, non-bootstrap Actor credentials must not receive broad execution-resource
-authority. There is no temporarily shared owner-wide team mode.
+## Eventual product acceptance floor
 
-### Gate 2 — Project-bound delegated work
+The core visibility release will be complete only when one clean revision proves:
 
-- Require immutable `projectId` and delegating Actor identity on new Runs,
-  AgentSessions, and Turns.
-- Add Project-scoped work list/get/event access without duplicating execution
-  state into a second task table.
-- Enforce Project authorization across every derived resource and command,
-  including raw HTTP calls, not just Board routes.
-- Bind Project and Actor identity into idempotency and audit.
-
-This gate is complete only when two Actors in one Project can share visibility
-while a non-member in the same Owner and an Actor in another Owner both receive
-no existence signal.
-
-### Gate 3 — shared Project watch
-
-- Make the Board choose one Project and authenticate each browser as an Actor.
-- Show who delegated each work item and preserve the existing verdict-first
-  triage, live recovery state, and detail conversation/evidence view.
-- Replace owner-wide list/fan-in behavior with a resumable Project-scoped stream
-  backed by the ProjectActivity reference journal, with exact authorization,
-  removal, replay, and bounded-load proof.
-- Authenticate each browser through an Actor-bound, short-lived, HttpOnly,
-  SameSite session or an equivalently narrow server-side mechanism. The public
-  control plane remains the authorization owner; the Board never shares one
-  omnipotent owner credential among users.
-- Keep existing work structurally non-operable from the Board.
-
-The Board remains a reference client over public contracts. No Board-only SQL,
-authorization, or lifecycle path is allowed.
-
-### Gate 4 — append-only collaboration
-
-- Add task comments and explicit mentions as durable Project collaboration
-  evidence with pagination, replay, owner isolation, and restart persistence.
-- Compose comments with execution evidence in task detail without inserting
-  them into RunEvent or SessionEvent.
-- Do not add editing, deletion, reactions, notifications, or an agent-command
-  bridge until the core comment loop proves a real need.
-
-### Gate 5 — two-person product proof and release
-
-One clean revision must prove the complete path using distinct credentials:
-
-1. Alice and Bob are active members of Project P; Carol is not.
-2. Alice delegates a real Run or AgentSession in P.
-3. Bob sees it appear live and sees Alice as the delegator.
-4. Bob opens the durable conversation and authorized artifact evidence.
-5. Bob adds a comment mentioning Alice.
-6. Bob cannot cancel, interrupt, close, send to, deploy, or otherwise control
+1. Alice and Bob are distinct authenticated people in Project P; Carol is not.
+2. Alice delegates a real Run or AgentSession through a supported entry point.
+3. Bob sees it appear in P with Alice's durable attribution.
+4. Bob opens the authoritative conversation and authorized task outputs.
+5. Bob cannot cancel, interrupt, close, send to, deploy, or otherwise control
    Alice's work through Board, SDK, CLI, or raw HTTP.
-7. Carol cannot list, read, stream, comment on, or infer the work.
-8. Key rotation, member removal, control-plane restart, backup, and restore
-   preserve attribution and enforce the current membership state.
+6. Carol cannot list, read, stream, or infer the work.
+7. Credential rotation, member removal, control-plane restart, backup, and
+   restore preserve attribution and enforce current membership.
 
-Only this gate permits the phrases “multi-person Project,” “shared team Board,”
-or “team collaboration shipped.” Unit tests, a Project dropdown, multiple API
-keys under one owner, or two browser windows are not equivalent proof.
+`bun run proof:project-collaboration` executes this complete matrix through the
+public SDK, raw HTTP authorization boundary, production server entry point, and
+Project Watch BFF. It writes a self-verifying receipt whose digest covers the
+revision, identities, Project/work IDs, authorization denials, browser-session
+properties, credential rotation, membership revocation, restart, backup,
+restore, credential-absence scan, and selected design reference. The verifier
+must be run with `--require-clean --commit=<full-sha>` for a release claim.
 
-### Gate 6 — resume shared execution intelligence
-
-After Gate 5, adapt Brief discovery and reuse to Project authorization. A Brief
-inherits the source Run's Project and is not visible or reusable from another
-Project by default. Fact discovery, conflict/supersession, and cross-Project
-sharing remain separate later contracts.
-
-### Gate 7 — open integration contract
-
-Once the first-party Board proves the public Project APIs, external boards,
-IDEs, chat entry points, and governance surfaces can integrate with Meanwhile's
-durable execution and collaboration substrate instead of rebuilding it.
+Comments or mentions may extend this proof later; they cannot be required to
+claim the shared visibility outcome the user actually asked for.
 
 ## Anti-drift rules
 
-- The current active milestone is Gate 1, not Fact discovery or another runtime.
-- A backend primitive advances the roadmap only when it closes the current
-  gate's user-visible outcome and negative cases.
-- Never mark a phase shipped from copy, mock data, a schema, or a visual demo.
+- The active milestone is the clean-revision collaboration release proof. The
+  Definition Gate and first identity/Project/API/Board vertical slice are
+  complete; do not reopen them through local patches unless a failed acceptance
+  case requires a new ADR.
+- Do not let an internal noun decide the product model.
+- Do not treat `idle`, `failed`, or `succeeded` as a personal attention claim
+  without viewer-specific semantics.
+- Do not turn the Board into a task tracker or agent operator to make the demo
+  easier.
+- Do not treat a Project field, multiple API keys, mock data, or two browser
+  windows as multi-person proof.
 - Keep “implemented,” “locally proved,” “remote proved,” and “released” as
   separate claims.
-- When prior memory, README prose, and source disagree, current source plus this
-  dated route determine implementation truth; historical documents remain
-  provenance, not authority.
-- Do not broaden the product into task management, agent operation, ambient
-  memory, or cross-owner sharing to make the collaboration demo easier.
+- Fact discovery and further Brief expansion remain paused; they are neither
+  the current product question nor a substitute for the two-person proof.

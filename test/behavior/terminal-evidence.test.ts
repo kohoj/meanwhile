@@ -50,6 +50,8 @@ import {
 import { MockRuntimeProvider } from "../fixtures/mock-provider"
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000101"
+const PRINCIPAL_ID = "00000000-0000-4000-8000-000000000102"
+const PROJECT_ID = "00000000-0000-4000-8000-000000000103"
 const AGENT_SECRET = "TEST_RUNNER_SECRET"
 const encoder = new TextEncoder()
 
@@ -532,14 +534,32 @@ async function createFixture(input: {
   directories.push(directory)
   const store = new ObservedStore(join(directory, "meanwhile.sqlite"))
   stores.push(store)
-  store.createOwner({ id: OWNER_ID, name: "Terminal evidence owner", createdAt: now() })
+  const createdAt = now()
+  store.createOwner({ id: OWNER_ID, name: "Terminal evidence owner", createdAt })
+  store.createPrincipal({
+    id: PRINCIPAL_ID,
+    ownerId: OWNER_ID,
+    kind: "person",
+    displayName: "Terminal evidence owner",
+    ownerRole: "admin",
+    createdAt,
+  })
+  store.createProject({
+    id: PROJECT_ID,
+    ownerId: OWNER_ID,
+    name: "Terminal evidence",
+    slug: "terminal-evidence",
+    createdAt,
+    createdByPrincipalId: PRINCIPAL_ID,
+  })
   store.createApiKey({
     id: "terminal-evidence-api-key",
     ownerId: OWNER_ID,
+    principalId: PRINCIPAL_ID,
     prefix: "mwk_cccccccccccc",
     hash: `sha256:${"c".repeat(64)}`,
     name: "Terminal evidence test key",
-    createdAt: now(),
+    createdAt,
   })
   const secrets =
     input.secrets ??
@@ -999,6 +1019,8 @@ function runApi(
       requestId: "terminal-evidence-test",
       traceId: null,
       ownerId: OWNER_ID,
+      principalId: PRINCIPAL_ID,
+      ownerRole: "admin",
       apiKeyId: "terminal-evidence-api-key",
     })
     await next()
@@ -1076,6 +1098,8 @@ function future(): string {
 function requestContext(): RequestContext {
   return {
     ownerId: OWNER_ID,
+    principalId: PRINCIPAL_ID,
+    ownerRole: "admin",
     apiKeyId: "terminal-evidence-api-key",
     requestId: crypto.randomUUID(),
     traceId: null,

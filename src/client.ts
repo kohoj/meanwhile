@@ -1,5 +1,6 @@
 import type { z } from "zod"
 import {
+  AddProjectMemberRequestSchema,
   type AgentSession,
   type AgentSessionPage,
   AgentSessionPageSchema,
@@ -24,6 +25,10 @@ import {
   type CreateDeploymentRequest,
   CreateDeploymentRequestSchema,
   CreatedApiKeyResponseSchema,
+  type CreatePrincipalRequest,
+  CreatePrincipalRequestSchema,
+  type CreateProjectRequest,
+  CreateProjectRequestSchema,
   type CreateRunRequest,
   CreateRunRequestSchema,
   type CreateSessionRequest,
@@ -38,6 +43,18 @@ import {
   DeploymentResponseSchema,
   ErrorEnvelopeSchema,
   IdentifierSchema,
+  MeResponseSchema,
+  type Principal,
+  PrincipalPageSchema,
+  PrincipalResponseSchema,
+  type Project,
+  type ProjectMember,
+  ProjectMemberPageSchema,
+  ProjectMemberResponseSchema,
+  ProjectPageSchema,
+  ProjectResponseSchema,
+  type ProjectWorkItem,
+  ProjectWorkPageSchema,
   type ProviderDiagnostics,
   ProviderDiagnosticsSchema,
   ProviderTestRequestSchema,
@@ -88,7 +105,9 @@ export interface ClientResponseEvidence {
 
 export interface MeanwhileOptions {
   readonly baseUrl: string | URL
-  readonly apiKey: string
+  readonly apiKey?: string
+  /** Opaque, short-lived credential intended for a trusted browser BFF. */
+  readonly browserSession?: string
   readonly fetch?: Fetch
   readonly requestTimeoutMs?: number
   readonly wait?: Wait
@@ -206,7 +225,11 @@ export interface AuditClient {
     options?: ListCreatedOptions & {
       readonly resourceType?:
         | "owner"
+        | "principal"
+        | "project"
+        | "project_membership"
         | "api_key"
+        | "browser_session"
         | "run"
         | "session"
         | "turn"
@@ -223,7 +246,7 @@ export interface AuditClient {
 export interface ApiKeysClient {
   create(
     name: string,
-    options?: RequestOptions,
+    options?: RequestOptions & { readonly principalId?: string },
   ): Promise<{ readonly key: ApiKey; readonly secret: string }>
   list(options?: RequestOptions): Promise<readonly ApiKey[]>
   revoke(id: string, options?: RequestOptions): Promise<ApiKey>
@@ -231,6 +254,27 @@ export interface ApiKeysClient {
 
 export interface ProvidersClient {
   test(name: string, options?: RequestOptions): Promise<ProviderDiagnostics>
+}
+
+export interface ProjectsClient {
+  me(options?: RequestOptions): Promise<{
+    readonly principal: Principal
+    readonly projects: readonly Project[]
+  }>
+  list(options?: RequestOptions): Promise<readonly Project[]>
+  get(id: string, options?: RequestOptions): Promise<Project>
+  create(input: CreateProjectRequest, options?: RequestOptions): Promise<Project>
+  members(id: string, options?: RequestOptions): Promise<readonly ProjectMember[]>
+  addMember(
+    id: string,
+    principalId: string,
+    role: "maintainer" | "member",
+    options?: RequestOptions,
+  ): Promise<ProjectMember>
+  removeMember(id: string, principalId: string, options?: RequestOptions): Promise<void>
+  work(id: string, options?: RequestOptions): Promise<readonly ProjectWorkItem[]>
+  principals(options?: RequestOptions): Promise<readonly Principal[]>
+  createPrincipal(input: CreatePrincipalRequest, options?: RequestOptions): Promise<Principal>
 }
 
 interface MeanwhileErrorInput {
@@ -268,6 +312,7 @@ export class Meanwhile {
   readonly providers: ProvidersClient
   readonly audit: AuditClient
   readonly apiKeys: ApiKeysClient
+  readonly projects: ProjectsClient
 
   constructor(options: MeanwhileOptions) {
     const transport = new Transport(options)
@@ -279,6 +324,7 @@ export class Meanwhile {
     this.providers = new Providers(transport)
     this.audit = new Audit(transport)
     this.apiKeys = new ApiKeys(transport)
+    this.projects = new Projects(transport)
   }
 }
 
@@ -777,8 +823,12 @@ class Audit implements AuditClient {
 class ApiKeys implements ApiKeysClient {
   constructor(private readonly transport: Transport) {}
 
-  create(name: string, options: RequestOptions = {}) {
-    const body = parseInput(CreateApiKeyRequestSchema, { name })
+  create(name: string, options: RequestOptions & { readonly principalId?: string } = {}) {
+    const { principalId } = options
+    const body = parseInput(CreateApiKeyRequestSchema, {
+      name,
+      ...(principalId === undefined ? {} : { principalId }),
+    })
     return this.transport.json("api-keys", CreatedApiKeyResponseSchema, {
       method: "POST",
       body,
@@ -805,6 +855,105 @@ class ApiKeys implements ApiKeysClient {
   }
 }
 
+class Projects implements ProjectsClient {
+  constructor(private readonly transport: Transport) {}
+
+  me(options: RequestOptions = {}) {
+    return this.transport.json("me", MeResponseSchema, signalInput(options.signal))
+  }
+
+  async list(options: RequestOptions = {}): Promise<readonly Project[]> {
+    const result = await this.transport.json(
+      "projects",
+      ProjectPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async get(id: string, options: RequestOptions = {}): Promise<Project> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(id))}`,
+      ProjectResponseSchema,
+      signalInput(options.signal),
+    )
+    return result.project
+  }
+
+  async create(input: CreateProjectRequest, options: RequestOptions = {}): Promise<Project> {
+    const result = await this.transport.json("projects", ProjectResponseSchema, {
+      method: "POST",
+      body: parseInput(CreateProjectRequestSchema, input),
+      ...signalInput(options.signal),
+    })
+    return result.project
+  }
+
+  async members(id: string, options: RequestOptions = {}): Promise<readonly ProjectMember[]> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(id))}/members`,
+      ProjectMemberPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async addMember(
+    id: string,
+    principalId: string,
+    role: "maintainer" | "member",
+    options: RequestOptions = {},
+  ): Promise<ProjectMember> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(id))}/members`,
+      ProjectMemberResponseSchema,
+      {
+        method: "POST",
+        body: parseInput(AddProjectMemberRequestSchema, { principalId, role }),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.member
+  }
+
+  async removeMember(id: string, principalId: string, options: RequestOptions = {}): Promise<void> {
+    await this.transport.empty(
+      `projects/${encodeURIComponent(validId(id))}/members/${encodeURIComponent(validId(principalId))}`,
+      { method: "DELETE", ...signalInput(options.signal) },
+    )
+  }
+
+  async work(id: string, options: RequestOptions = {}): Promise<readonly ProjectWorkItem[]> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(id))}/work`,
+      ProjectWorkPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async principals(options: RequestOptions = {}): Promise<readonly Principal[]> {
+    const result = await this.transport.json(
+      "principals",
+      PrincipalPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async createPrincipal(
+    input: CreatePrincipalRequest,
+    options: RequestOptions = {},
+  ): Promise<Principal> {
+    const result = await this.transport.json("principals", PrincipalResponseSchema, {
+      method: "POST",
+      body: parseInput(CreatePrincipalRequestSchema, input),
+      ...signalInput(options.signal),
+    })
+    return result.principal
+  }
+}
+
 class Providers implements ProvidersClient {
   constructor(private readonly transport: Transport) {}
 
@@ -828,7 +977,7 @@ interface TransportRequest {
 
 class Transport {
   readonly baseUrl: URL
-  readonly apiKey: string
+  readonly authorization: string
   readonly fetch: Fetch
   readonly requestTimeoutMs: number
   readonly wait: Wait
@@ -837,12 +986,20 @@ class Transport {
   constructor(options: MeanwhileOptions) {
     if (isBrowser() && options.dangerouslyAllowBrowser !== true) {
       throw invalidArgument(
-        "Browser use is disabled because it exposes the Meanwhile API key; set dangerouslyAllowBrowser only when that exposure is intentional",
+        "Browser use is disabled because it exposes a Meanwhile credential; use a trusted BFF",
       )
     }
-    if (options.apiKey.length === 0) throw invalidArgument("API key must not be empty")
+    const hasApiKey = options.apiKey !== undefined
+    const hasBrowserSession = options.browserSession !== undefined
+    if (hasApiKey === hasBrowserSession) {
+      throw invalidArgument("Provide exactly one API key or browser session")
+    }
+    const credential = options.apiKey ?? options.browserSession
+    if (credential === undefined || credential.length === 0) {
+      throw invalidArgument("Meanwhile credential must not be empty")
+    }
     this.baseUrl = parseBaseUrl(options.baseUrl)
-    this.apiKey = options.apiKey
+    this.authorization = `${hasApiKey ? "Bearer" : "Session"} ${credential}`
     this.fetch = options.fetch ?? globalThis.fetch
     this.requestTimeoutMs = boundedInteger(
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
@@ -881,11 +1038,23 @@ class Transport {
     )
   }
 
+  async empty(path: string, options: TransportRequest = {}): Promise<void> {
+    const response = await this.response(path, options)
+    if (response.status !== 204) {
+      await response.body?.cancel().catch(() => undefined)
+      throw protocolError("Meanwhile returned a non-empty response", {
+        path,
+        status: response.status,
+      })
+    }
+    await response.body?.cancel().catch(() => undefined)
+  }
+
   async response(path: string, options: TransportRequest = {}): Promise<Response> {
     const method = options.method ?? "GET"
     const requestId = crypto.randomUUID()
     const headers = new Headers(options.headers)
-    headers.set("Authorization", `Bearer ${this.apiKey}`)
+    headers.set("Authorization", this.authorization)
     headers.set("X-Request-ID", requestId)
     if (!headers.has("Accept")) headers.set("Accept", "application/json")
     if (options.body !== undefined) headers.set("Content-Type", "application/json")

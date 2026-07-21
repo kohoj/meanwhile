@@ -5,7 +5,7 @@ import {
   asSha256Digest,
   decodeArtifactManifest,
 } from "../artifacts/artifact-store"
-import type { Artifact } from "../domain"
+import type { Artifact, RequestContext } from "../domain"
 import { AppError } from "../errors"
 import type { Store } from "../persistence/store"
 import { relativePath } from "../providers/runtime-provider"
@@ -25,23 +25,27 @@ export interface ArtifactContent {
 /** Owner-scoped read boundary from durable metadata to immutable bytes. */
 export class ArtifactService {
   constructor(
-    private readonly catalog: Pick<Store, "getArtifact">,
+    private readonly catalog: Pick<Store, "getArtifact" | "getArtifactForPrincipal">,
     private readonly blobs: ArtifactStore,
   ) {}
 
-  async get(ownerId: string, artifactId: string): Promise<ArtifactDetail> {
-    const artifact = this.catalog.getArtifact(ownerId, artifactId)
+  async get(scope: string | RequestContext, artifactId: string): Promise<ArtifactDetail> {
+    const artifact =
+      typeof scope === "string"
+        ? this.catalog.getArtifact(scope, artifactId)
+        : this.catalog.getArtifactForPrincipal(scope.ownerId, scope.principalId, artifactId)
     if (artifact === null) throw notFound()
     const manifest = await this.readManifest(artifact)
     return { artifact, entries: manifest.entries }
   }
 
   async read(
-    ownerId: string,
+    scope: string | RequestContext,
     artifactId: string,
     requestedPath?: string,
   ): Promise<ArtifactContent> {
-    const detail = await this.get(ownerId, artifactId)
+    const detail = await this.get(scope, artifactId)
+    const ownerId = typeof scope === "string" ? scope : scope.ownerId
     let entry: ArtifactManifestEntryV1 | undefined
     if (requestedPath === undefined) {
       if (detail.artifact.kind !== "file" || detail.entries.length !== 1) {

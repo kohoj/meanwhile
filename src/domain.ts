@@ -23,6 +23,72 @@ export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
 export type JsonObject = { [key: string]: JsonValue }
 
+export const PRINCIPAL_KINDS = ["person", "service"] as const
+export type PrincipalKind = (typeof PRINCIPAL_KINDS)[number]
+export const OWNER_ROLES = ["admin", "member"] as const
+export type OwnerRole = (typeof OWNER_ROLES)[number]
+export const PROJECT_ROLES = ["maintainer", "member"] as const
+export type ProjectRole = (typeof PROJECT_ROLES)[number]
+
+export interface Principal {
+  readonly id: string
+  readonly ownerId: string
+  readonly kind: PrincipalKind
+  readonly displayName: string
+  readonly ownerRole: OwnerRole
+  readonly createdAt: Timestamp
+  readonly disabledAt: Timestamp | null
+}
+
+export interface PrincipalSummary {
+  readonly id: string
+  readonly kind: PrincipalKind
+  readonly displayName: string
+}
+
+export interface Project {
+  readonly id: string
+  readonly ownerId: string
+  readonly name: string
+  readonly slug: string
+  readonly createdAt: Timestamp
+  readonly archivedAt: Timestamp | null
+}
+
+export interface ProjectMember {
+  readonly projectId: string
+  readonly principal: PrincipalSummary
+  readonly role: ProjectRole
+  readonly joinedAt: Timestamp
+}
+
+export interface WorkAttribution {
+  readonly projectId: string
+  readonly delegatedBy: PrincipalSummary
+}
+
+export interface ProjectWorkItem {
+  readonly kind: "run" | "session"
+  readonly id: string
+  readonly projectId: string
+  readonly delegatedBy: PrincipalSummary
+  readonly title: string
+  readonly agentType: string
+  readonly status: RunStatus | AgentSessionStatus
+  readonly createdAt: Timestamp
+  readonly updatedAt: Timestamp
+}
+
+export interface BrowserSession {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly createdAt: Timestamp
+  readonly expiresAt: Timestamp
+  readonly lastUsedAt: Timestamp | null
+  readonly revokedAt: Timestamp | null
+}
+
 export const AGENT_LAUNCH_SNAPSHOT_VERSION = 1 as const
 export const EXECUTION_PROVENANCE_VERSION = 1 as const
 export const RUN_EVENT_VERSION = 1 as const
@@ -189,6 +255,8 @@ export interface StructuredError {
 export interface Run {
   readonly id: string
   readonly ownerId: string
+  readonly projectId: string
+  readonly delegatedBy: PrincipalSummary
   readonly workspace: WorkspaceSource
   readonly agentType: string
   readonly agentSpec: AgentLaunchSnapshot
@@ -333,6 +401,8 @@ export type RunEvent =
 export interface AgentSession {
   readonly id: string
   readonly ownerId: string
+  readonly projectId: string
+  readonly delegatedBy: PrincipalSummary
   readonly workspace: WorkspaceSource
   readonly agentType: string
   readonly agentSpec: AgentLaunchSnapshot
@@ -536,6 +606,7 @@ export interface Brief {
 export interface ApiKey {
   readonly id: string
   readonly ownerId: string
+  readonly principalId: string
   readonly prefix: string
   readonly name: string
   readonly createdAt: Timestamp
@@ -576,6 +647,10 @@ export interface AuditRecord {
   readonly action: string
   readonly resourceType:
     | "owner"
+    | "principal"
+    | "project"
+    | "project_membership"
+    | "browser_session"
     | "api_key"
     | "run"
     | "session"
@@ -596,7 +671,10 @@ export interface RequestContext {
   readonly requestId: string
   readonly traceId: string | null
   readonly ownerId: string
-  readonly apiKeyId: string
+  readonly principalId: string
+  readonly ownerRole: OwnerRole
+  readonly apiKeyId: string | null
+  readonly browserSessionId?: string
 }
 
 export const isTerminalRunStatus = (status: RunStatus): status is TerminalRunStatus =>

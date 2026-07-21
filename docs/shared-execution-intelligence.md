@@ -41,13 +41,15 @@ A Turn, not an AgentSession, explicitly selects ordered Brief IDs. Turn admissio
 
 The session persists its prepared workspace basis, including the resolved repository commit, so Run and Turn use the same relevance semantics. Existing ACP continuity remains unchanged: a Brief-backed turn can teach the live context, but the durable evidence contract belongs to that turn.
 
-### 4. Project authorization — prerequisite
+### 4. Project authorization — first boundary implemented
 
-The implemented Brief contract is owner-scoped because the current product has
-no stable Actor or Project membership model. Before adding discovery, Briefs
-must inherit the source Run's Project and every list/read/reuse path must enforce
-active Project membership. The controlling sequence and two-person proof live
-in [Project collaboration](project-collaboration.md).
+Stable Principals and Owner-contained Projects now exist. Public Brief create,
+list, get, and reuse authorize through the immutable source Run and current
+Project membership rather than owner equality alone. The current slice does not
+yet define automatic discovery, cross-Project publication, or a Project-level
+intelligence index. Same-member reuse across Projects remains an explicit later
+policy decision rather than an ambient sharing claim. The clean-revision
+two-person proof lives in [Project collaboration](project-collaboration.md).
 
 ### 5. Fact discovery and conflict handling — paused
 
@@ -59,4 +61,4 @@ When multiple facts disagree, Meanwhile should expose the conflict and workspace
 
 Each step must prove the whole ownership path through HTTP/OpenAPI, SDK, CLI or Board where relevant, SQLite restart persistence, owner isolation, idempotency conflict, runner/turn dispatch revalidation, prompt-injection containment, and semantic end-to-end output. Provider compatibility and credentialed live-agent proof remain separate evidence classes.
 
-The current implementation stops at explicit owner-scoped Run and Turn reuse with workspace relevance. Project collaboration is the active milestone. Extraction, ranking, conflicts, and supersession remain paused and must not be described as shipped or next until Project authorization and the two-person product proof exist.
+The current implementation stops at explicit Run and Turn reuse with workspace relevance and Project-member source authorization. Extraction, ranking, conflicts, and supersession remain paused and must not be described as shipped or next until the clean-revision two-person Project proof exists.

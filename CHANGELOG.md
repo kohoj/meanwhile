@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- A self-verifying Shared Project collaboration release proof. It runs
+  Alice/Bob/Carol through the production control-plane and Project Watch entry
+  points, proves same-Project visibility and non-member isolation, rejects
+  cross-member control, rotates credentials, revokes membership, restarts,
+  backs up, restores, scans durable roots for plaintext credentials, and binds
+  the result to the exact Git revision.
+- Project Watch packaging in the production image and Compose topology as a
+  stateless BFF beside the private control plane, enabling one HTTPS Board
+  origin for people in different locations without exposing the API or sharing
+  an owner credential.
+- Stable person/service Principals, Owner-contained Projects, explicit membership, immutable Project/delegator bindings for Runs and AgentSessions, Principal-scoped idempotency, member-authorized derived-resource reads, and delegator-only lifecycle/deployment control across SQLite, HTTP/OpenAPI, and the typed client.
+- Opaque expiring browser sessions with hashed storage, revocation, read-only authorization, and one-time API-key exchange through an HttpOnly SameSite Board cookie. The selected Project Watch reference client now shows shared work attribution and inline task conversation without gaining an agent-control path.
+- An exact-fingerprint, dry-run-first offline migration from the published v0.1.3 schema into one default Principal and Project per existing Owner. Unknown or partially modified schemas fail closed.
 - The first shared-execution-intelligence loop for one-shot runs: `Brief` is an immutable, owner-curated reference to one bounded text or JSON entry in an earlier run artifact. Owners promote evidence and select ordered `briefIds`; admission freezes the exact source run/artifact/path/digest/media type/size into durable intent and idempotency, and runner launch revalidates those bytes before placing delimiter-escaped, untrusted historical evidence ahead of the current task. HTTP/OpenAPI, typed SDK, CLI (`briefs create|list|get`, `run --brief`), SQLite, restart, and local end-to-end paths share one contract. The Board adds the same explicit “keep output → attach prior brief” loop without gaining task-lifecycle mutation.
 - Briefs now expose their credential-free source-workspace basis, and accepted run context freezes it into idempotent intent. After workspace preparation resolves the current checkout, the execution envelope conservatively classifies each historical entry as exact, changed, unresolved, different, or legacy unknown. This makes stale/current-workspace handling explicit without treating provenance as truth certification or adding mutable memory state.
 - Durable Turns now accept ordered Brief IDs through HTTP/OpenAPI, SDK, CLI (`sessions send --brief`), and Board session delegation. Turn admission freezes the same owner-scoped context snapshots in idempotency; AgentSessions persist their resolved repository commit; `turn.start` dispatch revalidates and renders the same workspace-aware envelope. Selection is turn-scoped and never becomes an ambient Session attachment.
@@ -15,8 +28,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
-- Product status and roadmap now distinguish the shipped single-owner Board from the unimplemented multi-person Project experience. Stable Actor identity, Project membership and authorization, delegator attribution, a shared Project watch, and append-only comments are the active milestone; Fact discovery and further Brief expansion are paused until the two-person collaboration proof passes. This is a documentation and sequencing correction, not a claim that collaboration contracts already exist.
-- The single current SQLite schema now persists immutable Brief metadata, accepted context-artifact snapshots on Runs and Turns, and resolved repository commits on AgentSessions. As with every schema fingerprint change before an upgrade contract exists, operators must use a fresh data root. Existing durable data cannot be carried forward until a separate export/import contract exists; Meanwhile never attempts in-place migration.
+- Product status and roadmap now distinguish the published v0.1.3 single-owner Board, the locally implemented Shared Project vertical slice, and the still-open clean-revision collaboration release proof. Project Watch is the selected form; comments, mentions, presence, and agent operation remain outside the visibility acceptance floor. Fact discovery and further Brief expansion remain paused.
+- The single current SQLite schema now persists immutable Brief metadata, accepted context-artifact snapshots on Runs and Turns, resolved repository commits on AgentSessions, and explicit Project collaboration identity. Exact published v0.1.3 roots may use the offline fingerprint-checked Project migration; any other historical or partially modified schema still requires a fresh data root and fails closed rather than receiving an opportunistic in-place migration.
 
 ### Pending release evidence
 

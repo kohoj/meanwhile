@@ -9,7 +9,9 @@ import { createArtifactRoutes } from "./api/artifacts"
 import { createAuditRoutes } from "./api/audit"
 import { controlRequestBodyLimit } from "./api/body"
 import { createBriefRoutes } from "./api/briefs"
+import { createBrowserSessionRoutes } from "./api/browser-sessions"
 import { createDeploymentRoutes } from "./api/deployments"
+import { createProjectRoutes } from "./api/projects"
 import { createProviderRoutes, RegistryProviderDiagnostics } from "./api/providers"
 import { createRunRoutes } from "./api/runs"
 import type { ApiEnv } from "./api/schemas"
@@ -20,6 +22,7 @@ import { WORKSPACE_BUNDLE_LIMITS, WorkspaceBundleStore } from "./artifacts/works
 import {
   apiKeyPrefix,
   authenticateBearer,
+  authenticateBrowserSession,
   hashApiKey,
   LOCAL_BOOTSTRAP_API_KEY_ID,
   LOCAL_BOOTSTRAP_OWNER_ID,
@@ -45,6 +48,7 @@ import { ApiKeyService } from "./services/api-key-service"
 import { ArtifactService } from "./services/artifact-service"
 import { AuditService } from "./services/audit-service"
 import { BriefService } from "./services/brief-service"
+import { BrowserSessionService } from "./services/browser-session-service"
 import { CredentialLeaseReaper } from "./services/credential-lease-reaper"
 import {
   DeploymentDispatcher,
@@ -53,6 +57,7 @@ import {
   StoreDeploymentSourceResolver,
 } from "./services/deployment-executor"
 import { ExecutionContext } from "./services/execution-context"
+import { ProjectService } from "./services/project-service"
 import { RunExecutor } from "./services/run-executor"
 import { RunService } from "./services/run-service"
 import { RuntimeReaper, RuntimeReaperLoop } from "./services/runtime-reaper"
@@ -141,6 +146,8 @@ export const createApplication = async (
     const briefService = new BriefService({ store, executionContext })
     const auditService = new AuditService(store)
     const apiKeyService = new ApiKeyService(store)
+    const browserSessionService = new BrowserSessionService(store)
+    const projectService = new ProjectService(store)
     const workspaceBundles = new WorkspaceBundleStore(store, artifacts, WORKSPACE_BUNDLE_LIMITS)
     const workspacePreparer = new WorkspacePreparer(workspaceBundles)
     const secrets = new EnvironmentSecretResolver({
@@ -330,18 +337,43 @@ export const createApplication = async (
       // or one-time key material. Routes can opt into a stricter explicit
       // policy (artifact bytes do), but authenticated JSON is never cacheable.
       context.header("Cache-Control", "private, no-store")
-      const owner = await authenticateBearer(context.req.header("Authorization"), store)
-      if (owner === null) {
+      const authorization = context.req.header("Authorization")
+      const apiKeyIdentity = await authenticateBearer(authorization, store)
+      const browserIdentity =
+        apiKeyIdentity === null ? await authenticateBrowserSession(authorization, store) : null
+      if (apiKeyIdentity === null && browserIdentity === null) {
         const error = new AppError({ code: "UNAUTHENTICATED", message: "Authentication required" })
         return context.json(errorEnvelope(error, context.get("requestId")), 401)
       }
-      store.touchApiKey(owner.apiKeyId, new Date().toISOString())
-      context.get("requestSpan").setAttributes({ "owner.id": owner.ownerId })
+      if (
+        browserIdentity !== null &&
+        !["GET", "HEAD"].includes(context.req.method) &&
+        !(context.req.method === "DELETE" && context.req.path === "/browser-sessions/current")
+      ) {
+        const error = new AppError({
+          code: "FORBIDDEN",
+          status: 403,
+          message: "Browser sessions are read-only",
+        })
+        return context.json(errorEnvelope(error, context.get("requestId")), 403)
+      }
+      const now = new Date().toISOString()
+      if (apiKeyIdentity !== null) store.touchApiKey(apiKeyIdentity.apiKeyId, now)
+      else
+        store.touchBrowserSession(
+          (browserIdentity as NonNullable<typeof browserIdentity>).browserSessionId,
+          now,
+        )
+      const identity = apiKeyIdentity ?? (browserIdentity as NonNullable<typeof browserIdentity>)
+      context.get("requestSpan").setAttributes({ "owner.id": identity.ownerId })
       context.set("requestContext", {
         requestId: context.get("requestId"),
         traceId: context.get("traceId"),
-        ownerId: owner.ownerId,
-        apiKeyId: owner.apiKeyId,
+        ownerId: identity.ownerId,
+        principalId: identity.principalId,
+        ownerRole: identity.ownerRole,
+        apiKeyId: apiKeyIdentity?.apiKeyId ?? null,
+        ...(browserIdentity === null ? {} : { browserSessionId: browserIdentity.browserSessionId }),
       })
       await next()
     }
@@ -349,6 +381,8 @@ export const createApplication = async (
     controlApi.use("*", authenticate)
     controlApi.route("/", createRunRoutes(runService))
     controlApi.route("/", createSessionRoutes(sessionService))
+    controlApi.route("/", createProjectRoutes(projectService))
+    controlApi.route("/", createBrowserSessionRoutes(browserSessionService))
     controlApi.route("/", createArtifactRoutes(artifactService))
     controlApi.route("/", createBriefRoutes(briefService))
     controlApi.route("/", createAuditRoutes(auditService))

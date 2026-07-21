@@ -25,6 +25,52 @@ CREATE TABLE owners (
         created_at TEXT NOT NULL
       ) STRICT;
 
+CREATE TABLE principals (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK(kind IN ('person','service')),
+        display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 120),
+        owner_role TEXT NOT NULL CHECK(owner_role IN ('admin','member')),
+        created_at TEXT NOT NULL,
+        disabled_at TEXT,
+        UNIQUE(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX principals_owner_idx ON principals(owner_id, created_at, id);
+
+CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+        name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+        slug TEXT NOT NULL CHECK(
+          length(slug) BETWEEN 1 AND 80
+          AND slug NOT GLOB '*[^a-z0-9-]*'
+          AND substr(slug, 1, 1) GLOB '[a-z0-9]'
+          AND substr(slug, -1, 1) GLOB '[a-z0-9]'
+        ),
+        created_at TEXT NOT NULL,
+        archived_at TEXT,
+        UNIQUE(owner_id, id),
+        UNIQUE(owner_id, slug)
+      ) STRICT;
+
+CREATE INDEX projects_owner_idx ON projects(owner_id, created_at, id);
+
+CREATE TABLE project_memberships (
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('maintainer','member')),
+        joined_at TEXT NOT NULL,
+        removed_at TEXT,
+        PRIMARY KEY(project_id, principal_id),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX project_memberships_principal_idx
+        ON project_memberships(owner_id, principal_id, removed_at, project_id);
+
 CREATE TABLE api_keys (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
@@ -46,6 +92,40 @@ CREATE TABLE api_keys (
 CREATE INDEX api_keys_owner_idx ON api_keys(owner_id, created_at);
 
 CREATE INDEX api_keys_prefix_idx ON api_keys(prefix, revoked_at);
+
+CREATE TABLE api_key_principals (
+        api_key_id TEXT PRIMARY KEY REFERENCES api_keys(id) ON DELETE CASCADE,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
+        FOREIGN KEY(owner_id, api_key_id) REFERENCES api_keys(owner_id, id)
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX api_key_principals_principal_idx
+        ON api_key_principals(owner_id, principal_id, api_key_id);
+
+CREATE TABLE browser_sessions (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        prefix TEXT NOT NULL CHECK(
+          length(prefix) = 16 AND substr(prefix, 1, 4) = 'mws_'
+          AND substr(prefix, 5) NOT GLOB '*[^A-Za-z0-9_-]*'
+        ),
+        hash TEXT NOT NULL UNIQUE CHECK(
+          length(hash) = 71 AND substr(hash, 1, 7) = 'sha256:'
+          AND substr(hash, 8) NOT GLOB '*[^0-9a-f]*'
+        ),
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        last_used_at TEXT,
+        revoked_at TEXT,
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
+        UNIQUE(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX browser_sessions_prefix_idx ON browser_sessions(prefix, revoked_at, expires_at);
 
 CREATE TABLE runs (
         id TEXT PRIMARY KEY,
@@ -86,6 +166,22 @@ CREATE INDEX runs_owner_status_idx ON runs(owner_id, status, created_at);
 
 CREATE INDEX runs_status_claim_idx ON runs(status, created_at);
 
+CREATE TABLE run_project_bindings (
+        run_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        delegated_by_principal_id TEXT NOT NULL,
+        delegated_by_name TEXT NOT NULL,
+        delegated_by_kind TEXT NOT NULL CHECK(delegated_by_kind IN ('person','service')),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id),
+        FOREIGN KEY(owner_id, delegated_by_principal_id) REFERENCES principals(owner_id, id)
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX run_project_bindings_project_idx
+        ON run_project_bindings(owner_id, project_id, created_at DESC, run_id);
+
 CREATE TABLE run_status_events (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
@@ -103,11 +199,13 @@ CREATE INDEX run_status_events_owner_run_idx ON run_status_events(owner_id, run_
 
 CREATE TABLE run_idempotency_keys (
         owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
         key TEXT NOT NULL,
         request_hash TEXT NOT NULL,
         run_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        PRIMARY KEY(owner_id, key),
+        PRIMARY KEY(owner_id, principal_id, key),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id)
       ) WITHOUT ROWID, STRICT;
 
@@ -280,11 +378,13 @@ CREATE INDEX deployments_status_idx ON deployments(status, created_at);
 
 CREATE TABLE deployment_idempotency_keys (
         owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
         key TEXT NOT NULL,
         request_hash TEXT NOT NULL,
         deployment_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        PRIMARY KEY(owner_id, key),
+        PRIMARY KEY(owner_id, principal_id, key),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
         FOREIGN KEY(owner_id, deployment_id) REFERENCES deployments(owner_id, id)
       ) WITHOUT ROWID, STRICT;
 
@@ -372,13 +472,31 @@ CREATE INDEX agent_sessions_status_idx ON agent_sessions(status, updated_at);
 CREATE INDEX agent_sessions_status_created_idx
         ON agent_sessions(status, created_at, id);
 
+CREATE TABLE session_project_bindings (
+        session_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        delegated_by_principal_id TEXT NOT NULL,
+        delegated_by_name TEXT NOT NULL,
+        delegated_by_kind TEXT NOT NULL CHECK(delegated_by_kind IN ('person','service')),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id),
+        FOREIGN KEY(owner_id, delegated_by_principal_id) REFERENCES principals(owner_id, id)
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX session_project_bindings_project_idx
+        ON session_project_bindings(owner_id, project_id, created_at DESC, session_id);
+
 CREATE TABLE session_idempotency_keys (
         owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
         key TEXT NOT NULL,
         request_hash TEXT NOT NULL,
         session_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        PRIMARY KEY(owner_id, key),
+        PRIMARY KEY(owner_id, principal_id, key),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id)
       ) WITHOUT ROWID, STRICT;
 

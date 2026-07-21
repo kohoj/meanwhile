@@ -24,6 +24,8 @@ import { MockRuntimeProvider } from "../fixtures/mock-provider"
 
 const directories: string[] = []
 const OWNER_ID = "agent-intent-owner"
+const PRINCIPAL_ID = "agent-intent-principal"
+const PROJECT_ID = "agent-intent-project"
 const BUNDLE_ID = "a".repeat(64)
 
 afterEach(async () => {
@@ -223,6 +225,8 @@ function command() {
 function context() {
   return {
     ownerId: OWNER_ID,
+    principalId: PRINCIPAL_ID,
+    ownerRole: "admin" as const,
     apiKeyId: "agent-intent-api-key",
     requestId: crypto.randomUUID(),
     traceId: null,
@@ -230,14 +234,32 @@ function context() {
 }
 
 function createIdentity(store: Store): void {
-  store.createOwner({ id: OWNER_ID, name: "Agent intent owner", createdAt: now() })
+  const createdAt = now()
+  store.createOwner({ id: OWNER_ID, name: "Agent intent owner", createdAt })
+  store.createPrincipal({
+    id: PRINCIPAL_ID,
+    ownerId: OWNER_ID,
+    kind: "person",
+    displayName: "Agent intent owner",
+    ownerRole: "admin",
+    createdAt,
+  })
+  store.createProject({
+    id: PROJECT_ID,
+    ownerId: OWNER_ID,
+    name: "Agent intent",
+    slug: "agent-intent",
+    createdAt,
+    createdByPrincipalId: PRINCIPAL_ID,
+  })
   store.createApiKey({
     id: "agent-intent-api-key",
     ownerId: OWNER_ID,
+    principalId: PRINCIPAL_ID,
     prefix: "mwk_abcdefghijkl",
     hash: `sha256:${"a".repeat(64)}`,
     name: "Agent intent test",
-    createdAt: now(),
+    createdAt,
   })
 }
 

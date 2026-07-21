@@ -55,12 +55,19 @@ export const createApiKeyRoutes = (
   const routes = createApiRouter()
   routes.openapi(createApiKeyRoute, async (context) => {
     const request = context.get("requestContext")
-    const { name } = context.req.valid("json")
-    return context.json(CreatedApiKeyResponseSchema.parse(await service.create(request, name)), 201)
+    const { name, principalId } = context.req.valid("json")
+    return context.json(
+      CreatedApiKeyResponseSchema.parse(
+        await service.create(request, name, principalId ?? request.principalId),
+      ),
+      201,
+    )
   })
   routes.openapi(listApiKeysRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
-    return context.json(ApiKeyPageSchema.parse({ items: service.list(ownerId) }), 200)
+    return context.json(
+      ApiKeyPageSchema.parse({ items: service.list(context.get("requestContext")) }),
+      200,
+    )
   })
   routes.openapi(revokeApiKeyRoute, (context) => {
     const request = context.get("requestContext")

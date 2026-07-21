@@ -9,7 +9,7 @@ import { AppError, errorEnvelope, normalizeError } from "../../src/errors"
 import { RuntimeProviderRegistry } from "../../src/providers/registry"
 import { RuntimeProviderError } from "../../src/providers/runtime-provider"
 import { DeploymentExecutionError } from "../../src/services/deployment-executor"
-import { createRunHarness, OWNER_A, OWNER_B } from "../harness"
+import { createRunHarness, OWNER_A, OWNER_B, PRINCIPAL_A, PRINCIPAL_B } from "../harness"
 
 test("run HTTP contract covers create, idempotency, isolation, evidence, and SSE resume", async () => {
   const harness = createRunHarness()
@@ -457,6 +457,8 @@ const installTestIdentity = (app: ReturnType<typeof createApiRouter>): void => {
       throw new AppError({ code: "UNAUTHENTICATED", message: "Unauthenticated" })
     context.set("requestContext", {
       ownerId,
+      principalId: ownerId === OWNER_A ? PRINCIPAL_A : PRINCIPAL_B,
+      ownerRole: "admin",
       apiKeyId: "test-api-key",
       requestId: "request-test",
       traceId: "trace-test",

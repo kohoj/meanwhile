@@ -25,11 +25,11 @@ const listAuditRoute = createRoute({
 export const createAuditRoutes = (service: Pick<AuditService, "list">): OpenAPIHono<ApiEnv> => {
   const routes = createApiRouter()
   routes.openapi(listAuditRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const query = context.req.valid("query")
     return context.json(
       AuditPageSchema.parse(
-        service.list(ownerId, {
+        service.list(request, {
           limit: query.limit,
           ...(query.before === undefined ? {} : { before: query.before }),
           ...(query.resourceType === undefined ? {} : { resourceType: query.resourceType }),

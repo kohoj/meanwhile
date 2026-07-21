@@ -1,6 +1,6 @@
 import { createRoute, type OpenAPIHono } from "@hono/zod-openapi"
 import { DeployRegistryError } from "../deployments/registry"
-import type { Deployment } from "../domain"
+import type { Deployment, RequestContext } from "../domain"
 import { AppError } from "../errors"
 import { DeploymentExecutionError } from "../services/deployment-executor"
 import {
@@ -20,6 +20,7 @@ import {
 
 interface CreateDeploymentCommand {
   readonly ownerId: string
+  readonly principalId?: string
   readonly idempotencyKey: string
   readonly runId: string
   readonly source:
@@ -51,12 +52,13 @@ export interface DeploymentApi {
     input: CreateDeploymentCommand,
   ): Promise<{ readonly deployment: Deployment; readonly replayed: boolean }>
   list(
-    ownerId: string,
+    scope: string | RequestContext,
     options: { limit: number; before?: string },
   ): Promise<{ readonly items: readonly Deployment[]; readonly nextCursor: string | null }>
-  get(ownerId: string, deploymentId: string): Promise<Deployment>
+  get(scope: string | RequestContext, deploymentId: string): Promise<Deployment>
   logs(input: {
     ownerId: string
+    principalId?: string
     deploymentId: string
     after?: number
     limit?: number
@@ -134,12 +136,17 @@ export const createDeploymentRoutes = (
 
   routes.openapi(createDeploymentRoute, async (context) => {
     const request = context.get("requestContext")
+    if (request.apiKeyId === null) {
+      throw new AppError({ code: "FORBIDDEN", status: 403, message: "API key required" })
+    }
+    const actorApiKeyId = request.apiKeyId
     const input = context.req.valid("json")
     const headers = context.req.valid("header")
     const source = sourceSelector(input)
     const result = await mapDeploymentErrors(() =>
       service.create({
         ownerId: request.ownerId,
+        principalId: request.principalId,
         idempotencyKey: headers["idempotency-key"],
         runId: input.runId,
         source,
@@ -148,7 +155,7 @@ export const createDeploymentRoutes = (
         secretRefs: input.secretRefs,
         requestId: request.requestId,
         ...(request.traceId === null ? {} : { traceId: request.traceId }),
-        actorApiKeyId: request.apiKeyId,
+        actorApiKeyId,
       }),
     )
     if (!result.replayed) commands.enqueue(result.deployment.id)
@@ -159,10 +166,10 @@ export const createDeploymentRoutes = (
   })
 
   routes.openapi(listDeploymentsRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const query = context.req.valid("query")
     const page = await mapDeploymentErrors(() =>
-      service.list(ownerId, {
+      service.list(request, {
         limit: query.limit,
         ...(query.before === undefined ? {} : { before: query.before }),
       }),
@@ -171,18 +178,23 @@ export const createDeploymentRoutes = (
   })
 
   routes.openapi(getDeploymentRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id } = context.req.valid("param")
-    const deployment = await mapDeploymentErrors(() => service.get(ownerId, id))
+    const deployment = await mapDeploymentErrors(() => service.get(request, id))
     return context.json(DeploymentResponseSchema.parse({ deployment }), 200)
   })
 
   routes.openapi(getDeploymentLogsRoute, async (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id } = context.req.valid("param")
     const query = context.req.valid("query")
     const page = await mapDeploymentErrors(() =>
-      service.logs({ ownerId, deploymentId: id, ...query }),
+      service.logs({
+        ownerId: request.ownerId,
+        principalId: request.principalId,
+        deploymentId: id,
+        ...query,
+      }),
     )
     return context.json(
       DeploymentLogPageSchema.parse({ items: page.items, nextCursor: page.nextCursor }),

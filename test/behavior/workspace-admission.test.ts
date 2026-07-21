@@ -11,7 +11,17 @@ import { Store } from "../../src/persistence/store"
 import { EnvironmentSecretResolver } from "../../src/secrets"
 import { RunService } from "../../src/services/run-service"
 import { permissiveTestAgentIntents, testExecutionProvenance } from "../fixtures/agent-intent"
-import { DeterministicClock, OWNER_A, OWNER_B, runInput, TestRunCommands } from "../harness"
+import {
+  DeterministicClock,
+  OWNER_A,
+  OWNER_B,
+  PRINCIPAL_A,
+  PRINCIPAL_B,
+  PROJECT_A,
+  PROJECT_B,
+  runInput,
+  TestRunCommands,
+} from "../harness"
 
 const roots: string[] = []
 const API_KEY_A = "40000000-0000-4000-8000-00000000000a"
@@ -165,9 +175,42 @@ const createFixture = async () => {
   const createdAt = clock.now().toISOString()
   store.createOwner({ id: OWNER_A, name: "Owner A", createdAt })
   store.createOwner({ id: OWNER_B, name: "Owner B", createdAt })
+  store.createPrincipal({
+    id: PRINCIPAL_A,
+    ownerId: OWNER_A,
+    kind: "person",
+    displayName: "Owner A",
+    ownerRole: "admin",
+    createdAt,
+  })
+  store.createPrincipal({
+    id: PRINCIPAL_B,
+    ownerId: OWNER_B,
+    kind: "person",
+    displayName: "Owner B",
+    ownerRole: "admin",
+    createdAt,
+  })
+  store.createProject({
+    id: PROJECT_A,
+    ownerId: OWNER_A,
+    name: "Project A",
+    slug: "project-a",
+    createdAt,
+    createdByPrincipalId: PRINCIPAL_A,
+  })
+  store.createProject({
+    id: PROJECT_B,
+    ownerId: OWNER_B,
+    name: "Project B",
+    slug: "project-b",
+    createdAt,
+    createdByPrincipalId: PRINCIPAL_B,
+  })
   store.createApiKey({
     id: API_KEY_A,
     ownerId: OWNER_A,
+    principalId: PRINCIPAL_A,
     prefix: "mwk_aaaaaaaaaaaa",
     hash: `sha256:${"a".repeat(64)}`,
     name: "Owner A test key",
@@ -176,6 +219,7 @@ const createFixture = async () => {
   store.createApiKey({
     id: API_KEY_B,
     ownerId: OWNER_B,
+    principalId: PRINCIPAL_B,
     prefix: "mwk_bbbbbbbbbbbb",
     hash: `sha256:${"b".repeat(64)}`,
     name: "Owner B test key",
@@ -246,6 +290,8 @@ const bytes = (value: string): Uint8Array => new TextEncoder().encode(value)
 
 const context = (ownerId: string): RequestContext => ({
   ownerId,
+  principalId: ownerId === OWNER_A ? PRINCIPAL_A : PRINCIPAL_B,
+  ownerRole: "admin",
   apiKeyId: ownerId === OWNER_A ? API_KEY_A : API_KEY_B,
   requestId: `request-${ownerId}`,
   traceId: null,

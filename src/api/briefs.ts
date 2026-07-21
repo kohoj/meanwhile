@@ -70,11 +70,11 @@ export const createBriefRoutes = (service: BriefApi): OpenAPIHono<ApiEnv> => {
   })
 
   routes.openapi(listBriefsRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const query = context.req.valid("query")
     return context.json(
       BriefPageSchema.parse(
-        service.list(ownerId, {
+        service.list(request, {
           limit: query.limit,
           ...(query.before === undefined ? {} : { before: query.before }),
         }),
@@ -84,9 +84,9 @@ export const createBriefRoutes = (service: BriefApi): OpenAPIHono<ApiEnv> => {
   })
 
   routes.openapi(getBriefRoute, (context) => {
-    const { ownerId } = context.get("requestContext")
+    const request = context.get("requestContext")
     const { id } = context.req.valid("param")
-    return context.json(BriefResponseSchema.parse({ brief: service.get(ownerId, id) }), 200)
+    return context.json(BriefResponseSchema.parse({ brief: service.get(request, id) }), 200)
   })
 
   return routes

@@ -53,6 +53,7 @@ export interface RunExecutionProvenance {
 }
 
 export interface CreateRunCommand {
+  readonly projectId?: string
   readonly workspace: WorkspaceSource | UploadedFilesWorkspaceSource
   readonly agentType: string
   readonly prompt: string
@@ -78,9 +79,14 @@ export interface RunServiceOptions {
     | "getIdempotentRun"
     | "getRun"
     | "listRuns"
+    | "listRunsForPrincipal"
     | "listRunLogs"
     | "listRunEvents"
     | "listArtifacts"
+    | "resolveProjectForPrincipal"
+    | "getPrincipal"
+    | "getRunForPrincipal"
+    | "requireRunDelegator"
   >
   readonly commands: RunCommandSink
   readonly workspaceInputs?: WorkspaceInputStore
@@ -151,6 +157,19 @@ export class RunService {
     input: CreateRunCommand,
     idempotencyKey?: string,
   ): Promise<CreateRunResult> {
+    const project = this.#store.resolveProjectForPrincipal(
+      context.ownerId,
+      context.principalId,
+      input.projectId,
+    )
+    const principal = this.#store.getPrincipal(context.ownerId, context.principalId)
+    if (principal === null || principal.disabledAt !== null) {
+      throw new AppError({
+        code: "UNAUTHENTICATED",
+        status: 401,
+        message: "Authentication required",
+      })
+    }
     this.#secretReferences.validate(input.secretRefs, {
       ownerId: context.ownerId,
       purpose: "agent",
@@ -222,7 +241,7 @@ export class RunService {
     const contextArtifacts =
       briefIds.length === 0
         ? []
-        : await (this.#briefs as Pick<BriefService, "resolve">).resolve(context.ownerId, briefIds)
+        : await (this.#briefs as Pick<BriefService, "resolve">).resolve(context, briefIds)
     let preparedWorkspace: PreparedWorkspaceBundle | null = null
     let workspace: WorkspaceSource
     if (input.workspace.type === "files") {
@@ -234,6 +253,12 @@ export class RunService {
     const { briefIds: _requestedBriefs, ...inputWithoutContext } = input
     const normalizedInput = {
       ...inputWithoutContext,
+      projectId: project.id,
+      delegatedBy: {
+        id: principal.id,
+        kind: principal.kind,
+        displayName: principal.displayName,
+      },
       contextArtifacts,
       provider,
       ...agentIntent,
@@ -244,7 +269,12 @@ export class RunService {
 
     const create = async (): Promise<CreateRunResult> => {
       if (idempotencyKey !== undefined && requestHash !== undefined) {
-        const existing = this.#store.getIdempotentRun(context.ownerId, idempotencyKey, requestHash)
+        const existing = this.#store.getIdempotentRun(
+          context.ownerId,
+          context.principalId,
+          idempotencyKey,
+          requestHash,
+        )
         if (existing !== null) return { run: existing, replayed: true }
       }
 
@@ -258,6 +288,12 @@ export class RunService {
       const createInput: CreateRunInput = {
         id: this.#id(),
         ownerId: context.ownerId,
+        projectId: project.id,
+        delegatedBy: {
+          id: principal.id,
+          kind: principal.kind,
+          displayName: principal.displayName,
+        },
         workspace,
         agentType: input.agentType,
         agentSpec: agentIntent.agentSpec,
@@ -292,7 +328,7 @@ export class RunService {
 
     return idempotencyKey === undefined
       ? create()
-      : this.#withIdempotencyGate(context.ownerId, idempotencyKey, create)
+      : this.#withIdempotencyGate(context.ownerId, context.principalId, idempotencyKey, create)
   }
 
   #requireWorkspaceInputs(): WorkspaceInputStore {
@@ -307,10 +343,11 @@ export class RunService {
 
   async #withIdempotencyGate<Result>(
     ownerId: string,
+    principalId: string,
     key: string,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    const scope = JSON.stringify([ownerId, key])
+    const scope = JSON.stringify([ownerId, principalId, key])
     const predecessor = this.#idempotencyTails.get(scope) ?? Promise.resolve()
     let release: () => void = () => undefined
     const claim = new Promise<void>((resolve) => {
@@ -327,16 +364,21 @@ export class RunService {
     }
   }
 
-  async list(ownerId: string, options: { limit: number; before?: string }): Promise<RunPage> {
-    return this.#store.listRuns(ownerId, options)
+  async list(
+    scope: string | RequestContext,
+    options: { limit: number; before?: string },
+  ): Promise<RunPage> {
+    return typeof scope === "string"
+      ? this.#store.listRuns(scope, options)
+      : this.#store.listRunsForPrincipal(scope.ownerId, scope.principalId, options)
   }
 
-  async get(ownerId: string, runId: string): Promise<Run> {
-    return this.#requireRun(ownerId, runId)
+  async get(scope: string | RequestContext, runId: string): Promise<Run> {
+    return this.#requireRunForScope(scope, runId)
   }
 
   async cancel(context: RequestContext, runId: string): Promise<Run> {
-    const run = this.#requireRun(context.ownerId, runId)
+    const run = this.#store.requireRunDelegator(context.ownerId, context.principalId, runId)
     if (run.status === "cancelled") return run
     if (isTerminalRunStatus(run.status)) {
       throw new AppError({
@@ -350,11 +392,11 @@ export class RunService {
   }
 
   async logs(
-    ownerId: string,
+    scope: string | RequestContext,
     runId: string,
     options: { after: number; limit: number },
   ): Promise<RunLogPage> {
-    this.#requireRun(ownerId, runId)
+    const ownerId = this.#requireRunForScope(scope, runId).ownerId
     const items = this.#store.listRunLogs(ownerId, runId, options.after, options.limit)
     return {
       items,
@@ -363,11 +405,11 @@ export class RunService {
   }
 
   async events(
-    ownerId: string,
+    scope: string | RequestContext,
     runId: string,
     options: { after: number; limit: number },
   ): Promise<RunEventPage> {
-    this.#requireRun(ownerId, runId)
+    const ownerId = this.#requireRunForScope(scope, runId).ownerId
     const items = this.#store.listRunEvents(ownerId, runId, options.after, options.limit)
     return {
       items,
@@ -375,8 +417,8 @@ export class RunService {
     }
   }
 
-  async artifacts(ownerId: string, runId: string): Promise<readonly Artifact[]> {
-    this.#requireRun(ownerId, runId)
+  async artifacts(scope: string | RequestContext, runId: string): Promise<readonly Artifact[]> {
+    const ownerId = this.#requireRunForScope(scope, runId).ownerId
     return this.#store.listArtifacts(ownerId, runId)
   }
 
@@ -385,26 +427,27 @@ export class RunService {
    * heartbeat and carries no product-log identity.
    */
   async *followLogs(
-    ownerId: string,
+    scope: string | RequestContext,
     runId: string,
     after: number,
     signal: AbortSignal,
   ): AsyncIterable<RunLogChunk | null> {
-    this.#requireRun(ownerId, runId)
+    const ownerId = this.#requireRunForScope(scope, runId).ownerId
     let cursor = after
     while (!signal.aborted) {
+      const run = this.#requireRunForScope(scope, runId)
       const items = this.#store.listRunLogs(ownerId, runId, cursor, 1_000)
       for (const item of items) {
         cursor = item.sequence
         yield item
       }
 
-      const run = this.#requireRun(ownerId, runId)
       if (isTerminalRunStatus(run.status)) {
         // Discard the pre-terminal log snapshot and read the durable tail once
         // more. `end` is therefore emitted only after a post-terminal read;
         // crash atomicity between status and evidence remains the writer's job.
         for (;;) {
+          this.#requireRunForScope(scope, runId)
           const tail = this.#store.listRunLogs(ownerId, runId, cursor, 1_000)
           for (const item of tail) {
             cursor = item.sequence
@@ -421,23 +464,24 @@ export class RunService {
   }
 
   async *followEvents(
-    ownerId: string,
+    scope: string | RequestContext,
     runId: string,
     after: number,
     signal: AbortSignal,
   ): AsyncIterable<RunEvent | null> {
-    this.#requireRun(ownerId, runId)
+    const ownerId = this.#requireRunForScope(scope, runId).ownerId
     let cursor = after
     while (!signal.aborted) {
+      const run = this.#requireRunForScope(scope, runId)
       const items = this.#store.listRunEvents(ownerId, runId, cursor, 1_000)
       for (const item of items) {
         cursor = item.sequence
         yield item
       }
 
-      const run = this.#requireRun(ownerId, runId)
       if (isTerminalRunStatus(run.status)) {
         for (;;) {
+          this.#requireRunForScope(scope, runId)
           const tail = this.#store.listRunEvents(ownerId, runId, cursor, 1_000)
           for (const item of tail) {
             cursor = item.sequence
@@ -458,6 +502,13 @@ export class RunService {
     if (run === null) {
       throw new AppError({ code: "NOT_FOUND", message: "Run not found" })
     }
+    return run
+  }
+
+  #requireRunForScope(scope: string | RequestContext, runId: string): Run {
+    if (typeof scope === "string") return this.#requireRun(scope, runId)
+    const run = this.#store.getRunForPrincipal(scope.ownerId, scope.principalId, runId)
+    if (run === null) throw new AppError({ code: "NOT_FOUND", message: "Run not found" })
     return run
   }
 }
