@@ -65,6 +65,13 @@ system evidence, not evidence that two real people in different locations used
 one deployed Project Watch. That external acceptance remains the release
 boundary.
 
+The deployed two-Principal proof is the next narrower gate. Against separate
+HTTPS API and Project Watch origins, two persistent member credentials each
+delegate a deterministic Run, observe both Runs, open the other conversation,
+and fail to control the other delegator's work. Its receipt explicitly records
+`externalHumanAcceptance: not_claimed`; replacing humans with credentials or
+browser sessions must never silently upgrade that claim.
+
 ## Current Board experience
 
 The implemented surface now carries the selected decisions into the real
@@ -323,6 +330,11 @@ properties, credential rotation, membership revocation, restart, backup,
 restore, credential-absence scan, and selected design reference. The verifier
 must be run with `--require-clean --commit=<full-sha>` for an automated
 release-candidate claim; external two-person acceptance remains separate.
+
+`bun run proof:deployed-collaboration` then checks the same clean revision
+through deployed HTTPS ingress with two pre-provisioned active members. It adds
+network and packaging evidence without pretending that two credentials are two
+people. Its verifier binds the receipt to the exact clean Git commit.
 
 After that verifier passes, the final human acceptance uses the same revision
 behind HTTPS ingress. Alice and Bob sign in from separate devices or networks

@@ -100,6 +100,10 @@ The final command shows the plaintext key once. Deliver it through a secure
 channel; never share the bootstrap key or reuse one person's key for a team.
 Bob opens Project Watch, exchanges that key for a short-lived read-only browser
 session, and can then see work delegated by every active member of the Project.
+For a member who delegates from another machine, expose the control-plane API
+through a separate operator-owned HTTPS or private-network origin and configure
+that machine's `MEANWHILE_URL`; never route delegation through the Board or
+give a member the bootstrap credential.
 
 Runs and durable sessions select their shared Project explicitly:
 
@@ -111,6 +115,26 @@ meanwhile sessions create --project <project-id> --repo <url> --agent codex
 Omitting `--project` remains convenient only when the caller belongs to exactly
 one active Project. Multi-Project clients should always send the immutable
 Project choice.
+
+A deployed two-Principal smoke test proves that two independently authenticated
+members can delegate through the HTTPS API, see both Runs in Project Watch,
+open each other's conversations, and remain unable to cancel each other's
+work. It deliberately records that external two-human acceptance is not yet
+claimed:
+
+```console
+# Load both personal keys from secret storage, not shell history.
+export MEANWHILE_FIRST_API_KEY
+export MEANWHILE_SECOND_API_KEY
+bun run proof:deployed-collaboration -- \
+  --control-plane-origin=https://api.example.com \
+  --board-origin=https://watch.example.com \
+  --project=<project-id>
+bun run proof:deployed-collaboration:verify -- \
+  .proof/deployed-project-collaboration.json \
+  --require-clean \
+  --commit="$(git rev-parse HEAD)"
+```
 
 To exercise the complete no-account path in one command:
 

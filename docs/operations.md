@@ -103,10 +103,16 @@ Compose also starts Project Watch on host loopback port 7333. The Board process
 holds no API key and no database connection; it exchanges each person's API
 key once with the private control plane and returns an opaque read-only session
 in an HttpOnly SameSite cookie. To serve people in different locations, place a
-host-level HTTPS reverse proxy in front of `127.0.0.1:7333`. Publish only the
-Board origin. Keep 7331 and 7332 private, preserve `X-Forwarded-Proto: https`,
-and do not configure `MEANWHILE_API_KEY` on the Project Watch service in team
-mode.
+host-level HTTPS reverse proxy in front of `127.0.0.1:7333`. Publish the Board
+origin, preserve `X-Forwarded-Proto: https`, and do not configure
+`MEANWHILE_API_KEY` on the Project Watch service in team mode.
+
+Keep 7331 and 7332 private by default. If members must delegate from remote
+machines, expose 7331 through a separate operator-owned HTTPS hostname or a
+private network, never through the Board BFF. Principal-bound keys remain the
+application authorization boundary; ingress authentication, rate-limiting,
+and reachability policy remain deployment adapters. Never expose 7332, and
+never distribute the bootstrap key.
 
 ### Add a Project member
 
@@ -165,6 +171,33 @@ bun run proof:project-collaboration:verify -- \
 The first command may run on a dirty tree for diagnosis, but its receipt records
 `dirty: true`. Only the second command with both clean-revision gates upgrades
 the result to collaboration release evidence.
+
+### Deployed two-Principal proof
+
+After the Board and control-plane API have separate HTTPS origins, run the
+deployed proof with two independently issued member credentials. Load the
+credentials from secret storage into the process environment; do not pass them
+as arguments or write them into the receipt:
+
+```console
+export MEANWHILE_FIRST_API_KEY
+export MEANWHILE_SECOND_API_KEY
+bun run proof:deployed-collaboration -- \
+  --control-plane-origin=https://api.example.com \
+  --board-origin=https://watch.example.com \
+  --project=<project-id>
+bun run proof:deployed-collaboration:verify -- \
+  .proof/deployed-project-collaboration.json \
+  --require-clean \
+  --commit="$(git rev-parse HEAD)"
+```
+
+The proof creates one deterministic Run per Principal, checks reciprocal
+Project and conversation visibility through both the public API and Project
+Watch, rejects cross-delegator cancellation, rejects Board and browser-session
+mutation, logs both sessions out, and writes a digest-bound receipt with no
+credential material. Its proof class is `deployed-two-principal-system`; it is
+not evidence that two people used separate devices or networks.
 
 ## Shutdown and restart
 

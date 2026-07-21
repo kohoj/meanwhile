@@ -267,7 +267,7 @@ The public CLI exposes the existing identity and collaboration contracts rather 
 
 Project Watch is the selected reference client. It polls the authoritative Project work read model and loads native task events on demand; no second task lifecycle or Project event journal exists. The Board owns no SQL, hidden authorization, or agent control. `MEANWHILE_API_KEY` is an explicit local single-user mode; team mode exchanges each person's API key once for a read-only browser session held in an HttpOnly SameSite cookie.
 
-The controlling contract and remaining release boundary are in [`docs/project-collaboration.md`](docs/project-collaboration.md). The clean-revision automated collaboration-system receipt is complete; external two-person use behind deployed HTTPS ingress is not. Comments, mentions, invitations, external IdP login, explicit operator grants, and a durable Project activity stream are deferred. Fact discovery and further Brief expansion remain paused until Shared Project is externally accepted and released.
+The controlling contract and remaining release boundary are in [`docs/project-collaboration.md`](docs/project-collaboration.md). The local clean-revision system proof and the deployed two-Principal HTTPS proof are separate receipts; neither may claim that two real people completed external acceptance. Comments, mentions, invitations, external IdP login, explicit operator grants, and a durable Project activity stream are deferred. Fact discovery and further Brief expansion remain paused until Shared Project is externally accepted and released.
 
 ## 6. Run state machine
 
@@ -766,7 +766,7 @@ Build in dependency order:
 6. Cloudflare bridge and real remote provider.
 7. CLI, doctor, demo, documentation, containers, complete verification.
 
-The existing execution stack has completed that sequence. The Shared Project Definition Gate, schema/API/Board implementation, clean-revision automated system receipt, and container packaging are complete. Forward product work now closes external two-person acceptance in `docs/project-collaboration.md`: one HTTPS Project Watch deployment, separate people and credentials in different locations, same-Project observation, credential rotation, membership removal, and recorded outcomes. Do not broaden into comments, presence, task management, operator grants, or another intelligence layer to avoid that acceptance.
+The existing execution stack has completed that sequence. The Shared Project Definition Gate, schema/API/Board implementation, clean-revision automated system receipt, container packaging, and deployed two-Principal proof contract are complete. Forward product work now closes external two-person acceptance in `docs/project-collaboration.md`: separate HTTPS API and Project Watch ingress where remote delegation is required, separate people and credentials in different locations, same-Project observation, credential rotation, membership removal, and recorded outcomes. Do not broaden into comments, presence, task management, operator grants, or another intelligence layer to avoid that acceptance.
 
 For every change:
 
