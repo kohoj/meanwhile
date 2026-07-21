@@ -262,7 +262,7 @@ The first Shared Project vertical slice is implemented. Bearer API keys bind one
 
 Project Watch is the selected reference client. It polls the authoritative Project work read model and loads native task events on demand; no second task lifecycle or Project event journal exists. The Board owns no SQL, hidden authorization, or agent control. `MEANWHILE_API_KEY` is an explicit local single-user mode; team mode exchanges each person's API key once for a read-only browser session held in an HttpOnly SameSite cookie.
 
-The controlling contract and remaining release-proof boundary are in [`docs/project-collaboration.md`](docs/project-collaboration.md). Comments, mentions, invitations, external IdP login, explicit operator grants, and a durable Project activity stream are deferred. Fact discovery and further Brief expansion remain paused until the clean-revision two-person Project proof passes.
+The controlling contract and remaining release boundary are in [`docs/project-collaboration.md`](docs/project-collaboration.md). The clean-revision automated collaboration-system receipt is complete; external two-person use behind deployed HTTPS ingress is not. Comments, mentions, invitations, external IdP login, explicit operator grants, and a durable Project activity stream are deferred. Fact discovery and further Brief expansion remain paused until Shared Project is externally accepted and released.
 
 ## 6. Run state machine
 
@@ -761,7 +761,7 @@ Build in dependency order:
 6. Cloudflare bridge and real remote provider.
 7. CLI, doctor, demo, documentation, containers, complete verification.
 
-The existing execution stack has completed that sequence, and the Shared Project Definition Gate plus first schema/API/Board vertical slice are complete. Forward product work now closes the clean-revision release proof in `docs/project-collaboration.md`: same-Project two-person visibility, non-member and tenant isolation, credential rotation, membership revocation, deployed Board access, restart, backup, restore, and current visual acceptance. Do not broaden into comments, presence, task management, operator grants, or another intelligence layer to avoid that proof.
+The existing execution stack has completed that sequence. The Shared Project Definition Gate, schema/API/Board implementation, clean-revision automated system receipt, and container packaging are complete. Forward product work now closes external two-person acceptance in `docs/project-collaboration.md`: one HTTPS Project Watch deployment, separate people and credentials in different locations, same-Project observation, credential rotation, membership removal, and recorded outcomes. Do not broaden into comments, presence, task management, operator grants, or another intelligence layer to avoid that acceptance.
 
 For every change:
 
@@ -780,7 +780,7 @@ Honest current limits:
 
 - local execution is not isolation;
 - API keys and browser sessions are first-party credentials rather than external identity-provider login; invitation delivery and federation are not implemented;
-- Project Watch is implemented as a reference client, but the clean-revision deployed two-person, credential-rotation, restart, backup, and restore proof is not yet complete;
+- Project Watch is implemented and the clean-revision automated authorization/restart/backup/restore receipt is complete, but external two-person use of one deployed HTTPS origin is not yet accepted;
 - Project authorization is Owner-contained; cross-Owner Projects, delegated operator grants, comments, mentions, presence, and a durable Project activity stream are not implemented;
 - SQLite supports one active control-plane writer;
 - in-flight recovery is only as strong as provider process identity and replay;
@@ -811,7 +811,7 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 - The local proof is deliberately credential-free and deterministic. Credential-bearing Codex, Claude Code, and Pi proofs run only through the Cloudflare mediation boundary; local execution has no exception path.
 - The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. The image gate proves installation and bootability. Each separate credential-gated acceptance command requires remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup; only its clean current-revision receipt establishes that path as passed.
 - Version `0.1.3` is the current published release baseline. Its earlier Board proves one owner's read/delegate/detail loop; the current branch replaces that product surface with the unreleased Project Watch vertical slice.
-- The branch also contains unreleased Brief reuse across one-shot Runs and turn-scoped Sessions with workspace relevance and dispatch-time byte revalidation. Project-member reads now follow the source Run relationship; Fact discovery, ranking, conflict handling, and broader intelligence work remain paused behind the Shared Project release proof.
-- The active milestone is the clean-revision collaboration release proof in `docs/project-collaboration.md`. Stable Principals, Owner-contained Projects, membership, delegator attribution, Project reads, delegator-only control, opaque read-only browser sessions, exact v0.1.3 migration, and the Project Watch form are implemented locally. A durable Project activity journal is deliberately not part of this slice. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
+- The branch also contains unreleased Brief reuse across one-shot Runs and turn-scoped Sessions with workspace relevance and dispatch-time byte revalidation. Project-member reads now follow the source Run relationship; Fact discovery, ranking, conflict handling, and broader intelligence work remain paused until Shared Project is externally accepted and released.
+- The active milestone is external two-person acceptance and release in `docs/project-collaboration.md`. Stable Principals, Owner-contained Projects, membership, delegator attribution, Project reads, delegator-only control, opaque read-only browser sessions, exact v0.1.3 migration, Project Watch, container packaging, and the clean automated collaboration-system receipt are implemented. A durable Project activity journal is deliberately not part of this slice. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

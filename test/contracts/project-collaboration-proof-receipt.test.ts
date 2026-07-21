@@ -18,11 +18,11 @@ afterEach(async () => {
 })
 
 describe("Project collaboration proof receipt", () => {
-  test("binds the complete two-person acceptance boundary to one digest", () => {
+  test("binds the complete collaboration-system boundary to one digest", () => {
     const receipt = createProjectCollaborationProofReceipt(proofInput())
 
     expect(receipt.schemaVersion).toBe(PROJECT_COLLABORATION_PROOF_RECEIPT_VERSION)
-    expect(receipt.proofClass).toBe("local-deployed-collaboration")
+    expect(receipt.proofClass).toBe("local-collaboration-system")
     expect(receipt.authorization).toMatchObject({
       bobCancelAliceRun: "not_found",
       carolProjectList: "empty",

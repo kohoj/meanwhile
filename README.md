@@ -12,7 +12,7 @@ You hand a task to an AI agent. Then what? You want to know it finished, see wha
 
 Meanwhile is the durable layer under the agent, not another agent. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose.
 
-> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source also implements the first Shared Project vertical slice: stable member identity, Project membership and attribution, visibility without cross-member lifecycle control, opaque read-only browser sessions, typed Project APIs, an offline v0.1.3 migration, and the selected [`Project Watch`](board/PRODUCT.md) reference client. A collaboration release claim still requires the complete clean-revision two-person, restart, backup, and restore proof in [Shared Project definition](docs/project-collaboration.md).
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements the Shared Project release candidate: stable member identity, Project membership and attribution, visibility without cross-member lifecycle control, opaque read-only browser sessions, typed Project APIs, an offline v0.1.3 migration, the selected [`Project Watch`](board/PRODUCT.md), and a clean-revision automated system proof covering authorization, restart, backup, and restore. A release claim still requires the external two-person deployment acceptance in [Shared Project definition](docs/project-collaboration.md); distinct test Principals and cookie sessions are not evidence that two real people used the deployed product.
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -540,7 +540,7 @@ Prompts, process output, credentials, file contents, and raw provider bodies are
 bun run check                       # Biome, types, notices, runner builds, deterministic suite
 bun run demo                        # no-account product path
 bun run proof:release               # semantic round trip, telemetry, restart, backup/restore
-bun run proof:project-collaboration # two people, Project Watch, auth, restart, backup/restore
+bun run proof:project-collaboration # three Principals, Project Watch, auth, restart, backup/restore
 bun run proof:project-collaboration:verify -- .proof/project-collaboration.json --require-clean --commit="$(git rev-parse HEAD)"
 bun run cloudflare:check            # bridge package and protocol contract
 bun run test:live:cloudflare        # explicit real-account lifecycle
@@ -592,12 +592,14 @@ Meanwhile's direction is to be the durable, trustworthy layer *under* agent work
 
 - **Published (`v0.1.3`).** The durable control plane, durable sessions and turns, credential-free local runtime, packaged Cloudflare runtime, and the earlier single-owner Board.
 - **Landed but paused.** Explicit Brief reuse spans one-shot Runs and turn-scoped Sessions with immutable provenance, workspace relevance, Project-member source authorization, idempotency, restart persistence, and dispatch-time byte revalidation. It is a supporting capability, not the active product milestone; Fact discovery and further intelligence expansion are frozen.
-- **Implemented vertical slice — Shared Project Watch.** Project Watch, stable Principals, membership, immutable delegator attribution, Project-scoped reads, delegator-only control, read-only browser sessions, typed Project APIs, and exact-schema migration are in source with local integration coverage.
-- **Now — collaboration release proof.** Close non-member isolation, credential rotation, deployed two-browser use, restart, backup, restore, and visual acceptance on one clean revision before calling Shared Project shipped.
+- **Release candidate — Shared Project Watch.** Project Watch, stable Principals, membership, immutable delegator attribution, Project-scoped reads, delegator-only control, read-only browser sessions, typed Project APIs, exact-schema migration, container packaging, and the clean-revision automated collaboration-system receipt are complete.
+- **Now — external two-person acceptance and release.** Put the candidate behind real HTTPS ingress; have two people in different locations use separate credentials to observe the same Project; exercise member removal and credential rotation; then merge and publish without weakening the exact receipt gate.
 - **Then — Project-scoped execution intelligence.** Bind Brief discovery and reuse to the source Project before adding fact discovery, conflict/supersession, or explicit cross-Project sharing.
 - **Then — an open integration contract.** Let external boards, IDEs, and chat entry points consume the Project and durable execution APIs instead of rebuilding identity, credentials, audit, recovery, and evidence.
 
-Only the *Shipped* line is release evidence. Everything below it is intent, and this document will not describe those items as implemented until their own proofs exist.
+Only the **Published** line is public release evidence. The release-candidate
+line is implemented and automatically proved, but remains unreleased until its
+external acceptance, review, and publication complete. Later lines are intent.
 
 ## Documentation
 

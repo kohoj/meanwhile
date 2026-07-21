@@ -55,11 +55,13 @@ The source now implements:
 - HTTP integration coverage for shared visibility, attribution, denial,
   membership removal, and browser-session revocation.
 
-The executable collaboration proof now covers the full two-person scenario,
-including non-member isolation, credential rotation, restart, backup, restore,
-and a live Board BFF surface. A diagnostic dirty-tree receipt has passed. The
-remaining release boundary is the same receipt passing `--require-clean` and
-exact-commit verification from one reviewable revision.
+The executable collaboration-system proof covers the full technical matrix:
+three distinct Principals, non-member isolation, credential rotation, member
+removal, restart, backup, restore, and a live Board BFF process. It passes from
+one clean revision and exact-commit verification. This is release-candidate
+system evidence, not evidence that two real people in different locations used
+one deployed Project Watch. That external acceptance remains the release
+boundary.
 
 ## Current Board audit
 
@@ -318,23 +320,32 @@ The core visibility release will be complete only when one clean revision proves
 7. Credential rotation, member removal, control-plane restart, backup, and
    restore preserve attribution and enforce current membership.
 
-`bun run proof:project-collaboration` executes this complete matrix through the
+`bun run proof:project-collaboration` executes the technical matrix through the
 public SDK, raw HTTP authorization boundary, production server entry point, and
 Project Watch BFF. It writes a self-verifying receipt whose digest covers the
 revision, identities, Project/work IDs, authorization denials, browser-session
 properties, credential rotation, membership revocation, restart, backup,
 restore, credential-absence scan, and selected design reference. The verifier
-must be run with `--require-clean --commit=<full-sha>` for a release claim.
+must be run with `--require-clean --commit=<full-sha>` for an automated
+release-candidate claim; external two-person acceptance remains separate.
+
+After that verifier passes, the final human acceptance uses the same revision
+behind HTTPS ingress. Alice and Bob sign in from separate devices or networks
+with separately issued credentials, Bob opens Alice's work and conversation,
+and an operator rotates Alice's credential and removes Bob while both clients
+are observed. Record the deployed origin, revision, time window, and outcomes;
+never put credentials or browser-session secrets in the record.
 
 Comments or mentions may extend this proof later; they cannot be required to
 claim the shared visibility outcome the user actually asked for.
 
 ## Anti-drift rules
 
-- The active milestone is the clean-revision collaboration release proof. The
-  Definition Gate and first identity/Project/API/Board vertical slice are
-  complete; do not reopen them through local patches unless a failed acceptance
-  case requires a new ADR.
+- The active milestone is external two-person acceptance and release of the
+  clean collaboration-system candidate. The Definition Gate, implementation,
+  automated clean-revision receipt, and container packaging are complete; do
+  not reopen them through local patches unless external acceptance exposes a
+  contract failure that requires a new ADR.
 - Do not let an internal noun decide the product model.
 - Do not treat `idle`, `failed`, or `succeeded` as a personal attention claim
   without viewer-specific semantics.
@@ -344,5 +355,6 @@ claim the shared visibility outcome the user actually asked for.
   windows as multi-person proof.
 - Keep “implemented,” “locally proved,” “remote proved,” and “released” as
   separate claims.
-- Fact discovery and further Brief expansion remain paused; they are neither
-  the current product question nor a substitute for the two-person proof.
+- Fact discovery and further Brief expansion remain paused until the Shared
+  Project candidate is externally accepted and released; they are neither the
+  current product question nor a substitute for two-person use.

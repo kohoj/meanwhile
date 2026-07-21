@@ -14,7 +14,7 @@ const projectCollaborationProofPayloadSchema = z
   .object({
     schemaVersion: z.literal(PROJECT_COLLABORATION_PROOF_RECEIPT_VERSION),
     proof: z.literal("meanwhile-project-collaboration"),
-    proofClass: z.literal("local-deployed-collaboration"),
+    proofClass: z.literal("local-collaboration-system"),
     status: z.literal("succeeded"),
     startedAt: timestampSchema,
     finishedAt: timestampSchema,
@@ -162,7 +162,7 @@ export function createProjectCollaborationProofReceipt(
   const payload = projectCollaborationProofPayloadSchema.parse({
     schemaVersion: PROJECT_COLLABORATION_PROOF_RECEIPT_VERSION,
     proof: "meanwhile-project-collaboration",
-    proofClass: "local-deployed-collaboration",
+    proofClass: "local-collaboration-system",
     status: "succeeded",
     ...input,
   })
