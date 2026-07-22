@@ -47,7 +47,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Pending release evidence
 
-- The `remote-live-agent` path is not asserted for this revision. A `pi-acp@0.0.31` boundary maps an internal model/RPC `error` to ACP `end_turn`; the semantic proof rejects the resulting empty response and publishes no receipt, so the Pi live-agent path is not accepted until the adapter is corrected and a clean receipt succeeds. Credentialed Codex and Claude Code paths likewise require a clean `remote-live-agent` receipt on the released revision before they are claimed for it.
+- The Cloudflare + Claude Code path now has a clean, self-verifying
+  `remote-live-agent` receipt covering credential mediation and revocation,
+  agent-produced artifact download and deployment, Brief reuse, cross-restart
+  session continuity, cleanup, backup, restore, and private-value absence. The
+  receipt remains per-revision evidence and does not attest the downstream
+  model identity. The Codex path still requires an explicit OpenAI API key;
+  ChatGPT session tokens are intentionally rejected. The `pi-acp@0.0.31` path
+  remains open because an internal model/RPC `error` is mapped to ACP
+  `end_turn`; the semantic proof rejects the resulting empty response.
 
 ## [0.1.3] - 2026-07-18
 
