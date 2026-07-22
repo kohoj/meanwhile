@@ -155,6 +155,9 @@ describe("Cloudflare Sandbox bridge", () => {
     ).text()
     const dockerfile = await Bun.file(new URL("../Dockerfile", import.meta.url)).text()
     const wrangler = await Bun.file(new URL("../wrangler.jsonc", import.meta.url)).text()
+    const wranglerConfig = JSON.parse(wrangler) as {
+      migrations: Array<{ new_sqlite_classes: string[]; tag: string }>
+    }
     const codexWrapper = await Bun.file(new URL("../image/codex-acp", import.meta.url)).text()
     const piAdapterWrapper = await Bun.file(new URL("../image/pi-acp", import.meta.url)).text()
     const piRuntimeWrapper = await Bun.file(new URL("../image/pi-runtime", import.meta.url)).text()
@@ -197,6 +200,10 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(wrangler).toContain('"SANDBOX_INSTANCE_TIMEOUT_MS": "5000"')
     expect(wrangler).toContain('"SANDBOX_PORT_TIMEOUT_MS": "10000"')
     expect(wrangler).toContain('"instance_type": "standard-1"')
+    expect(wranglerConfig.migrations).toEqual([
+      { new_sqlite_classes: ["Sandbox"], tag: "v1" },
+      { new_sqlite_classes: ["RuntimeRegistry"], tag: "v2" },
+    ])
   })
 
   test("uses one SDK-owned deterministic default session for the runtime", async () => {

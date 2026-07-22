@@ -22,7 +22,10 @@
       { "class_name": "RuntimeRegistry", "name": "RuntimeRegistry" }
     ]
   },
-  "migrations": [{ "new_sqlite_classes": ["Sandbox", "RuntimeRegistry"], "tag": "bootstrap" }],
+  "migrations": [
+    { "new_sqlite_classes": ["Sandbox"], "tag": "v1" },
+    { "new_sqlite_classes": ["RuntimeRegistry"], "tag": "v2" }
+  ],
   "observability": {
     "enabled": true
   }

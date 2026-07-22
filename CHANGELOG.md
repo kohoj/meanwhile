@@ -34,6 +34,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- Cloudflare Worker deployment preserves the already-published Durable Object
+  migration chain (`v1` Sandbox, then `v2` RuntimeRegistry). A contract test
+  prevents release configuration from collapsing that immutable history into
+  a fresh bootstrap migration that existing deployments cannot apply.
 - Product status and roadmap now distinguish the published v0.1.3 single-owner Board, the clean-revision Shared Project release candidate, and the still-open external two-person deployment acceptance. Project Watch is the selected form; comments, mentions, presence, and agent operation remain outside the visibility acceptance floor. Fact discovery and further Brief expansion remain paused until this candidate is accepted and released.
 - The single current SQLite schema now persists immutable Brief metadata, accepted context-artifact snapshots on Runs and Turns, resolved repository commits on AgentSessions, and explicit Project collaboration identity. Exact published v0.1.3 roots may use the offline fingerprint-checked Project migration; any other historical or partially modified schema still requires a fresh data root and fails closed rather than receiving an opportunistic in-place migration.
 
