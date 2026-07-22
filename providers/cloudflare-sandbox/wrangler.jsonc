@@ -13,7 +13,8 @@
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile",
-      "instance_type": "standard-1"
+      "instance_type": "standard-1",
+      "name": "meanwhile-cloudflare-runtime"
     }
   ],
   "durable_objects": {

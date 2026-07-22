@@ -156,6 +156,7 @@ describe("Cloudflare Sandbox bridge", () => {
     const dockerfile = await Bun.file(new URL("../Dockerfile", import.meta.url)).text()
     const wrangler = await Bun.file(new URL("../wrangler.jsonc", import.meta.url)).text()
     const wranglerConfig = JSON.parse(wrangler) as {
+      containers: Array<{ class_name: string; name: string }>
       migrations: Array<{ new_sqlite_classes: string[]; tag: string }>
     }
     const codexWrapper = await Bun.file(new URL("../image/codex-acp", import.meta.url)).text()
@@ -200,6 +201,9 @@ describe("Cloudflare Sandbox bridge", () => {
     expect(wrangler).toContain('"SANDBOX_INSTANCE_TIMEOUT_MS": "5000"')
     expect(wrangler).toContain('"SANDBOX_PORT_TIMEOUT_MS": "10000"')
     expect(wrangler).toContain('"instance_type": "standard-1"')
+    expect(wranglerConfig.containers).toMatchObject([
+      { class_name: "Sandbox", name: "meanwhile-cloudflare-runtime" },
+    ])
     expect(wranglerConfig.migrations).toEqual([
       { new_sqlite_classes: ["Sandbox"], tag: "v1" },
       { new_sqlite_classes: ["RuntimeRegistry"], tag: "v2" },
