@@ -1,5 +1,9 @@
 # Meanwhile Board — Product Intent
 
+This surface implements the human-facing laws in the
+[Meanwhile product constitution](../docs/product-constitution.md): shared truth,
+scoped attention, retained authority, and quiet by default.
+
 The design brief for the delegator's Waiting-For board. Every visual and
 interaction decision traces back to this. (Format follows the ui-skills
 `impeccable`/`interface-design` "Intent First" method.)

@@ -1,18 +1,18 @@
 # Meanwhile
 
-**The trusted system for work you delegate to AI agents.**
+**The open custody layer for work you delegate to AI agents.**
 
 [![CI](https://github.com/kohoj/meanwhile/actions/workflows/ci.yml/badge.svg)](https://github.com/kohoj/meanwhile/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun_1.3.13-black)](https://bun.sh/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> Agents and machines are replaceable. Intent and evidence are not.
+> Hand the work off without handing away its truth, responsibility, or control.
 
 You hand a task to an AI agent. Then what? You want to know it finished, see what it did, trust it didn't leak a secret or lose your work — without babysitting a terminal. That gap between *delegating* work and *trusting* the result is what Meanwhile closes.
 
-Meanwhile is the durable layer under the agent, not another agent. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose.
+Meanwhile is the durable layer under the agent, not another agent. It lets a person hand work to AI and safely look away. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose. The governing decision filter is the [product constitution](docs/product-constitution.md).
 
-> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements the Shared Project release candidate: stable member identity, Project membership and attribution, visibility without cross-member lifecycle control, opaque read-only browser sessions, typed Project APIs, an offline v0.1.3 migration, the selected [`Project Watch`](board/PRODUCT.md), and a clean-revision automated system proof covering authorization, restart, backup, and restore. A release claim still requires the external two-person deployment acceptance in [Shared Project definition](docs/project-collaboration.md); distinct test Principals and cookie sessions are not evidence that two real people used the deployed product.
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements the Shared Project release candidate: stable member identity, Project membership and attribution, visibility without cross-member lifecycle control, opaque read-only browser sessions, typed Project APIs, an offline v0.1.3 migration, the selected [`Project Watch`](board/PRODUCT.md), and a clean-revision automated system proof covering authorization, restart, backup, and restore. A release claim still requires the [external two-person acceptance](docs/external-collaboration-acceptance.md); distinct test Principals and cookie sessions are not evidence that two real people used the deployed product.
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -660,6 +660,8 @@ external acceptance, review, and publication complete. Later lines are intent.
 - [Architecture](docs/architecture.md) — control path, authority, races, recovery, and extension rules
 - [Shared Project definition](docs/project-collaboration.md) — selected product, locked decisions, implemented boundary, and release acceptance floor
 - [Shared Project experience](docs/project-collaboration-experience.md) — Alice/Bob storyboard, attention semantics, realistic mock data, and visual comparison contract
+- [Product constitution](docs/product-constitution.md) — product soul, primary object, laws, and active decision gate
+- [External collaboration acceptance](docs/external-collaboration-acceptance.md) — real two-person journey, independent attestations, and exact release claim boundary
 - [Provider contract](docs/provider-contract.md) — implement and prove a runtime adapter
 - [Operations](docs/operations.md) — configuration, backup, recovery, telemetry, and Cloudflare operation
 - [Threat model](docs/threat-model.md) — trust boundaries and residual risks

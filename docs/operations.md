@@ -199,6 +199,36 @@ mutation, logs both sessions out, and writes a digest-bound receipt with no
 credential material. Its proof class is `deployed-two-principal-system`; it is
 not evidence that two people used separate devices or networks.
 
+### External two-person acceptance
+
+The human release gate begins only after the deployed proof verifies against a
+clean full SHA. Two different people then complete the Project Watch journey on
+separate devices or networks and generate independent participant attestations.
+The operator combines those attestations with the deployed receipt:
+
+```console
+bun run acceptance:external-collaboration:participant -- \
+  participant-input.json \
+  --output=participant-attestation.json
+
+bun run acceptance:external-collaboration -- \
+  --system-receipt=.proof/deployed-project-collaboration.json \
+  --first-attestation=first-attestation.json \
+  --second-attestation=second-attestation.json \
+  --output=.proof/external-project-collaboration-acceptance.json
+
+bun run acceptance:external-collaboration:verify -- \
+  .proof/external-project-collaboration-acceptance.json \
+  --system-receipt=.proof/deployed-project-collaboration.json \
+  --commit="$(git rev-parse HEAD)"
+```
+
+The resulting class is `external-two-person-attested`. Its digest prevents
+later mutation and its system-receipt link binds the deployment, Project, and
+revision. It explicitly records that human identity was not machine-verified.
+Use the exact journey and credential-free input schema in
+[External collaboration acceptance](external-collaboration-acceptance.md).
+
 ## Shutdown and restart
 
 On a normal shutdown the Bun HTTP server stops first, then the control-plane supervisors stop, the separate preview listener closes, telemetry flushes and shuts down while its durable gauges can still read SQLite, SQLite closes, and the data-root lease releases last. Each supervisor owns the safe termination or handoff of work it has already claimed; shutdown does not reinterpret an unfinished run as an agent failure.

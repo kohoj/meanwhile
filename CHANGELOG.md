@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- A concise product constitution that makes safe absence, delegated work,
+  shared truth, scoped attention, retained authority, and deployment-neutral
+  openness the decision filter for future changes. The external Shared Project
+  gate now has independent participant attestations and a digest-bound
+  `external-two-person-attested` receipt linked to the clean deployed-system
+  proof, without claiming that software verified human identity.
 - A self-verifying Shared Project collaboration release proof. It runs
   Alice/Bob/Carol through the production control-plane and Project Watch entry
   points, proves same-Project visibility and non-member isolation, rejects

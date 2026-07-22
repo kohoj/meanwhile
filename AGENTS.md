@@ -8,6 +8,13 @@ Open-source friendliness means deployment neutrality, not a self-host-only produ
 
 ## 1. Product
 
+The concise product decision filter is [`docs/product-constitution.md`](docs/product-constitution.md).
+Meanwhile lets people hand work to AI and safely look away. Its primary product
+object is delegated work: a durable promise that keeps shared truth, scoped
+attention, and the correct control boundary while agents and runtimes remain
+replaceable. The human promise is: hand the work off without handing away its
+truth, responsibility, or control.
+
 Meanwhile is the open control plane for running any coding agent in any isolated runtime.
 
 > Bring your agent. Bring your sandbox. Meanwhile owns the run.
@@ -28,7 +35,7 @@ meanwhile api-keys create --name "Bob laptop" --principal <principal-id>
 
 The original challenge is the acceptance floor. The product bar is that a failed remote run can be explained, cancelled, recovered, or cleaned up without SSH access.
 
-The active product outcome is shared Project visibility: people in one Project can see work that any member delegated and open its task detail and conversation without gaining control of another member's agent. Do not introduce `evidence` as a separate collaboration UI concept; the underlying logs, events, artifacts, and audit records remain system facts exposed through task detail where useful. The selected product form is Project Watch. The implementation uses stable Principals, Owner-contained Projects, explicit membership, immutable Project/delegator bindings, delegator-only lifecycle control, Principal-scoped idempotency, revocable read-only browser sessions, and authoritative Project polling. Keep [`docs/project-collaboration.md`](docs/project-collaboration.md), the ADRs, implementation, tests, and Board aligned.
+The active product outcome is shared Project visibility: people in one Project can see work that any member delegated and open its task detail and conversation without gaining control of another member's agent. Do not introduce `evidence` as a separate collaboration UI concept; the underlying logs, events, artifacts, and audit records remain system facts exposed through task detail where useful. The selected product form is Project Watch. The implementation uses stable Principals, Owner-contained Projects, explicit membership, immutable Project/delegator bindings, delegator-only lifecycle control, Principal-scoped idempotency, revocable read-only browser sessions, and authoritative Project polling. Keep [`docs/product-constitution.md`](docs/product-constitution.md), [`docs/project-collaboration.md`](docs/project-collaboration.md), the ADRs, implementation, tests, and Board aligned.
 
 Meanwhile is not a generic shell API, agent/model provider, workflow engine, provider-specific wrapper, secrets manager, CI system, IDE, or dashboard. Do not add Redis, Kafka, a distributed queue, DAG engine, DI container, ORM, MCP facade, second remote provider, or UI merely to look complete.
 

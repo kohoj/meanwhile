@@ -336,12 +336,16 @@ through deployed HTTPS ingress with two pre-provisioned active members. It adds
 network and packaging evidence without pretending that two credentials are two
 people. Its verifier binds the receipt to the exact clean Git commit.
 
-After that verifier passes, the final human acceptance uses the same revision
-behind HTTPS ingress. Alice and Bob sign in from separate devices or networks
-with separately issued credentials, Bob opens Alice's work and conversation,
-and an operator rotates Alice's credential and removes Bob while both clients
-are observed. Record the deployed origin, revision, time window, and outcomes;
-never put credentials or browser-session secrets in the record.
+After that verifier passes, the final human acceptance uses the same clean
+revision behind HTTPS ingress. Alice and Bob sign in from separate devices or
+networks with separately issued credentials, each delegates through a
+credentialed live agent, each opens the other's work and conversation, and one
+troubled item proves that personal attention belongs only to its delegator.
+Each participant produces an independent digest-bound attestation; the operator
+combines them with the deployed-system receipt. This permits a precise
+participant-attested product claim without pretending software verified human
+identity. The complete journey, commands, schemas, and claim boundary are in
+[External two-person collaboration acceptance](external-collaboration-acceptance.md).
 
 Comments or mentions may extend this proof later; they cannot be required to
 claim the shared visibility outcome the user actually asked for.
@@ -362,6 +366,9 @@ claim the shared visibility outcome the user actually asked for.
   windows as multi-person proof.
 - Keep “implemented,” “locally proved,” “remote proved,” and “released” as
   separate claims.
+- Keep automated system proof, participant-attested human acceptance, and
+  machine-verified identity as three different claims. The last is not part of
+  the current product contract.
 - Fact discovery and further Brief expansion remain paused until the Shared
   Project candidate is externally accepted and released; they are neither the
   current product question nor a substitute for two-person use.
