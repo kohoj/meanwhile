@@ -8,11 +8,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
-- A pure run-event timeline projection for provisioning, running, and total elapsed duration.
+- A concise product constitution that makes safe absence, delegated work,
+  shared truth, scoped attention, retained authority, and deployment-neutral
+  openness the decision filter for future changes. The external Shared Project
+  gate now has independent participant attestations and a digest-bound
+  `external-two-person-attested` receipt linked to the clean deployed-system
+  proof, without claiming that software verified human identity.
+- A self-verifying Shared Project collaboration release proof. It runs
+  Alice/Bob/Carol through the production control-plane and Project Watch entry
+  points, proves same-Project visibility and non-member isolation, rejects
+  cross-member control, rotates credentials, revokes membership, restarts,
+  backs up, restores, scans durable roots for plaintext credentials, and binds
+  the result to the exact Git revision.
+- Project Watch packaging in the production image and Compose topology as a
+  stateless BFF beside the private control plane, enabling one HTTPS Board
+  origin for people in different locations without exposing the API or sharing
+  an owner credential.
+- Stable person/service Principals, Owner-contained Projects, explicit membership, immutable Project/delegator bindings for Runs and AgentSessions, Principal-scoped idempotency, member-authorized derived-resource reads, and delegator-only lifecycle/deployment control across SQLite, HTTP/OpenAPI, and the typed client.
+- Opaque expiring browser sessions with hashed storage, revocation, read-only authorization, and one-time API-key exchange through an HttpOnly SameSite Board cookie. The selected Project Watch reference client now shows shared work attribution and inline task conversation without gaining an agent-control path.
+- An exact-fingerprint, dry-run-first offline migration from the published v0.1.3 schema into one default Principal and Project per existing Owner. Unknown or partially modified schemas fail closed.
+- The first shared-execution-intelligence loop for one-shot runs: `Brief` is an immutable, owner-curated reference to one bounded text or JSON entry in an earlier run artifact. Owners promote evidence and select ordered `briefIds`; admission freezes the exact source run/artifact/path/digest/media type/size into durable intent and idempotency, and runner launch revalidates those bytes before placing delimiter-escaped, untrusted historical evidence ahead of the current task. HTTP/OpenAPI, typed SDK, CLI (`briefs create|list|get`, `run --brief`), SQLite, restart, and local end-to-end paths share one contract. The Board adds the same explicit “keep output → attach prior brief” loop without gaining task-lifecycle mutation.
+- Briefs now expose their credential-free source-workspace basis, and accepted run context freezes it into idempotent intent. After workspace preparation resolves the current checkout, the execution envelope conservatively classifies each historical entry as exact, changed, unresolved, different, or legacy unknown. This makes stale/current-workspace handling explicit without treating provenance as truth certification or adding mutable memory state.
+- Durable Turns now accept ordered Brief IDs through HTTP/OpenAPI, SDK, CLI (`sessions send --brief`), and Board session delegation. Turn admission freezes the same owner-scoped context snapshots in idempotency; AgentSessions persist their resolved repository commit; `turn.start` dispatch revalidates and renders the same workspace-aware envelope. Selection is turn-scoped and never becomes an ambient Session attachment.
+- Release-proof receipt v2 now makes that loop release evidence: it promotes the source artifact, executes and semantically verifies a separate Brief-backed run, proves its frozen context and runner-time revalidation, cleanup, credential revocation when brokered, restart persistence, backup, and restore. The verifier continues to validate already-issued v1 receipts.
+
+### Changed
+
+- Cloudflare Worker deployment preserves the already-published Durable Object
+  migration chain (`v1` Sandbox, then `v2` RuntimeRegistry). A contract test
+  prevents release configuration from collapsing that immutable history into
+  a fresh bootstrap migration that existing deployments cannot apply.
+- The Cloudflare runtime container now has an explicit account-unique
+  application name. Deployment no longer relies on Wrangler's derived name,
+  which can collide with an older application bound to another Durable Object
+  namespace in the same account.
+- Product status and roadmap now distinguish the published v0.1.3 single-owner Board, the clean-revision Shared Project release candidate, and the still-open external two-person deployment acceptance. Project Watch is the selected form; comments, mentions, presence, and agent operation remain outside the visibility acceptance floor. Fact discovery and further Brief expansion remain paused until this candidate is accepted and released.
+- The single current SQLite schema now persists immutable Brief metadata, accepted context-artifact snapshots on Runs and Turns, resolved repository commits on AgentSessions, and explicit Project collaboration identity. Exact published v0.1.3 roots may use the offline fingerprint-checked Project migration; any other historical or partially modified schema still requires a fresh data root and fails closed rather than receiving an opportunistic in-place migration.
 
 ### Pending release evidence
 
-- The `remote-live-agent` path is not asserted for this revision. A `pi-acp@0.0.31` boundary maps an internal model/RPC `error` to ACP `end_turn`; the semantic proof rejects the resulting empty response and publishes no receipt, so the Pi live-agent path is not accepted until the adapter is corrected and a clean receipt succeeds. Credentialed Codex and Claude Code paths likewise require a clean `remote-live-agent` receipt on the released revision before they are claimed for it.
+- The Cloudflare + Claude Code path now has a clean, self-verifying
+  `remote-live-agent` receipt covering credential mediation and revocation,
+  agent-produced artifact download and deployment, Brief reuse, cross-restart
+  session continuity, cleanup, backup, restore, and private-value absence. The
+  receipt remains per-revision evidence and does not attest the downstream
+  model identity. The Codex path still requires an explicit OpenAI API key;
+  ChatGPT session tokens are intentionally rejected. The `pi-acp@0.0.31` path
+  remains open because an internal model/RPC `error` is mapped to ACP
+  `end_turn`; the semantic proof rejects the resulting empty response.
 
 ## [0.1.3] - 2026-07-18
 
