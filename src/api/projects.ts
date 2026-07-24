@@ -17,6 +17,8 @@ import {
   ProjectMemberResponseSchema,
   ProjectMemberSchema,
   ProjectPageSchema,
+  ProjectParticipantPageSchema,
+  ProjectParticipantSchema,
   ProjectResponseSchema,
   ProjectSchema,
   ProjectWorkItemSchema,
@@ -102,6 +104,18 @@ const listMembersRoute = createRoute({
   tags: ["Projects"],
   request: { params: ProjectParamSchema },
   responses: { 200: jsonResponse(ProjectMemberPageSchema, "Project members"), ...errorResponses },
+})
+
+const listParticipantsRoute = createRoute({
+  method: "get",
+  path: "/projects/{projectId}/participants",
+  operationId: "listProjectParticipants",
+  tags: ["Projects"],
+  request: { params: ProjectParamSchema },
+  responses: {
+    200: jsonResponse(ProjectParticipantPageSchema, "Current Project participants"),
+    ...errorResponses,
+  },
 })
 
 const addMemberRoute = createRoute({
@@ -199,6 +213,16 @@ export const createProjectRoutes = (service: ProjectService): OpenAPIHono<ApiEnv
         items: service
           .members(context.get("requestContext"), context.req.valid("param").projectId)
           .map((item) => ProjectMemberSchema.parse(item)),
+      },
+      200,
+    ),
+  )
+  routes.openapi(listParticipantsRoute, (context) =>
+    context.json(
+      {
+        items: service
+          .participants(context.get("requestContext"), context.req.valid("param").projectId)
+          .map((item) => ProjectParticipantSchema.parse(item)),
       },
       200,
     ),

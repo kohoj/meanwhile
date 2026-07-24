@@ -71,6 +71,22 @@ CREATE TABLE project_memberships (
 CREATE INDEX project_memberships_principal_idx
         ON project_memberships(owner_id, principal_id, removed_at, project_id);
 
+CREATE TABLE presence_leases (
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        client_id TEXT NOT NULL CHECK(length(client_id) BETWEEN 1 AND 128),
+        connected_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY(owner_id, project_id, principal_id, client_id),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX presence_leases_project_expiry_idx
+        ON presence_leases(owner_id, project_id, expires_at, principal_id, client_id);
+
 CREATE TABLE api_keys (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
@@ -126,6 +142,170 @@ CREATE TABLE browser_sessions (
       ) STRICT;
 
 CREATE INDEX browser_sessions_prefix_idx ON browser_sessions(prefix, revoked_at, expires_at);
+
+CREATE TABLE principal_invitations (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        prefix TEXT NOT NULL UNIQUE CHECK(
+          length(prefix) = 16 AND substr(prefix, 1, 4) = 'mwi_'
+          AND substr(prefix, 5) NOT GLOB '*[^A-Za-z0-9_-]*'
+        ),
+        hash TEXT NOT NULL UNIQUE CHECK(
+          length(hash) = 71 AND substr(hash, 1, 7) = 'sha256:'
+          AND substr(hash, 8) NOT GLOB '*[^0-9a-f]*'
+        ),
+        created_by_principal_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        redeemed_at TEXT,
+        revoked_at TEXT,
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
+        FOREIGN KEY(owner_id, created_by_principal_id) REFERENCES principals(owner_id, id),
+        UNIQUE(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX principal_invitations_prefix_idx
+        ON principal_invitations(prefix, revoked_at, redeemed_at, expires_at);
+
+CREATE INDEX principal_invitations_principal_idx
+        ON principal_invitations(owner_id, principal_id, created_at, id);
+
+CREATE TABLE external_identities (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK(provider IN ('github','google')),
+        subject_id TEXT NOT NULL CHECK(length(subject_id) BETWEEN 1 AND 255),
+        login TEXT CHECK(login IS NULL OR length(login) BETWEEN 1 AND 255),
+        display_name TEXT CHECK(display_name IS NULL OR length(display_name) BETWEEN 1 AND 255),
+        avatar_url TEXT CHECK(avatar_url IS NULL OR length(avatar_url) BETWEEN 1 AND 2048),
+        created_at TEXT NOT NULL,
+        last_verified_at TEXT NOT NULL,
+        revoked_at TEXT,
+        UNIQUE(owner_id, id),
+        UNIQUE(owner_id, provider, subject_id),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX external_identities_principal_idx
+        ON external_identities(owner_id, principal_id, revoked_at, provider, id);
+
+CREATE TABLE identity_credentials (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        external_identity_id TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK(provider = 'github'),
+        sealed_payload TEXT NOT NULL CHECK(length(sealed_payload) BETWEEN 1 AND 16384),
+        key_version TEXT NOT NULL CHECK(length(key_version) BETWEEN 1 AND 64),
+        access_expires_at TEXT NOT NULL,
+        refresh_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revoked_at TEXT,
+        UNIQUE(owner_id, id),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
+        FOREIGN KEY(owner_id, external_identity_id)
+          REFERENCES external_identities(owner_id, id)
+      ) STRICT;
+
+CREATE UNIQUE INDEX identity_credentials_active_identity_idx
+        ON identity_credentials(owner_id, external_identity_id)
+        WHERE revoked_at IS NULL;
+
+CREATE TABLE external_project_grants (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        external_identity_id TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK(provider = 'github'),
+        account_id TEXT NOT NULL CHECK(length(account_id) BETWEEN 1 AND 255),
+        account_name TEXT NOT NULL CHECK(length(account_name) BETWEEN 1 AND 255),
+        installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 255),
+        repository_id TEXT NOT NULL CHECK(length(repository_id) BETWEEN 1 AND 255),
+        repository_name TEXT NOT NULL CHECK(length(repository_name) BETWEEN 1 AND 255),
+        repository_full_name TEXT NOT NULL CHECK(length(repository_full_name) BETWEEN 1 AND 511),
+        repository_url TEXT NOT NULL CHECK(length(repository_url) BETWEEN 1 AND 2048),
+        private INTEGER NOT NULL CHECK(private IN (0,1)),
+        access TEXT NOT NULL CHECK(access IN ('watch','participate','administer')),
+        observed_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        UNIQUE(owner_id, id),
+        UNIQUE(owner_id, principal_id, provider, repository_id),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
+        FOREIGN KEY(owner_id, external_identity_id)
+          REFERENCES external_identities(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX external_project_grants_principal_idx
+        ON external_project_grants(
+          owner_id,principal_id,revoked_at,expires_at,account_id,repository_full_name,id
+        );
+
+CREATE TABLE project_repository_bindings (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK(provider = 'github'),
+        account_id TEXT NOT NULL CHECK(length(account_id) BETWEEN 1 AND 255),
+        account_name TEXT NOT NULL CHECK(length(account_name) BETWEEN 1 AND 255),
+        installation_id TEXT NOT NULL CHECK(length(installation_id) BETWEEN 1 AND 255),
+        repository_id TEXT NOT NULL CHECK(length(repository_id) BETWEEN 1 AND 255),
+        repository_name TEXT NOT NULL CHECK(length(repository_name) BETWEEN 1 AND 255),
+        repository_full_name TEXT NOT NULL CHECK(length(repository_full_name) BETWEEN 1 AND 511),
+        repository_url TEXT NOT NULL CHECK(length(repository_url) BETWEEN 1 AND 2048),
+        private INTEGER NOT NULL CHECK(private IN (0,1)),
+        bound_by_principal_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        UNIQUE(owner_id, id),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, grant_id) REFERENCES external_project_grants(owner_id, id),
+        FOREIGN KEY(owner_id, bound_by_principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE UNIQUE INDEX project_repository_bindings_active_project_idx
+        ON project_repository_bindings(owner_id, project_id) WHERE revoked_at IS NULL;
+
+CREATE INDEX project_repository_bindings_repository_idx
+        ON project_repository_bindings(owner_id, provider, repository_id, revoked_at, project_id);
+
+CREATE TABLE agent_connections (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        agent_type TEXT NOT NULL CHECK(length(agent_type) BETWEEN 1 AND 128),
+        label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 128),
+        capabilities_json TEXT NOT NULL CHECK(json_valid(capabilities_json)),
+        created_at TEXT NOT NULL,
+        last_verified_at TEXT NOT NULL,
+        revoked_at TEXT,
+        UNIQUE(owner_id, id),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE UNIQUE INDEX agent_connections_active_agent_idx
+        ON agent_connections(owner_id, principal_id, agent_type) WHERE revoked_at IS NULL;
+
+CREATE INDEX agent_connections_principal_idx
+        ON agent_connections(owner_id, principal_id, revoked_at, agent_type, id);
+
+CREATE TABLE project_selections (
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        selected_at TEXT NOT NULL,
+        hidden_at TEXT,
+        PRIMARY KEY(owner_id, principal_id, project_id),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX project_selections_principal_idx
+        ON project_selections(owner_id, principal_id, hidden_at, selected_at, project_id);
 
 CREATE TABLE runs (
         id TEXT PRIMARY KEY,
@@ -599,6 +779,106 @@ CREATE TABLE session_events (
       ) WITHOUT ROWID, STRICT;
 
 CREATE INDEX session_events_owner_session_idx ON session_events(owner_id, session_id, sequence);
+
+CREATE TABLE task_relays (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_id TEXT,
+        session_id TEXT,
+        anchor_sequence INTEGER NOT NULL CHECK(anchor_sequence >= 0),
+        author_principal_id TEXT NOT NULL,
+        author_name TEXT NOT NULL CHECK(length(author_name) BETWEEN 1 AND 120),
+        author_kind TEXT NOT NULL CHECK(author_kind IN ('person','service')),
+        recipient_principal_id TEXT NOT NULL,
+        recipient_name TEXT NOT NULL CHECK(length(recipient_name) BETWEEN 1 AND 120),
+        recipient_kind TEXT NOT NULL CHECK(recipient_kind IN ('person','service')),
+        body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 2000),
+        created_at TEXT NOT NULL,
+        CHECK((run_id IS NOT NULL) != (session_id IS NOT NULL)),
+        UNIQUE(owner_id, id),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, author_principal_id) REFERENCES principals(owner_id, id),
+        FOREIGN KEY(owner_id, recipient_principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX task_relays_project_task_idx
+        ON task_relays(owner_id, project_id, run_id, session_id, anchor_sequence, created_at, id);
+
+CREATE INDEX task_relays_recipient_idx
+        ON task_relays(owner_id, project_id, recipient_principal_id, created_at, id);
+
+CREATE TABLE task_relay_acknowledgements (
+        relay_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL,
+        FOREIGN KEY(owner_id, relay_id) REFERENCES task_relays(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id)
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX task_relay_acknowledgements_principal_idx
+        ON task_relay_acknowledgements(owner_id, principal_id, acknowledged_at, relay_id);
+
+CREATE TABLE task_annotations (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_id TEXT,
+        session_id TEXT,
+        anchor_sequence INTEGER NOT NULL CHECK(anchor_sequence >= 0),
+        anchor_block_id TEXT NOT NULL CHECK(
+          length(anchor_block_id) BETWEEN 1 AND 256
+          AND anchor_block_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+        ),
+        anchor_start_offset INTEGER NOT NULL CHECK(
+          anchor_start_offset >= 0 AND anchor_start_offset <= 10000000
+        ),
+        anchor_end_offset INTEGER NOT NULL CHECK(
+          anchor_end_offset > anchor_start_offset AND anchor_end_offset <= 10000000
+        ),
+        anchor_quote TEXT NOT NULL CHECK(length(anchor_quote) BETWEEN 1 AND 4096),
+        anchor_prefix TEXT NOT NULL CHECK(length(anchor_prefix) <= 256),
+        anchor_suffix TEXT NOT NULL CHECK(length(anchor_suffix) <= 256),
+        anchor_content_digest TEXT NOT NULL CHECK(
+          length(anchor_content_digest) = 64
+          AND anchor_content_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        author_principal_id TEXT NOT NULL,
+        author_name TEXT NOT NULL CHECK(length(author_name) BETWEEN 1 AND 120),
+        author_kind TEXT NOT NULL CHECK(author_kind IN ('person','service')),
+        body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 2000),
+        created_at TEXT NOT NULL,
+        CHECK((run_id IS NOT NULL) != (session_id IS NOT NULL)),
+        UNIQUE(owner_id, id),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, author_principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX task_annotations_project_task_idx
+        ON task_annotations(
+          owner_id,project_id,run_id,session_id,
+          anchor_sequence,anchor_start_offset,created_at,id
+        );
+
+CREATE TABLE task_annotation_resolutions (
+        annotation_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        resolver_principal_id TEXT NOT NULL,
+        resolver_name TEXT NOT NULL CHECK(length(resolver_name) BETWEEN 1 AND 120),
+        resolver_kind TEXT NOT NULL CHECK(resolver_kind IN ('person','service')),
+        resolved_at TEXT NOT NULL,
+        FOREIGN KEY(owner_id, annotation_id)
+          REFERENCES task_annotations(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, resolver_principal_id) REFERENCES principals(owner_id, id)
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX task_annotation_resolutions_resolver_idx
+        ON task_annotation_resolutions(owner_id,resolver_principal_id,resolved_at,annotation_id);
 
 CREATE TABLE runtime_provisioning_intents (
         runtime_id TEXT PRIMARY KEY,

@@ -10,13 +10,22 @@ import { createAuditRoutes } from "./api/audit"
 import { controlRequestBodyLimit } from "./api/body"
 import { createBriefRoutes } from "./api/briefs"
 import { createBrowserSessionRoutes } from "./api/browser-sessions"
+import { createConnectedOnboardingRoutes } from "./api/connected-onboarding"
 import { createDeploymentRoutes } from "./api/deployments"
+import {
+  createProtectedExternalAuthRoutes,
+  createPublicExternalAuthRoutes,
+} from "./api/external-auth"
+import { createPresenceRoutes } from "./api/presence"
+import { createPrincipalInvitationRoutes } from "./api/principal-invitations"
 import { createProjectRoutes } from "./api/projects"
 import { createProviderRoutes, RegistryProviderDiagnostics } from "./api/providers"
 import { createRunRoutes } from "./api/runs"
 import type { ApiEnv } from "./api/schemas"
 import { createSessionRoutes } from "./api/sessions"
 import { createSystemRoutes, registerOpenApiDocument } from "./api/system"
+import { createTaskAnnotationRoutes } from "./api/task-annotations"
+import { createTaskRelayRoutes } from "./api/task-relays"
 import { LocalArtifactStore } from "./artifacts/local-artifact-store"
 import { WORKSPACE_BUNDLE_LIMITS, WorkspaceBundleStore } from "./artifacts/workspace-bundle"
 import {
@@ -37,6 +46,10 @@ import { LocalStaticServer } from "./deployments/local-static-server"
 import { DeployAdapterRegistry } from "./deployments/registry"
 import { AppError, errorEnvelope, normalizeError } from "./errors"
 import type { Instrumentation } from "./instrumentation"
+import { AesGcmCredentialVault } from "./integrations/credential-vault"
+import { GitHubExternalAuth } from "./integrations/github-external-auth"
+import { GoogleExternalAuth } from "./integrations/google-external-auth"
+import { SealedExternalAuthStateCodec } from "./integrations/sealed-external-auth-state"
 import { Store } from "./persistence/store"
 import { ExecutionProvenanceCatalog, sha256File } from "./provenance"
 import { CloudflareRuntimeProvider } from "./providers/cloudflare-provider"
@@ -49,6 +62,7 @@ import { ArtifactService } from "./services/artifact-service"
 import { AuditService } from "./services/audit-service"
 import { BriefService } from "./services/brief-service"
 import { BrowserSessionService } from "./services/browser-session-service"
+import { ConnectedOnboardingService } from "./services/connected-onboarding-service"
 import { CredentialLeaseReaper } from "./services/credential-lease-reaper"
 import {
   DeploymentDispatcher,
@@ -57,12 +71,21 @@ import {
   StoreDeploymentSourceResolver,
 } from "./services/deployment-executor"
 import { ExecutionContext } from "./services/execution-context"
+import {
+  type ConfiguredExternalAuthProvider,
+  ExternalAuthService,
+} from "./services/external-auth-service"
+import { PresenceService } from "./services/presence-service"
+import { PrincipalInvitationService } from "./services/principal-invitation-service"
 import { ProjectService } from "./services/project-service"
+import { GitHubRepositoryCredentialResolver } from "./services/repository-credential-resolver"
 import { RunExecutor } from "./services/run-executor"
 import { RunService } from "./services/run-service"
 import { RuntimeReaper, RuntimeReaperLoop } from "./services/runtime-reaper"
 import { SessionExecutor } from "./services/session-executor"
 import { SessionService } from "./services/session-service"
+import { TaskAnnotationService } from "./services/task-annotation-service"
+import { TaskRelayService } from "./services/task-relay-service"
 import { WorkspacePreparer } from "./services/workspace-preparer"
 import { SERVICE_VERSION } from "./version"
 
@@ -147,7 +170,30 @@ export const createApplication = async (
     const auditService = new AuditService(store)
     const apiKeyService = new ApiKeyService(store)
     const browserSessionService = new BrowserSessionService(store)
+    const principalInvitationService = new PrincipalInvitationService(store)
+    const externalAuth = await createExternalAuthComposition(store, config)
+    const externalAuthService = externalAuth?.service ?? null
+    const connectedOnboardingService = new ConnectedOnboardingService(store, () => {
+      const runtimeProviders = providerRegistry
+        .list()
+        .filter((provider) => providerAdmission.has(provider.name))
+      return catalog.list().map((agentType) => ({
+        agentType,
+        label: agentType
+          .split("-")
+          .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+          .join(" "),
+        capabilities: {
+          oneShotRuns: runtimeProviders.length > 0,
+          durableSessions: runtimeProviders.some((provider) => provider.capabilities.processInput),
+          runtimeProviders: runtimeProviders.map((provider) => provider.name).sort(),
+        },
+      }))
+    })
     const projectService = new ProjectService(store)
+    const presenceService = new PresenceService(store)
+    const taskAnnotationService = new TaskAnnotationService(store)
+    const taskRelayService = new TaskRelayService(store)
     const workspaceBundles = new WorkspaceBundleStore(store, artifacts, WORKSPACE_BUNDLE_LIMITS)
     const workspacePreparer = new WorkspacePreparer(workspaceBundles)
     const secrets = new EnvironmentSecretResolver({
@@ -188,6 +234,9 @@ export const createApplication = async (
         maxTotalBytes: 256 * 1024 * 1024,
       },
       secrets,
+      ...(externalAuth?.repositoryCredentials === undefined
+        ? {}
+        : { repositoryCredentials: externalAuth.repositoryCredentials }),
       executionContext,
       logger: instrumentation.telemetry.logger,
       telemetry: instrumentation.telemetry,
@@ -211,6 +260,9 @@ export const createApplication = async (
       workspace: workspacePreparer,
       executionContext,
       secrets,
+      ...(externalAuth?.repositoryCredentials === undefined
+        ? {}
+        : { repositoryCredentials: externalAuth.repositoryCredentials }),
       logger: instrumentation.telemetry.logger,
       telemetry: instrumentation.telemetry,
       concurrency: config.sessionConcurrency,
@@ -331,6 +383,9 @@ export const createApplication = async (
       }),
     )
     registerOpenApiDocument(app, { version: SERVICE_VERSION })
+    if (externalAuthService !== null) {
+      app.route("/", createPublicExternalAuthRoutes(externalAuthService))
+    }
 
     const authenticate: MiddlewareHandler<ApiEnv> = async (context, next) => {
       // Protected control-plane representations may contain prompts, metadata,
@@ -348,12 +403,17 @@ export const createApplication = async (
       if (
         browserIdentity !== null &&
         !["GET", "HEAD"].includes(context.req.method) &&
-        !(context.req.method === "DELETE" && context.req.path === "/browser-sessions/current")
+        !(context.req.method === "DELETE" && context.req.path === "/browser-sessions/current") &&
+        !isBrowserSessionRunWrite(context.req.method, context.req.path) &&
+        !isBrowserSessionPresenceWrite(context.req.method, context.req.path) &&
+        !isBrowserSessionOnboardingWrite(context.req.method, context.req.path) &&
+        !isBrowserSessionAnnotationWrite(context.req.method, context.req.path) &&
+        !isBrowserSessionRelayWrite(context.req.method, context.req.path)
       ) {
         const error = new AppError({
           code: "FORBIDDEN",
           status: 403,
-          message: "Browser sessions are read-only",
+          message: "Browser session cannot perform this operation",
         })
         return context.json(errorEnvelope(error, context.get("requestId")), 403)
       }
@@ -382,7 +442,15 @@ export const createApplication = async (
     controlApi.route("/", createRunRoutes(runService))
     controlApi.route("/", createSessionRoutes(sessionService))
     controlApi.route("/", createProjectRoutes(projectService))
+    controlApi.route("/", createPresenceRoutes(presenceService))
+    controlApi.route("/", createConnectedOnboardingRoutes(connectedOnboardingService))
+    controlApi.route("/", createTaskAnnotationRoutes(taskAnnotationService))
+    controlApi.route("/", createTaskRelayRoutes(taskRelayService))
     controlApi.route("/", createBrowserSessionRoutes(browserSessionService))
+    controlApi.route("/", createPrincipalInvitationRoutes(principalInvitationService))
+    if (externalAuthService !== null) {
+      controlApi.route("/", createProtectedExternalAuthRoutes(externalAuthService))
+    }
     controlApi.route("/", createArtifactRoutes(artifactService))
     controlApi.route("/", createBriefRoutes(briefService))
     controlApi.route("/", createAuditRoutes(auditService))
@@ -494,6 +562,71 @@ export const createApplication = async (
   }
 }
 
+interface ExternalAuthComposition {
+  readonly service: ExternalAuthService
+  readonly repositoryCredentials?: GitHubRepositoryCredentialResolver
+}
+
+const createExternalAuthComposition = async (
+  store: Store,
+  config: AppConfig,
+): Promise<ExternalAuthComposition | null> => {
+  if (config.externalAuth === undefined) return null
+  if (!store.hasOwner(config.externalAuth.ownerId)) {
+    throw new Error("MEANWHILE_EXTERNAL_AUTH_OWNER_ID does not identify an initialized Owner")
+  }
+  const vault = await AesGcmCredentialVault.fromBase64Url({
+    keyVersion: config.externalAuth.credentialKeyVersion,
+    encodedKey: config.externalAuth.credentialKey,
+  })
+  const providers: ConfiguredExternalAuthProvider[] = []
+  let githubAdapter: GitHubExternalAuth | undefined
+  if (config.externalAuth.github !== undefined) {
+    githubAdapter = new GitHubExternalAuth({
+      clientId: config.externalAuth.github.clientId,
+      clientSecret: config.externalAuth.github.clientSecret,
+      redirectUri: config.externalAuth.github.callbackUrl,
+    })
+    providers.push({
+      adapter: githubAdapter,
+      redirectUri: config.externalAuth.github.callbackUrl,
+      label: "GitHub",
+    })
+  }
+  if (config.externalAuth.google !== undefined) {
+    providers.push({
+      adapter: new GoogleExternalAuth({
+        clientId: config.externalAuth.google.clientId,
+        clientSecret: config.externalAuth.google.clientSecret,
+        redirectUri: config.externalAuth.google.callbackUrl,
+      }),
+      redirectUri: config.externalAuth.google.callbackUrl,
+      label: "Google",
+    })
+  }
+  return {
+    service: new ExternalAuthService(
+      config.externalAuth.ownerId,
+      providers,
+      new SealedExternalAuthStateCodec(config.externalAuth.ownerId, vault),
+      vault,
+      store,
+      undefined,
+      undefined,
+      config.externalAuth.registration,
+    ),
+    ...(githubAdapter === undefined
+      ? {}
+      : {
+          repositoryCredentials: new GitHubRepositoryCredentialResolver(
+            store,
+            vault,
+            githubAdapter,
+          ),
+        }),
+  }
+}
+
 const bootstrapLocalIdentity = async (store: Store, key: string | undefined): Promise<void> => {
   if (key === undefined) {
     if (store.isBootstrapIdentityRequired()) {
@@ -525,3 +658,43 @@ const safeRequestId = (candidate: string | undefined): string =>
 
 const matchedRoute = (routes: readonly { readonly path: string }[]): string =>
   routes.findLast(({ path }) => path !== "*")?.path ?? "unmatched"
+
+const UUID_PATH =
+  "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+
+const isBrowserSessionRunWrite = (method: string, path: string): boolean =>
+  method === "POST" && (path === "/runs" || new RegExp(`^/runs/${UUID_PATH}/cancel$`).test(path))
+
+const isBrowserSessionPresenceWrite = (method: string, path: string): boolean =>
+  ["PUT", "DELETE"].includes(method) &&
+  new RegExp(`^/projects/${UUID_PATH}/presence/${UUID_PATH}$`).test(path)
+
+const isBrowserSessionRelayWrite = (method: string, path: string): boolean =>
+  method === "POST" &&
+  (new RegExp(`^/projects/${UUID_PATH}/relays$`).test(path) ||
+    new RegExp(`^/projects/${UUID_PATH}/relays/${UUID_PATH}/acknowledge$`).test(path))
+
+const isBrowserSessionAnnotationWrite = (method: string, path: string): boolean =>
+  method === "POST" &&
+  (new RegExp(`^/projects/${UUID_PATH}/annotations$`).test(path) ||
+    new RegExp(`^/projects/${UUID_PATH}/annotations/${UUID_PATH}/resolve$`).test(path))
+
+const isBrowserSessionOnboardingWrite = (method: string, path: string): boolean => {
+  if (
+    method === "POST" &&
+    (path === "/onboarding/agent-connections" || path === "/onboarding/projects")
+  ) {
+    return true
+  }
+  if (
+    method === "DELETE" &&
+    new RegExp(`^/onboarding/agent-connections/${UUID_PATH}$`).test(path)
+  ) {
+    return true
+  }
+  return (
+    method === "PUT" &&
+    (new RegExp(`^/onboarding/projects/${UUID_PATH}/selection$`).test(path) ||
+      new RegExp(`^/onboarding/projects/${UUID_PATH}/repository$`).test(path))
+  )
+}

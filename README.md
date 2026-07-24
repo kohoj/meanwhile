@@ -12,7 +12,7 @@ You hand a task to an AI agent. Then what? You want to know it finished, see wha
 
 Meanwhile is the durable layer under the agent, not another agent. It lets a person hand work to AI and safely look away. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose. The governing decision filter is the [product constitution](docs/product-constitution.md).
 
-> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements the Shared Project release candidate: stable member identity, Project membership and attribution, visibility without cross-member lifecycle control, opaque read-only browser sessions, typed Project APIs, an offline v0.1.3 migration, the selected [`Project Watch`](board/PRODUCT.md), and a clean-revision automated system proof covering authorization, restart, backup, and restore. A release claim still requires the [external two-person acceptance](docs/external-collaboration-acceptance.md); distinct test Principals and cookie sessions are not evidence that two real people used the deployed product.
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements connected onboarding, Project Lobby, the Live Deck Project room, source-backed Conversation Detail, immutable addressed Task Relays, Project-visible source-anchored Annotations, and expiring client-scoped PresenceLeases. Optional GitHub App and Google OIDC authorization now use PKCE, exact callbacks, provider-bound sealed state, Board-side login-CSRF correlation, sealed server-side identity credentials, and opaque HttpOnly Meanwhile sessions. A bound private GitHub repository is revalidated immediately before checkout; its user token exists only in the short-lived Git preparation process and is released before the agent starts. The current dirty worktree has fresh verified development receipts for the complete local collaboration system, two independent Principals through separate HTTPS API and Board origins, and deterministic ACP execution on real Cloudflare remote compute. Those receipts are implementation evidence, not release evidence: the same revision still needs clean verification, configured live GitHub/Google and credentialed-agent receipts, and the [external two-person acceptance](docs/external-collaboration-acceptance.md). Distinct test Principals, fixtures, leases, and cookie sessions are not evidence that two real people used the deployed product.
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -78,13 +78,37 @@ stop the control plane, inspect the dry run, then apply the explicit migration:
 ```console
 bun run migrate:projects -- --database=/absolute/path/to/meanwhile.sqlite
 bun run migrate:projects -- --database=/absolute/path/to/meanwhile.sqlite --write
+bun run migrate:task-relays -- --database=/absolute/path/to/meanwhile.sqlite
+bun run migrate:task-relays -- --database=/absolute/path/to/meanwhile.sqlite --write
+```
+
+Each earlier migration installs all later additive collaboration tables so a
+`v0.1.3` or Project Watch database reaches the one current schema directly. If a
+database already runs the intermediate exact Task Relay schema, run instead:
+
+```console
+bun run migrate:task-annotations -- --database=/absolute/path/to/meanwhile.sqlite
+bun run migrate:task-annotations -- --database=/absolute/path/to/meanwhile.sqlite --write
+```
+
+For the exact Task Annotation or Connected Onboarding intermediate schemas, use
+the corresponding final additive step:
+
+```console
+bun run migrate:connected-onboarding -- --database=/absolute/path/to/meanwhile.sqlite --write
+bun run migrate:presence-leases -- --database=/absolute/path/to/meanwhile.sqlite --write
+bun run migrate:identity-credentials -- --database=/absolute/path/to/meanwhile.sqlite --write
+bun run migrate:principal-invitations -- --database=/absolute/path/to/meanwhile.sqlite --write
 ```
 
 Unknown or partially modified schema fingerprints fail closed.
 
 ### Share one Project
 
-Project Watch is a read-only shared view, not an account or invitation system.
+Project Lobby, Live Deck, and Conversation Detail are collaboration surfaces,
+not an account directory or shared agent-control system. Their collaboration
+writes are addressed Task Relays with recipient acknowledgement and ambient,
+source-anchored Project Annotations with author-or-maintainer resolution.
 An installation operator creates the durable identity, adds it to a Project,
 and issues one revocable key for that person or service through the same public
 API used by every other client:
@@ -93,17 +117,20 @@ API used by every other client:
 meanwhile projects list
 meanwhile principals create --name "Bob Li" --kind person
 meanwhile projects add-member <project-id> <principal-id> --role member
-meanwhile api-keys create --name "Bob laptop" --principal <principal-id>
+meanwhile invitations create --principal <principal-id> --expires-in 7d
 ```
 
 The final command shows the plaintext key once. Deliver it through a secure
 channel; never share the bootstrap key or reuse one person's key for a team.
-Bob opens Project Watch, exchanges that key for a short-lived read-only browser
-session, and can then see work delegated by every active member of the Project.
-For a member who delegates from another machine, expose the control-plane API
-through a separate operator-owned HTTPS or private-network origin and configure
-that machine's `MEANWHILE_URL`; never route delegation through the Board or
-give a member the bootstrap credential.
+Bob opens the Lobby, exchanges that key for a short-lived browser session,
+enters one Project table, delegates a one-shot Run as himself, sees work delegated
+by every active member, follows the live agent transcript, Relays an exact
+transcript moment to another person, and acknowledges a Relay addressed to him.
+The session is deny-by-default: it can create and cancel only Bob's Runs, perform
+exact Relay writes, and revoke itself. AgentSession, deployment, membership,
+credential, and another member's lifecycle operations remain forbidden. Remote
+CLI or SDK access still uses a separate operator-owned HTTPS or private-network
+control-plane origin; never give a member the bootstrap credential.
 
 Runs and durable sessions select their shared Project explicitly:
 
@@ -117,7 +144,7 @@ one active Project. Multi-Project clients should always send the immutable
 Project choice.
 
 A deployed two-Principal smoke test proves that two independently authenticated
-members can delegate through the HTTPS API, see both Runs in Project Watch,
+members can delegate through the HTTPS API, see both Runs in the Live Deck,
 open each other's conversations, and remain unable to cancel each other's
 work. It deliberately records that external two-human acceptance is not yet
 claimed:
@@ -590,11 +617,29 @@ Prompts, process output, credentials, file contents, and raw provider bodies are
 
 ## Test and release proof
 
+The complete browser journey also has one repository-owned deterministic preview:
+
+```console
+bun run board:preview       # prints a loopback URL and local-only installation key
+bun run board:journey:check # asserts login -> onboarding -> Lobby -> Live Deck -> detail -> Annotation -> Relay -> delegation
+```
+
+The preview starts the production Board BFF against an ephemeral typed fixture
+and builds the real Board assets first. It exists for contributor UX review and
+browser regression; its Principals, OAuth state, agent work, and repository grant
+are deterministic fixtures and are never a live-provider, deployment, or
+external-human acceptance claim. Its first-task gate still enforces product
+truth: all 34 checks require every Live Deck card to resolve its own native event history, the
+created Run enters as running, every fixture Agent event occurs after acceptance, and no
+transcript can reuse another task's conversation. Fixture IDs and authored demo conversations
+remain confined to the preview data plane; production components do not recognize them.
+
 ```console
 bun run check                       # Biome, types, notices, runner builds, deterministic suite
 bun run demo                        # no-account product path
+bun run board:journey:check         # complete deterministic connected collaboration browser contract
 bun run proof:release               # semantic round trip, telemetry, restart, backup/restore
-bun run proof:project-collaboration # three Principals, Project Watch, auth, restart, backup/restore
+bun run proof:project-collaboration # three Principals, Board auth, restart, backup/restore
 bun run proof:project-collaboration:verify -- .proof/project-collaboration.json --require-clean --commit="$(git rev-parse HEAD)"
 bun run cloudflare:check            # bridge package and protocol contract
 bun run test:live:cloudflare        # explicit real-account lifecycle
@@ -621,20 +666,29 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 Meanwhile `v0.1.3` is the current public release baseline. The complete credential-free local product path, durable sessions, the delegator's board, and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
-The current Project Watch Board is a multi-person read surface over control-plane authorization, not a credential-sharing shortcut. In team mode each person exchanges their own Principal-bound API key once for an opaque, expiring, read-only browser session kept in an HttpOnly SameSite cookie. Project operators can create Principals, Projects, memberships, and per-person keys through the CLI without a private administration endpoint. The optional `MEANWHILE_API_KEY` mode remains only for a private local single-user Board.
+The current Board opens with GitHub/Google sign-in when configured, otherwise the explicit installation-access fallback, then connected onboarding, a truthful Project Lobby, and Live Deck. External registration is an installation choice: `closed` preserves pre-provisioned/invited Principals, while `open` lets a verified provider subject create one stable member Principal inside the configured Owner. Neither mode lets the subject choose a tenant. GitHub access is projected at request time from a current repository grant matching an active Project binding; it is never copied into durable membership or lifecycle authority. A repository administrator can add an authorized repository to the Lobby atomically, after which matching users enter as `watch`, `participate`, or `administer`. Opening `/join/<secret>` still provides the closed-mode invitation path and atomically links the selected identity; only its digest is stored. In team mode the resulting opaque, expiring browser session stays in an HttpOnly SameSite cookie. The session is deny-by-default and grants only capabilities justified by current Project access, while cancellation and other lifecycle commands remain restricted to the immutable original delegator. Private checkout revalidates and uses the delegator's own short-lived GitHub credential, never the room creator's token. A bound repository and personally authorized agent flow into delegation; the room composer returns to the authoritative Project work read model and opens the new Run's native live transcript. Conversation Detail implements foldable agent work, exact text selection, marginalia, and addressed Relay; the room rail reads the latest Project-visible Relays independently of the current person's pending inbox. The optional `MEANWHILE_API_KEY` mode remains available for private local single-user and operator workflows.
+
+When an invitation is opened over an existing Board session, the invitation
+becomes the explicit foreground intent until the viewer accepts it with a
+provider identity or keeps the current session. Meanwhile never merges the two
+Principals implicitly, and installation access cannot redeem an invitation.
 
 The deterministic suite proves interrupt, per-turn timeout, replay, and cleanup semantics against replaceable providers. Local release evidence proves the complete host-process product path. Cloudflare release evidence proves one ACP identity across two turns, event replay, cleanup, and control-plane restart on real remote compute; the separate live lifecycle test proves remote hard termination and credential mediation. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these remain operator/platform assertions rather than remote attestation.
 
 Before broad multi-tenant production use, the project still needs:
 
 - the complete Shared Project release proof: distinct people, same-Project visibility, non-member isolation, credential rotation, membership revocation, deployed Board access, restart, backup, and restore on one clean revision;
+- a current clean-revision live GitHub App and Google OIDC receipt, GitHub
+  revocation-webhook acceleration, and relink UX before GitHub-backed Lobby
+  access may be claimed as production accepted;
 - automated package publication tied to verified release receipts;
 - a Pi ACP adapter that propagates an internal model/RPC failure as prompt failure. The exact pinned `pi-acp@0.0.31` currently maps its internal `error` result to ACP `end_turn`; Meanwhile's semantic proof rejects the resulting empty response and publishes no receipt, but that path is not accepted as passed until the adapter boundary is corrected and a clean `remote-live-agent` receipt succeeds;
 - continuous real-account verification for every released remote-provider revision;
 - owner quotas and request rate limits beyond the implemented process-level admission bounds;
 - a lease-capable shared database for horizontal control-plane writers;
 - object-backed retention for logs beyond provider replay limits;
-- an owner-scoped secret-manager/short-lived issuer backend and a host-bound private-repository checkout broker;
+- an owner-scoped agent secret-manager/short-lived issuer backend beyond the
+  implemented host-bound GitHub checkout credential resolver;
 - a versioned permission-response command and explicit approval policy before interactive human approval can be supported;
 - provider-neutral suspend/resume semantics before idle sessions can release compute without closing ACP continuity.
 
@@ -646,8 +700,9 @@ Meanwhile's direction is to be the durable, trustworthy layer *under* agent work
 
 - **Published (`v0.1.3`).** The durable control plane, durable sessions and turns, credential-free local runtime, packaged Cloudflare runtime, and the earlier single-owner Board.
 - **Landed but paused.** Explicit Brief reuse spans one-shot Runs and turn-scoped Sessions with immutable provenance, workspace relevance, Project-member source authorization, idempotency, restart persistence, and dispatch-time byte revalidation. It is a supporting capability, not the active product milestone; Fact discovery and further intelligence expansion are frozen.
-- **Release candidate — Shared Project Watch.** Project Watch, stable Principals, membership, immutable delegator attribution, Project-scoped reads, delegator-only control, read-only browser sessions, typed Project APIs, exact-schema migration, container packaging, and the clean-revision automated collaboration-system receipt are complete.
-- **Now — external two-person acceptance and release.** Put the candidate behind real HTTPS ingress; have two people in different locations use separate credentials to observe the same Project; exercise member removal and credential rotation; then merge and publish without weakening the exact receipt gate.
+- **Release candidate — Shared Project collaboration.** Connected Onboarding, Project Lobby, Live Deck, Conversation Detail, stable Principals, membership, immutable delegator attribution, Project-scoped reads, delegator-only control, container packaging, and current dirty-tree local and separate-HTTPS-origin automated collaboration receipts are complete.
+- **Now — clean connected-journey acceptance.** The connected journey, explicit open/closed registration, repository import, provider-derived Project access, participant projection, Live Deck, Conversation Detail, marginalia, Relay, Project/agent selection, PresenceLease, optional GitHub/Google sign-in, sealed identity credentials, per-delegator grant revalidation, and JIT private checkout authority are implemented. Re-run every required receipt from one clean deployed revision, exercise real provider credentials, and complete the two-person external acceptance.
+- **Next — live GitHub-backed Lobby acceptance.** Prove two independently authorized people see the same imported room, exercise provider revocation/relink and private checkout on a deployed clean revision, and confirm that GitHub remains optional rather than a hosted control-plane dependency.
 - **Then — Project-scoped execution intelligence.** Bind Brief discovery and reuse to the source Project before adding fact discovery, conflict/supersession, or explicit cross-Project sharing.
 - **Then — an open integration contract.** Let external boards, IDEs, and chat entry points consume the Project and durable execution APIs instead of rebuilding identity, credentials, audit, recovery, and evidence.
 
@@ -660,6 +715,8 @@ external acceptance, review, and publication complete. Later lines are intent.
 - [Architecture](docs/architecture.md) — control path, authority, races, recovery, and extension rules
 - [Shared Project definition](docs/project-collaboration.md) — selected product, locked decisions, implemented boundary, and release acceptance floor
 - [Shared Project experience](docs/project-collaboration-experience.md) — Alice/Bob storyboard, attention semantics, realistic mock data, and visual comparison contract
+- [Project Lobby and GitHub directory ADR](docs/decisions/0007-project-lobby-and-github-directory.md) — provider authority split, tenant boundary, permission mapping, and delivery slices
+- [Provider-derived Project access ADR](docs/decisions/0011-provider-derived-project-access.md) — owner-scoped registration, repository import, effective participant access, and per-delegator checkout authority
 - [Product constitution](docs/product-constitution.md) — product soul, primary object, laws, and active decision gate
 - [External collaboration acceptance](docs/external-collaboration-acceptance.md) — real two-person journey, independent attestations, and exact release claim boundary
 - [Provider contract](docs/provider-contract.md) — implement and prove a runtime adapter

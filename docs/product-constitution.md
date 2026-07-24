@@ -25,6 +25,7 @@ When a person returns, they and their Project should be able to establish:
 3. what the agent said and produced;
 4. what survived a failure, restart, or disappearing runtime;
 5. who may observe the work and who may operate it.
+6. what another person explicitly passed to them, and whether it was received.
 
 The emotional outcome is calm confidence, not increased supervision.
 
@@ -35,7 +36,8 @@ person through an upstream agent, API, SDK, CLI, or future integration.
 
 - `Run` and `AgentSession` are its execution forms.
 - `Project` is its shared responsibility boundary.
-- Project Watch is its human home.
+- Project Lobby is its human entrance; Project Watch is the inside of one
+  selected Project table.
 - Runtime, agent, and deployment topology are replaceable machinery.
 - Events, logs, outputs, and recovery records are source facts inside task
   detail, not a separate `Evidence` product or mode.
@@ -79,7 +81,22 @@ managed service use one product, API, authorization, and data-ownership model.
 No hosted identity, proprietary service, or deployment topology may become a
 semantic prerequisite.
 
-### 7. Quiet by default
+### 7. Addressed handoff
+
+People transmit context through an immutable Relay anchored to the exact task
+moment that made it relevant. A Relay names its author and recipient, remains
+visible to the Project, and closes only when the recipient acknowledges it. It
+never impersonates agent output or grants agent control.
+
+### 8. Qualified entrance
+
+The Lobby shows only Projects the current identity may enter. A provider such
+as GitHub may be the upstream authority for repository eligibility, but
+Meanwhile remains the authority for immutable delegation, lifecycle control,
+Relay, artifacts, credentials, and audit. Provider-backed identity is an
+adapter, never a mandatory hosted dependency.
+
+### 9. Quiet by default
 
 Project Watch answers the human question before presenting inventory:
 
@@ -91,8 +108,9 @@ real human decision, not agent activity or system vanity.
 ## Core loop
 
 ```text
-delegate → hold the promise → execute → share truth → direct attention
-         → understand source detail → accept, recover, or explicitly hand off
+discover → enter Project → delegate → hold the promise → execute → share truth
+         → direct attention → understand source detail
+         → accept, recover, or explicitly hand off
 ```
 
 Every addition must strengthen this loop without moving authority into the
@@ -106,8 +124,12 @@ sessions work. The active gate is an external two-person journey on one clean
 deployed revision:
 
 - two real people use separate personal credentials and devices or networks;
+- each enters the shared Project from a truthful Lobby without seeing an
+  unauthorized Project;
 - each delegates real work through a credentialed live agent;
 - each sees, attributes, and opens the other's work within the shared Project;
+- each can follow the live source-backed transcript, with agent internals folded;
+- one person Relays a precise transcript moment and the other acknowledges it;
 - one troubled item produces personal attention only for its delegator;
 - the other person sees the same Project condition without being falsely called;
 - neither gains controls over the other's agent;
@@ -118,6 +140,7 @@ participant attestations record the human acceptance. Neither may impersonate
 the other. The executable protocol is documented in
 [`external-collaboration-acceptance.md`](external-collaboration-acceptance.md).
 
-Until this gate is accepted and released, do not expand into comments, mentions,
-presence, Kanban, workflow configuration, another provider, ambient memory,
+Task Relays are the one explicit human handoff contract, not a comment system.
+Until this gate is accepted and released, do not expand into generic comments,
+mentions, Kanban, workflow configuration, another runtime provider, ambient memory,
 automatic fact discovery, or a separate evidence interface.

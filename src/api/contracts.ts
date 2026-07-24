@@ -56,6 +56,306 @@ export const ProjectMemberSchema = z
   .strict()
   .meta({ id: "ProjectMember" })
 
+export const ProjectParticipantSchema = z
+  .object({
+    projectId: IdentifierSchema,
+    principal: PrincipalSummarySchema,
+    access: z.enum(["watch", "participate", "administer"]),
+    source: z.enum(["membership", "github"]),
+    since: timestamp,
+  })
+  .strict()
+  .meta({ id: "ProjectParticipant" })
+
+export const ProjectParticipantPageSchema = z.object({
+  items: z.array(ProjectParticipantSchema).readonly(),
+})
+
+export const PresenceLeaseSchema = z
+  .object({
+    ownerId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    clientId: IdentifierSchema,
+    principal: PrincipalSummarySchema,
+    connectedAt: timestamp,
+    lastSeenAt: timestamp,
+    expiresAt: timestamp,
+  })
+  .strict()
+  .meta({ id: "PresenceLease" })
+
+export const PresenceLeaseResponseSchema = z.object({ lease: PresenceLeaseSchema })
+export const PresenceLeasePageSchema = z.object({
+  items: z.array(PresenceLeaseSchema).readonly(),
+})
+
+const externalUrl = z
+  .url()
+  .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), "Expected HTTP(S) URL")
+
+export const ExternalIdentitySchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
+    provider: z.enum(["github", "google"]),
+    subjectId: z.string().min(1).max(255),
+    login: z.string().min(1).max(255).nullable(),
+    displayName: z.string().min(1).max(255).nullable(),
+    avatarUrl: externalUrl.nullable(),
+    createdAt: timestamp,
+    lastVerifiedAt: timestamp,
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "ExternalIdentity" })
+
+export const ExternalProjectGrantSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
+    externalIdentityId: IdentifierSchema,
+    provider: z.literal("github"),
+    accountId: z.string().min(1).max(255),
+    accountName: z.string().min(1).max(255),
+    installationId: z.string().min(1).max(255),
+    repositoryId: z.string().min(1).max(255),
+    repositoryName: z.string().min(1).max(255),
+    repositoryFullName: z.string().min(1).max(511),
+    repositoryUrl: externalUrl,
+    private: z.boolean(),
+    access: z.enum(["watch", "participate", "administer"]),
+    observedAt: timestamp,
+    expiresAt: timestamp,
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "ExternalProjectGrant" })
+
+export const ProjectRepositoryBindingSchema = z
+  .object({
+    id: IdentifierSchema,
+    projectId: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    grantId: IdentifierSchema,
+    provider: z.literal("github"),
+    accountId: z.string().min(1).max(255),
+    accountName: z.string().min(1).max(255),
+    installationId: z.string().min(1).max(255),
+    repositoryId: z.string().min(1).max(255),
+    repositoryName: z.string().min(1).max(255),
+    repositoryFullName: z.string().min(1).max(511),
+    repositoryUrl: externalUrl,
+    private: z.boolean(),
+    boundByPrincipalId: IdentifierSchema,
+    createdAt: timestamp,
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "ProjectRepositoryBinding" })
+
+export const AgentConnectionCapabilitiesSchema = z
+  .object({
+    oneShotRuns: z.boolean(),
+    durableSessions: z.boolean(),
+    runtimeProviders: z.array(z.string().min(1).max(64)).readonly(),
+  })
+  .strict()
+  .meta({ id: "AgentConnectionCapabilities" })
+
+export const AgentConnectionSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
+    agentType: z.string().min(1).max(128),
+    label: z.string().min(1).max(128),
+    capabilities: AgentConnectionCapabilitiesSchema,
+    createdAt: timestamp,
+    lastVerifiedAt: timestamp,
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "AgentConnection" })
+
+export const AvailableAgentConnectionSchema = z
+  .object({
+    agentType: z.string().min(1).max(128),
+    label: z.string().min(1).max(128),
+    capabilities: AgentConnectionCapabilitiesSchema,
+  })
+  .strict()
+  .meta({ id: "AvailableAgentConnection" })
+
+export const ProjectSelectionSchema = z
+  .object({
+    ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    selectedAt: timestamp,
+    hiddenAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "ProjectSelection" })
+
+export const ConnectedOnboardingResponseSchema = z
+  .object({
+    principal: PrincipalSchema,
+    identities: z.array(ExternalIdentitySchema).readonly(),
+    repositoryGrants: z.array(ExternalProjectGrantSchema).readonly(),
+    repositoryBindings: z.array(ProjectRepositoryBindingSchema).readonly(),
+    agentConnections: z.array(AgentConnectionSchema).readonly(),
+    availableAgents: z.array(AvailableAgentConnectionSchema).readonly(),
+    projects: z
+      .array(
+        z
+          .object({
+            project: ProjectSchema,
+            access: z.enum(["watch", "participate", "administer"]),
+            source: z.enum(["membership", "github"]),
+            selected: z.boolean(),
+          })
+          .strict(),
+      )
+      .readonly(),
+  })
+  .strict()
+  .meta({ id: "ConnectedOnboardingResponse" })
+
+export const ConnectAgentRequestSchema = z
+  .object({ agentType: z.string().min(1).max(128) })
+  .strict()
+  .meta({ id: "ConnectAgentRequest" })
+
+export const SetProjectSelectionRequestSchema = z
+  .object({ selected: z.boolean() })
+  .strict()
+  .meta({ id: "SetProjectSelectionRequest" })
+
+export const BindProjectRepositoryRequestSchema = z
+  .object({ grantId: IdentifierSchema })
+  .strict()
+  .meta({ id: "BindProjectRepositoryRequest" })
+
+export const ImportProjectRepositoryRequestSchema = z
+  .object({ grantId: IdentifierSchema })
+  .strict()
+  .meta({ id: "ImportProjectRepositoryRequest" })
+
+export const AgentConnectionResponseSchema = z.object({ connection: AgentConnectionSchema })
+export const ProjectSelectionResponseSchema = z.object({ selection: ProjectSelectionSchema })
+export const ProjectRepositoryBindingResponseSchema = z.object({
+  binding: ProjectRepositoryBindingSchema,
+})
+export const ImportedProjectRepositoryResponseSchema = z
+  .object({
+    project: ProjectSchema,
+    binding: ProjectRepositoryBindingSchema,
+    selection: ProjectSelectionSchema,
+    created: z.boolean(),
+  })
+  .strict()
+  .meta({ id: "ImportedProjectRepositoryResponse" })
+
+export const TaskRelaySchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    anchorSequence: z.number().int().nonnegative(),
+    author: PrincipalSummarySchema,
+    recipient: PrincipalSummarySchema,
+    body: z.string().min(1).max(2_000),
+    createdAt: timestamp,
+    acknowledgedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "TaskRelay" })
+
+export const CreateTaskRelayRequestSchema = z
+  .object({
+    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    anchorSequence: z.number().int().nonnegative(),
+    recipientPrincipalId: IdentifierSchema,
+    body: z.string().trim().min(1).max(2_000),
+  })
+  .strict()
+  .meta({ id: "CreateTaskRelayRequest" })
+
+export const TaskRelayResponseSchema = z.object({ relay: TaskRelaySchema })
+export const TaskRelayPageSchema = z.object({ items: z.array(TaskRelaySchema).readonly() })
+
+export const TranscriptAnchorSchema = z
+  .object({
+    sequence: z.number().int().nonnegative(),
+    blockId: z.string().regex(/^[A-Za-z0-9._:-]{1,256}$/),
+    startOffset: z.number().int().nonnegative().max(10_000_000),
+    endOffset: z.number().int().positive().max(10_000_000),
+    quote: z.string().min(1).max(4_096),
+    prefix: z.string().max(256),
+    suffix: z.string().max(256),
+    contentDigest: ArtifactIdentifierSchema,
+  })
+  .strict()
+  .superRefine((anchor, context) => {
+    if (anchor.endOffset <= anchor.startOffset) {
+      context.addIssue({
+        code: "custom",
+        path: ["endOffset"],
+        message: "End offset must be greater than start offset",
+      })
+    }
+    if (anchor.endOffset - anchor.startOffset !== anchor.quote.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["quote"],
+        message: "Quote length must match the UTF-16 anchor range",
+      })
+    }
+  })
+  .meta({ id: "TranscriptAnchor" })
+
+export const TaskAnnotationSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    anchor: TranscriptAnchorSchema,
+    author: PrincipalSummarySchema,
+    body: z.string().min(1).max(2_000),
+    createdAt: timestamp,
+    resolvedAt: timestamp.nullable(),
+    resolvedBy: PrincipalSummarySchema.nullable(),
+  })
+  .strict()
+  .superRefine((annotation, context) => {
+    if ((annotation.resolvedAt === null) !== (annotation.resolvedBy === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["resolvedBy"],
+        message: "Resolved time and Principal must be present together",
+      })
+    }
+  })
+  .meta({ id: "TaskAnnotation" })
+
+export const CreateTaskAnnotationRequestSchema = z
+  .object({
+    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    anchor: TranscriptAnchorSchema,
+    body: z.string().trim().min(1).max(2_000),
+  })
+  .strict()
+  .meta({ id: "CreateTaskAnnotationRequest" })
+
+export const TaskAnnotationResponseSchema = z.object({ annotation: TaskAnnotationSchema })
+export const TaskAnnotationPageSchema = z.object({
+  items: z.array(TaskAnnotationSchema).readonly(),
+})
+
 const boundedEnvironment = z
   .record(environmentName, z.string().max(32_768))
   .superRefine((value, context) => {
@@ -912,6 +1212,45 @@ export const CreatedApiKeyResponseSchema = z.object({
 })
 export const ApiKeyPageSchema = z.object({ items: z.array(ApiKeySchema).readonly() })
 
+export const PrincipalInvitationSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
+    prefix: z.string().regex(/^mwi_[A-Za-z0-9_-]{12}$/),
+    createdByPrincipalId: IdentifierSchema,
+    createdAt: timestamp,
+    expiresAt: timestamp,
+    redeemedAt: timestamp.nullable(),
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "PrincipalInvitation" })
+
+export const CreatePrincipalInvitationRequestSchema = z
+  .object({
+    principalId: IdentifierSchema,
+    expiresInSeconds: z
+      .number()
+      .int()
+      .min(5 * 60)
+      .max(30 * 24 * 60 * 60)
+      .optional(),
+  })
+  .strict()
+  .meta({ id: "CreatePrincipalInvitationRequest" })
+
+export const PrincipalInvitationResponseSchema = z.object({
+  invitation: PrincipalInvitationSchema,
+})
+export const CreatedPrincipalInvitationResponseSchema = z.object({
+  invitation: PrincipalInvitationSchema,
+  secret: z.string().regex(/^mwi_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/),
+})
+export const PrincipalInvitationPageSchema = z.object({
+  items: z.array(PrincipalInvitationSchema).readonly(),
+})
+
 export const BrowserSessionSchema = z
   .object({
     id: IdentifierSchema,
@@ -942,6 +1281,15 @@ export const AuditRecordSchema = z
       "principal",
       "project",
       "project_membership",
+      "external_identity",
+      "identity_credential",
+      "external_project_grant",
+      "project_repository_binding",
+      "agent_connection",
+      "project_selection",
+      "principal_invitation",
+      "task_relay",
+      "task_annotation",
       "browser_session",
       "api_key",
       "run",
@@ -969,6 +1317,14 @@ export const AuditQuerySchema = CreatedPageQuerySchema.extend({
       "principal",
       "project",
       "project_membership",
+      "external_identity",
+      "external_project_grant",
+      "project_repository_binding",
+      "agent_connection",
+      "project_selection",
+      "principal_invitation",
+      "task_relay",
+      "task_annotation",
       "browser_session",
       "api_key",
       "run",
@@ -1090,10 +1446,25 @@ export type CreateRunRequest = z.input<typeof CreateRunRequestSchema>
 export type Principal = z.output<typeof PrincipalSchema>
 export type Project = z.output<typeof ProjectSchema>
 export type ProjectMember = z.output<typeof ProjectMemberSchema>
+export type ProjectParticipant = z.output<typeof ProjectParticipantSchema>
+export type PresenceLease = z.output<typeof PresenceLeaseSchema>
+export type ExternalIdentity = z.output<typeof ExternalIdentitySchema>
+export type ExternalProjectGrant = z.output<typeof ExternalProjectGrantSchema>
+export type ProjectRepositoryBinding = z.output<typeof ProjectRepositoryBindingSchema>
+export type AgentConnection = z.output<typeof AgentConnectionSchema>
+export type AvailableAgentConnection = z.output<typeof AvailableAgentConnectionSchema>
+export type ProjectSelection = z.output<typeof ProjectSelectionSchema>
+export type ConnectedOnboarding = z.output<typeof ConnectedOnboardingResponseSchema>
+export type ImportedProjectRepository = z.output<typeof ImportedProjectRepositoryResponseSchema>
 export type ProjectWorkItem = z.output<typeof ProjectWorkItemSchema>
+export type TaskRelay = z.output<typeof TaskRelaySchema>
+export type TranscriptAnchor = z.output<typeof TranscriptAnchorSchema>
+export type TaskAnnotation = z.output<typeof TaskAnnotationSchema>
 export type CreatePrincipalRequest = z.input<typeof CreatePrincipalRequestSchema>
 export type CreateProjectRequest = z.input<typeof CreateProjectRequestSchema>
 export type AddProjectMemberRequest = z.input<typeof AddProjectMemberRequestSchema>
+export type CreateTaskRelayRequest = z.input<typeof CreateTaskRelayRequestSchema>
+export type CreateTaskAnnotationRequest = z.input<typeof CreateTaskAnnotationRequestSchema>
 export type Run = z.output<typeof RunSchema>
 export type RunLog = z.output<typeof RunLogSchema>
 export type RunEvent = z.output<typeof RunEventSchema>
@@ -1104,6 +1475,7 @@ export type CreateBriefRequest = z.input<typeof CreateBriefRequestSchema>
 export type Brief = z.output<typeof BriefSchema>
 export type BriefPage = z.output<typeof BriefPageSchema>
 export type ApiKey = z.output<typeof ApiKeySchema>
+export type PrincipalInvitation = z.output<typeof PrincipalInvitationSchema>
 export type BrowserSession = z.output<typeof BrowserSessionSchema>
 export type AuditRecord = z.output<typeof AuditRecordSchema>
 export type AuditPage = z.output<typeof AuditPageSchema>

@@ -9,6 +9,8 @@ export interface TimelineMessage {
   readonly text: string
   readonly firstSequence: number
   readonly lastSequence: number
+  readonly firstOccurredAt: string
+  readonly lastOccurredAt: string
 }
 
 export interface TimelineToolCall {
@@ -21,6 +23,8 @@ export interface TimelineToolCall {
   readonly rawOutput: unknown
   readonly firstSequence: number
   readonly lastSequence: number
+  readonly firstOccurredAt: string
+  readonly lastOccurredAt: string
 }
 
 export interface SessionTimeline {
@@ -75,7 +79,7 @@ export const reduceTimeline = (timeline: AgentTimeline, event: RunEvent): AgentT
   if (event.type !== "agent.update") return base
 
   const update = record(event.payload["update"])
-  return reduceAgentUpdate(base, update, event.sequence, null)
+  return reduceAgentUpdate(base, update, event.sequence, event.createdAt, null)
 }
 
 export const timelineFromEvents = (events: Iterable<RunEvent>): AgentTimeline => {
@@ -132,7 +136,13 @@ export const reduceSessionTimeline = (
     return base
   }
   if (event.type !== "turn.update" || event.turnId === null) return base
-  return reduceAgentUpdate(base, record(event.payload["update"]), event.sequence, event.turnId)
+  return reduceAgentUpdate(
+    base,
+    record(event.payload["update"]),
+    event.sequence,
+    event.createdAt,
+    event.turnId,
+  )
 }
 
 export const sessionTimelineFromEvents = (events: Iterable<SessionEvent>): SessionTimeline => {
@@ -150,6 +160,7 @@ const reduceAgentUpdate = <Timeline extends TimelineProjection>(
   timeline: Timeline,
   update: Readonly<Record<string, unknown>>,
   sequence: number,
+  occurredAt: string,
   turnId: string | null,
 ): Timeline => {
   const kind = string(update["sessionUpdate"])
@@ -163,7 +174,15 @@ const reduceAgentUpdate = <Timeline extends TimelineProjection>(
     const id = `${identityPrefix}:${messageRole}:${messageId}`
     return {
       ...timeline,
-      messages: appendMessage(timeline.messages, id, messageRole, text, sequence, turnId),
+      messages: appendMessage(
+        timeline.messages,
+        id,
+        messageRole,
+        text,
+        sequence,
+        occurredAt,
+        turnId,
+      ),
     }
   }
   if (kind === "tool_call" || kind === "tool_call_update") {
@@ -172,7 +191,7 @@ const reduceAgentUpdate = <Timeline extends TimelineProjection>(
     const id = `${identityPrefix}:${rawId}`
     return {
       ...timeline,
-      toolCalls: upsertToolCall(timeline.toolCalls, id, update, sequence, turnId),
+      toolCalls: upsertToolCall(timeline.toolCalls, id, update, sequence, occurredAt, turnId),
     }
   }
   if (kind === "plan") return { ...timeline, plan: update["entries"] ?? update }
@@ -193,18 +212,33 @@ const appendMessage = (
   role: TimelineRole,
   text: string,
   sequence: number,
+  occurredAt: string,
   turnId: string | null,
 ): readonly TimelineMessage[] => {
   const index = messages.findIndex((message) => message.id === id)
   if (index < 0) {
     return [
       ...messages,
-      { id, role, turnId, text, firstSequence: sequence, lastSequence: sequence },
+      {
+        id,
+        role,
+        turnId,
+        text,
+        firstSequence: sequence,
+        lastSequence: sequence,
+        firstOccurredAt: occurredAt,
+        lastOccurredAt: occurredAt,
+      },
     ]
   }
   const current = messages[index] as TimelineMessage
   const next = [...messages]
-  next[index] = { ...current, text: current.text + text, lastSequence: sequence }
+  next[index] = {
+    ...current,
+    text: current.text + text,
+    lastSequence: sequence,
+    lastOccurredAt: occurredAt,
+  }
   return next
 }
 
@@ -213,6 +247,7 @@ const upsertToolCall = (
   id: string,
   update: Readonly<Record<string, unknown>>,
   sequence: number,
+  occurredAt: string,
   turnId: string | null,
 ): readonly TimelineToolCall[] => {
   const index = toolCalls.findIndex((toolCall) => toolCall.id === id)
@@ -227,6 +262,8 @@ const upsertToolCall = (
     rawOutput: update["rawOutput"] ?? current?.rawOutput ?? null,
     firstSequence: current?.firstSequence ?? sequence,
     lastSequence: sequence,
+    firstOccurredAt: current?.firstOccurredAt ?? occurredAt,
+    lastOccurredAt: occurredAt,
   }
   if (index < 0) return [...toolCalls, next]
   const result = [...toolCalls]

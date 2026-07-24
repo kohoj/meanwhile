@@ -1,7 +1,59 @@
 # Shared Project experience brief
 
-This brief supplies the fixed user journey and realistic data for Definition
-Gate product-form exploration. It is not an implementation specification.
+This brief supplied the original Definition Gate exploration. ADR 0009 now
+selects Connected Onboarding → Project Lobby → Live Deck → Conversation Detail.
+The older Project Watch comparison remains below as decision history.
+
+## ADR 0009 selected experience
+
+1. A person signs in with GitHub or Google, or uses the installation's explicit
+   local bootstrap path.
+2. Onboarding separately authorizes repository discovery and one or more agent
+   connections, then lets the person select Projects to surface.
+3. The Lobby shows one angular frosted-acrylic card per authorized Project with
+   truthful task and presence facts.
+4. Entering a Project transitions into Live Deck: one tall acrylic sheet per
+   authoritative human-agent conversation.
+5. Each sheet keeps the human delegator primary, shows explicit agent and state,
+   truncates only its presentation, and opens the complete conversation.
+6. Conversation Detail behaves like a coding-agent chat: readable message spine,
+   foldable reasoning and tool work, exact transcript selection, and a vertical
+   marginalia rail.
+7. Annotation remains ambient Project-visible marginalia. Relay remains a named,
+   source-anchored handoff with recipient acknowledgement.
+
+Online state comes only from an expiring PresenceLease and is never inferred
+from membership. The three people in the Northstar visual are deterministic
+fixture leases; production visibility requires active leases from real clients.
+
+## Current acceptance ledger
+
+| Product step | Authoritative implementation | Current proof | Remaining gate |
+| --- | --- | --- | --- |
+| Sign in | Optional GitHub App / Google OIDC plus installation access; all issue one opaque Meanwhile browser session | Contract, API, BFF, migration, and deterministic browser coverage | Live configured GitHub and Google callback receipts |
+| Connected onboarding | Separate ExternalIdentity, repository grant/binding, AgentConnection, and personal Project selection | Mixed GitHub-backed plus local Project browser journey | Provider revocation/relink acceptance on a clean deployment |
+| Project Lobby | Provider-neutral `spaces[].tables` read model over authoritative Projects, work, membership, attention, and PresenceLeases | Source-rendered Lobby, empty-room browser proof, and current dirty-tree two-Principal HTTPS system receipt | Two real members entering from separate clients on one clean revision |
+| Live Deck | One card per native Run or AgentSession; no second task lifecycle | Source-locked room comparison, browser interaction proof, and deployed BFF visibility for both Principals | Multi-person observation of credentialed live-agent work |
+| New task | Contextual self-delegation through the public Project Run contract | Accepted Run enters the room; deterministic journey plus clean local public-repository Demo ACP integration | Real private checkout plus credentialed live-agent receipt |
+| Conversation Detail | Native task events, foldable work, transcript index, exact selection, Marginalia, and Relay | Source-locked comparison, Annotation/Relay journey, reload-free local SSE answer receipt, and reciprocal deployed conversation/Annotation/Relay proof | Two-human author/recipient acceptance |
+
+The current development evidence deliberately remains three separate receipts:
+the local collaboration system, the two-Principal separate-HTTPS-origin system,
+and deterministic ACP compatibility on real Cloudflare remote compute. All
+three pass against the current dirty revision. Together they prove the local
+authority model, browser topology, and remote runtime boundary; they do not
+become a clean release receipt, a credentialed live-agent receipt, or a
+two-person attestation by aggregation.
+
+The deterministic journey currently contains 34 explicit checks. Every Live Deck card must
+resolve its own authoritative event history; production components contain no fixed task IDs or
+fixture-only transcript projections. Created-task
+proof is required to show a `running` Run, event times strictly after task
+acceptance, and transcript content owned by that task; reusing another fixture's
+conversation is a failing product state even when the UI renders cleanly.
+Concurrent Live Deck and Conversation Detail history readers must coalesce onto one authoritative
+request. Detail establishes SSE from that shared result's cursor, so a card hydration race cannot
+leave the terminal state visible while omitting Agent output.
 
 ## Product brief
 
@@ -34,7 +86,7 @@ In three seconds, understand:
 
 - a Kanban or manually managed task lifecycle;
 - an agent launcher as the primary product action;
-- presence, cursors, reactions, comments, or notifications;
+- collaborative cursors, reactions, generic comments, or notifications;
 - workflow configuration, assignment, or sprint planning;
 - lifecycle control over another member's agent;
 - operational metrics or an observability dashboard.
@@ -87,7 +139,9 @@ Alice delegates “Fix OAuth callback race after app resume” from an upstream
 client. She explicitly chooses Project Northstar. Meanwhile accepts the
 Run/Session with immutable Project and delegator attribution.
 
-No Board-specific delegation action is required for this proof.
+The Board now also supports one-shot self-delegation from the room, but the
+original cross-member visibility proof remains valid when work originates from
+another public client.
 
 ### Scene 3 — Bob sees the work live
 
@@ -170,8 +224,7 @@ than different data, drives the comparison. Date anchor: 2026-07-21.
 
 ## Product-form comparison contract
 
-Each direction must be a focused 1440 × 1024 desktop Project home, remain within
-the existing warm dark design language, and show:
+Each direction must be a focused 1440 × 1024 desktop Project home and show:
 
 - Northstar and Bob’s member context;
 - viewer-specific attention distinct from Project condition;
@@ -195,15 +248,27 @@ items, and resistance to task-manager or agent-console drift.
 
 ## Selected product form — Project Watch
 
-The maintainer selected Project Watch on 2026-07-21. The approved composition
-is a master-detail Project home: the shared inventory remains visible on the
-left while the selected item's task detail and ordered conversation open on the
-right. Personal attention and Project-wide condition remain separate at the
-top.
+The maintainer selected Project Watch on 2026-07-21, then approved its
+human-centered signal-field composition on 2026-07-23. The shared inventory is
+an always-visible horizontal `Room Pulse`; opening one item keeps the task
+selected above a three-part workbench: a quiet speaker rail, the authoritative
+live agent transcript, and a source-anchored human handoff margin. Personal
+attention appears before shared inventory in the Room Pulse label, while the
+Project-wide condition remains a separate room footer fact.
+
+The visual system is a measured 10/8/4-column Swiss grid on pure white, with
+near-black ink, bundled Inter and IBM Plex Mono, generated halftone seat marks,
+hairline rules, and one grayscale pixel field behind expanded agent work. One
+restrained red marks active selection and human action. The field represents an
+active point of shared understanding; it never carries status and never
+obscures transcript text. Provider identity and human presence are not
+fabricated to match concept art: the implementation renders only authorized
+provider bindings and unexpired PresenceLeases beside Project, Principal, work,
+event, Annotation, and Relay facts.
 
 The selection explicitly rejects `evidence` as a new user-facing product noun.
 Meanwhile may expose source-backed logs, events, outputs, and recovery state in
 task detail, but the collaboration experience does not add an Evidence mode,
 Durable Record, proof workflow, or case-file metaphor.
 
-![Selected Project Watch product form](assets/project-watch-selected.png)
+![Selected Project room signal-field composition](assets/project-room-signal-field-selected.png)

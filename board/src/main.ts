@@ -1,5 +1,5 @@
 // Entry point for the board BFF. Reads configuration from the environment and
-// starts the Project Watch BFF. In team mode each person exchanges their API
+// starts the Project Lobby and Project Watch BFF. In team mode each person exchanges their API
 // key for an opaque browser session; the key is never persisted by the board.
 import { BoardServer } from "./server";
 
@@ -15,6 +15,7 @@ if (!(await Bun.file(`${assetsDir}index.html`).exists())) {
 const server = new BoardServer({
   baseUrl,
   ...(apiKey === undefined ? {} : { apiKey }),
+  defaultAgentType: Bun.env.MEANWHILE_BOARD_AGENT ?? "demo",
   assetsDir,
   hostname: Bun.env.MEANWHILE_BOARD_HOST ?? "127.0.0.1",
   port: Number(Bun.env.MEANWHILE_BOARD_PORT ?? 7333),

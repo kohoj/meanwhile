@@ -29,8 +29,8 @@ secrets, personal email addresses, or free-form agent output in an attestation.
 
 The operator must:
 
-1. deploy one clean Git revision behind separate HTTPS control-plane and
-   Project Watch origins;
+1. deploy one clean Git revision behind separate HTTPS control-plane and Board
+   origins;
 2. verify the local and deployed collaboration receipts against that full SHA;
 3. provision two person Principals as active members of one Project;
 4. issue and deliver one personal revocable credential to each participant
@@ -45,25 +45,36 @@ one person do not satisfy this gate.
 
 ## Journey
 
-Run the journey without coaching the Project Watch reading task.
+Run the journey without coaching the Connected Onboarding, Lobby, Live Deck, or
+Conversation Detail reading tasks.
 
-1. The first and second participants each delegate a small real repository task
-   through a supported upstream integration, API, SDK, or CLI. Both select the
-   same Project explicitly and use Codex, Claude Code, or Pi—not the demo agent.
-2. Each opens Project Watch and starts timing when the Project home becomes
-   visible.
-3. Within three seconds, each identifies whether anything needs them and what
-   work the Project is carrying.
-4. Each finds the other person's work, names its delegator and condition, opens
-   it, and reads the original ask plus ordered conversation.
-5. One of the two real runs must finish as `failed`, `timed_out`, or
-   `continuity_lost`. Its delegator sees personal attention. The other
-   participant sees the same troubled Project condition without a false
-   personal-attention claim.
-6. Both confirm that Project Watch presents no lifecycle controls for the other
+1. Each participant signs in with their own linked GitHub/Google identity or
+   personal installation credential, completes Connected Onboarding, connects a
+   supported live agent, and selects the shared Project. Neither may share a
+   browser session or agent credential.
+2. Each enters Project Lobby, confirms the shared Project is present and an
+   unauthorized fixture Project is absent, then enters its Live Deck.
+3. From `New task`, each delegates a small real repository task with Codex,
+   Claude Code, or Pi—not the demo agent. Acceptance opens the new Run's native
+   Conversation Detail; each then returns to the Live Deck.
+4. Starting when the Live Deck becomes visible, each finds the other person's
+   card within fifteen seconds, names its delegator and condition, and opens it.
+5. Each follows the source-backed transcript, reads the original ask and ordered
+   conversation, and confirms that working notes and tool details fold without
+   being confused with human or agent messages.
+6. The first participant selects exact transcript text and creates one
+   Project-visible annotation. The second sees the same annotation, source
+   anchor, and progress-rail position. Both record the same Annotation and work
+   IDs.
+7. From that conversation, the first participant Relays one exact source moment
+   to the second with a human-written note. The second sees waiting attention in
+   the Lobby, `Passed to you` on the matching Deck card, opens the anchored
+   source and note, and acknowledges it. The first sees `Acknowledged` on the
+   original conversation. Both record the same Relay and source-work IDs.
+8. Both confirm that the Board presents no lifecycle controls for the other
    person's work. The linked deployed-system receipt remains the authoritative
    negative API proof.
-7. Each answers two product questions independently: “Was this clear enough to
+9. Each answers two product questions independently: “Was this clear enough to
    look away and return?” and “Would you use it again for shared work?” Both
    answers must be yes for an accepted receipt.
 
@@ -101,20 +112,34 @@ fresh `attestationId`. `participantRole` is `first` or `second`.
     "observedOtherWorkId": "00000000-0000-4000-8000-000000000014"
   },
   "experience": {
-    "projectAndViewerEstablished": true,
+    "connectedOnboardingCompleted": true,
+    "projectLobbyEntered": true,
+    "ownTaskDelegatedFromBoard": true,
+    "liveDeckUnderstood": true,
     "otherWorkVisible": true,
     "otherDelegatorIdentified": true,
     "otherConversationOpened": true,
-    "personalAttentionUnderstood": true,
-    "attention": {
-      "workId": "00000000-0000-4000-8000-000000000013",
-      "relationship": "own",
-      "condition": "failed",
-      "projectConditionVisible": true,
-      "personalVerdict": "needs_me"
+    "liveTranscriptFollowed": true,
+    "foldableDetailsUnderstood": true,
+    "annotation": {
+      "id": "00000000-0000-4000-8000-000000000016",
+      "workId": "00000000-0000-4000-8000-000000000014",
+      "relationship": "author",
+      "sourceAnchorUnderstood": true,
+      "progressRailUnderstood": true,
+      "projectVisibilityUnderstood": true
+    },
+    "relay": {
+      "id": "00000000-0000-4000-8000-000000000015",
+      "workId": "00000000-0000-4000-8000-000000000014",
+      "relationship": "author",
+      "roomAttentionUnderstood": true,
+      "sourceAnchorUnderstood": true,
+      "acknowledged": true,
+      "acknowledgementReceiptUnderstood": true
     },
     "noCrossMemberControlsPresented": true,
-    "triageSeconds": 2,
+    "otherWorkFoundSeconds": 7,
     "trustedEnoughToLookAway": true,
     "wouldUseAgain": true
   },
@@ -122,9 +147,13 @@ fresh `attestationId`. `participantRole` is `first` or `second`.
 }
 ```
 
-The observing participant records the same attention `workId` and `condition`,
-with `relationship: other` and `personalVerdict: does_not_need_me`. The two
-participants' `ownWorkId` and `observedOtherWorkId` values must be reciprocal.
+The two participants' `ownWorkId` and `observedOtherWorkId` values must be
+reciprocal. For `experience.annotation`, the first participant records
+`relationship: author` and the second records `relationship: viewer`; both
+record the same Annotation and source-work IDs. For `experience.relay`, the
+first records `relationship: author` and the second records `relationship:
+recipient`; both record the same Relay and source-work IDs and only attest after
+the recipient acknowledgement and author receipt are visible.
 
 Each participant creates a digest-bound attestation locally:
 
@@ -157,9 +186,9 @@ bun run acceptance:external-collaboration:verify -- \
 
 Assembly fails closed when the deployed revision is dirty, origins or Project
 do not match, attestation identities collapse, work references are not
-reciprocal, the live agent is not supported, triage exceeds three seconds, the
-attention recipient is wrong, either participant rejects the experience, or a
-source digest has changed.
+reciprocal, the live agent is not supported, Live Deck discovery exceeds fifteen
+seconds, Annotation or Relay identities disagree, either participant rejects
+the experience, or a source digest has changed.
 
 Passing verification permits the precise claim:
 

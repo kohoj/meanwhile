@@ -26,7 +26,11 @@ describe("Project collaboration proof receipt", () => {
     expect(receipt.authorization).toMatchObject({
       bobCancelAliceRun: "not_found",
       carolProjectList: "empty",
-      browserSessionMutation: "forbidden",
+      browserSessionForeignRunControl: "not_found",
+    })
+    expect(receipt.annotation).toMatchObject({
+      aliceCreatedExactRange: true,
+      bobSawSameAnchor: true,
     })
     expect(verifyProjectCollaborationProofReceipt(receipt)).toEqual(receipt)
 
@@ -101,6 +105,16 @@ function proofInput(): Parameters<typeof createProjectCollaborationProofReceipt>
       aliceAndBobInitiallyActive: true,
       carolNeverMember: true,
     },
+    onboarding: {
+      aliceAgentConnected: true,
+      bobAgentConnected: true,
+      aliceProjectSelected: true,
+      bobProjectSelected: true,
+    },
+    presence: {
+      independentClientLeases: true,
+      aliceAndBobVisible: true,
+    },
     work: {
       runId: "00000000-0000-4000-8000-000000000005",
       sessionId: "00000000-0000-4000-8000-000000000006",
@@ -109,6 +123,23 @@ function proofInput(): Parameters<typeof createProjectCollaborationProofReceipt>
       visibleToBob: true,
       conversationVisibleToBob: true,
       artifactVisibleToBob: true,
+    },
+    relay: {
+      id: "00000000-0000-4000-8000-000000000007",
+      workId: "00000000-0000-4000-8000-000000000005",
+      anchorSequence: 7,
+      aliceCreatedForBob: true,
+      bobSawPendingAttention: true,
+      bobOpenedSourceAnchor: true,
+      bobAcknowledged: true,
+    },
+    annotation: {
+      id: "00000000-0000-4000-8000-000000000008",
+      workId: "00000000-0000-4000-8000-000000000005",
+      anchorSequence: 0,
+      sourceDigest: "d".repeat(64),
+      aliceCreatedExactRange: true,
+      bobSawSameAnchor: true,
     },
     authorization: {
       bobCancelAliceRun: "not_found",
@@ -123,12 +154,12 @@ function proofInput(): Parameters<typeof createProjectCollaborationProofReceipt>
       carolArtifactRead: "not_found",
       carolSessionRead: "not_found",
       boardMutation: "method_not_allowed",
-      browserSessionMutation: "forbidden",
+      browserSessionForeignRunControl: "not_found",
     },
     browser: {
       independentAliceAndBobSessions: true,
       httpOnlyCookies: true,
-      sameSiteStrictCookies: true,
+      sameSiteLaxCookies: true,
       bothSeeAliceRun: true,
       bobOpenedTaskConversation: true,
     },
@@ -151,11 +182,14 @@ function proofInput(): Parameters<typeof createProjectCollaborationProofReceipt>
       restoreVerified: true,
       attributionPreserved: true,
       currentMembershipEnforced: true,
+      relayPreserved: true,
+      annotationPreserved: true,
       plaintextCredentialsAbsent: true,
     },
     presentation: {
       staticAssetsServed: true,
-      selectedReferenceDigest: sha256,
+      selectedLiveDeckReferenceDigest: sha256,
+      selectedConversationDetailReferenceDigest: sha256,
       designQa: "passed",
     },
   }

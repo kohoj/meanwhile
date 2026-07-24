@@ -17,8 +17,8 @@ services:
       MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER: "${MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER:-true}"
       MEANWHILE_API_KEY: ${MEANWHILE_API_KEY:?set MEANWHILE_API_KEY}
     ports:
-      - "127.0.0.1:7331:7331"
-      - "127.0.0.1:7332:7332"
+      - "127.0.0.1:${MEANWHILE_CONTROL_PLANE_HOST_PORT:-7331}:7331"
+      - "127.0.0.1:${MEANWHILE_PREVIEW_HOST_PORT:-7332}:7332"
     volumes:
       - meanwhile-data:/data
     healthcheck:
@@ -45,7 +45,7 @@ services:
       MEANWHILE_BOARD_HOST: 0.0.0.0
       MEANWHILE_BOARD_PORT: 7333
     ports:
-      - "127.0.0.1:7333:7333"
+      - "127.0.0.1:${MEANWHILE_BOARD_HOST_PORT:-7333}:7333"
     healthcheck:
       test:
         - CMD

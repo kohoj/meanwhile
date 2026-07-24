@@ -37,6 +37,26 @@ export const createApiRouter = (): OpenAPIHono<ApiEnv> =>
     },
   })
 
+/** Validation contract for routes that deliberately precede authentication. */
+export const createPublicApiRouter = (): OpenAPIHono<ApiEnv> =>
+  new OpenAPIHono<ApiEnv>({
+    defaultHook: (result, context) => {
+      if (result.success) return
+      const error = new AppError({
+        code: "INVALID_REQUEST",
+        message: "Request validation failed",
+        details: {
+          issues: result.error.issues.map((issue) => ({
+            code: issue.code,
+            path: issue.path.map(String),
+            message: issue.message,
+          })),
+        },
+      })
+      return context.json(errorEnvelope(error, context.get("requestId")), 400)
+    },
+  })
+
 export const jsonResponse = <Schema extends z.ZodType>(schema: Schema, description: string) => ({
   content: { "application/json": { schema } },
   description,

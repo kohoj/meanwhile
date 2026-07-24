@@ -7,13 +7,22 @@
     "check": "tsc --noEmit && bun test",
     "build": "bun run src/build.ts",
     "dev": "bun run src/main.ts",
+    "journey:check": "bun run build && bun run dev/preview.ts --check",
+    "preview": "bun run build && bun run dev/preview.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/newsreader": "5.3.0",
+    "@fontsource-variable/roboto-condensed": "5.3.0",
+    "@fontsource/ibm-plex-mono": "5.3.0",
     "@kohoz/meanwhile": "file:..",
+    "@phosphor-icons/react": "2.1.10",
+    "@streamdown/code": "1.1.1",
     "motion": "12.42.2",
     "react": "19.2.7",
     "react-dom": "19.2.7",
+    "streamdown": "2.5.0",
     "swr": "2.4.2",
     "zustand": "5.0.14"
   },

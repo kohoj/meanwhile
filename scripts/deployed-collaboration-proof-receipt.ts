@@ -1,11 +1,26 @@
 import { z } from "zod"
 import { digestProofPayload, writeProofReceipt } from "./proof-receipt"
 
-export const DEPLOYED_COLLABORATION_PROOF_RECEIPT_VERSION = 1 as const
+export const DEPLOYED_COLLABORATION_PROOF_RECEIPT_VERSION = 5 as const
 
 const timestampSchema = z.string().datetime({ offset: true })
 const identifierSchema = z.string().uuid()
 const taggedSha256Schema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
+
+export function normalizeDeployedOrigin(value: string, label: string): string {
+  const url = new URL(value)
+  if (
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.pathname !== "/" ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
+    throw new TypeError(`${label} must be an origin without credentials, path, query, or fragment`)
+  }
+  return url.origin
+}
 
 const deployedCollaborationProofPayloadSchema = z
   .object({
@@ -45,6 +60,18 @@ const deployedCollaborationProofPayloadSchema = z
         bothMembersActive: z.literal(true),
       })
       .strict(),
+    onboarding: z
+      .object({
+        bothAgentsConnected: z.literal(true),
+        bothProjectsSelected: z.literal(true),
+      })
+      .strict(),
+    presence: z
+      .object({
+        independentClientLeases: z.literal(true),
+        bothPrincipalsVisible: z.literal(true),
+      })
+      .strict(),
     work: z
       .object({
         firstRunId: identifierSchema,
@@ -57,19 +84,40 @@ const deployedCollaborationProofPayloadSchema = z
         secondOpenedFirstConversation: z.literal(true),
       })
       .strict(),
+    relay: z
+      .object({
+        id: identifierSchema,
+        workId: identifierSchema,
+        anchorSequence: z.number().int().positive(),
+        firstCreatedForSecond: z.literal(true),
+        secondSawPendingAttention: z.literal(true),
+        secondOpenedSourceAnchor: z.literal(true),
+        secondAcknowledged: z.literal(true),
+      })
+      .strict(),
+    annotation: z
+      .object({
+        id: identifierSchema,
+        workId: identifierSchema,
+        anchorSequence: z.number().int().nonnegative(),
+        sourceDigest: sha256Schema,
+        firstCreatedOnSecondWork: z.literal(true),
+        secondSawSameAnchor: z.literal(true),
+      })
+      .strict(),
     authorization: z
       .object({
         firstCannotCancelSecondRun: z.literal("not_found"),
         secondCannotCancelFirstRun: z.literal("not_found"),
         boardMutation: z.literal("method_not_allowed"),
-        browserSessionMutation: z.literal("forbidden"),
+        browserSessionForeignRunControl: z.literal("not_found"),
       })
       .strict(),
     browser: z
       .object({
         independentSessions: z.literal(true),
         httpOnlyCookies: z.literal(true),
-        sameSiteStrictCookies: z.literal(true),
+        sameSiteLaxCookies: z.literal(true),
         secureCookies: z.literal(true),
         bothBoardsSeeBothRuns: z.literal(true),
       })
@@ -114,6 +162,20 @@ const deployedCollaborationProofPayloadSchema = z
         path: ["topology", "boardOrigin"],
         message: "Deployed Project Watch ingress must use HTTPS",
       })
+    }
+    for (const [name, value] of [
+      ["controlPlaneOrigin", receipt.topology.controlPlaneOrigin],
+      ["boardOrigin", receipt.topology.boardOrigin],
+    ] as const) {
+      try {
+        normalizeDeployedOrigin(value, name)
+      } catch (error) {
+        context.addIssue({
+          code: "custom",
+          path: ["topology", name],
+          message: error instanceof Error ? error.message : "Deployed endpoint is not an origin",
+        })
+      }
     }
   })
 

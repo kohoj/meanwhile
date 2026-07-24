@@ -6,6 +6,7 @@ const API_KEY_HASH_PREFIX = "sha256:"
 const apiKeyPattern = /^mwk_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
 const storedHashPattern = /^sha256:([0-9a-f]{64})$/
 const browserSessionPattern = /^mws_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
+const principalInvitationPattern = /^mwi_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
 
 export const LOCAL_BOOTSTRAP_OWNER_ID = "00000000-0000-4000-8000-000000000001"
 export const LOCAL_BOOTSTRAP_API_KEY_ID = "00000000-0000-4000-8000-000000000002"
@@ -64,6 +65,35 @@ export interface AuthenticatedBrowserSession {
   readonly prefix: string
 }
 
+export interface IssuedPrincipalInvitation {
+  readonly secret: string
+  readonly prefix: string
+  readonly hash: string
+}
+
+export interface StoredPrincipalInvitation {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly prefix: string
+  readonly hash: string
+  readonly expiresAt: Date
+  readonly redeemedAt?: Date | null
+  readonly revokedAt?: Date | null
+  readonly principalDisabledAt?: Date | null
+}
+
+export interface PrincipalInvitationLookup {
+  findPrincipalInvitationsByPrefix(prefix: string): Promise<readonly StoredPrincipalInvitation[]>
+}
+
+export interface AuthenticatedPrincipalInvitation {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly prefix: string
+}
+
 export interface AuthenticatedOwner {
   readonly ownerId: string
   readonly principalId: string
@@ -97,6 +127,12 @@ export async function issueApiKey(): Promise<IssuedApiKey> {
 
 export async function issueBrowserSession(): Promise<IssuedBrowserSession> {
   const prefix = `mws_${randomBase64Url(API_KEY_PREFIX_BYTES)}`
+  const secret = `${prefix}_${randomBase64Url(API_KEY_SECRET_BYTES)}`
+  return { secret, prefix, hash: await hashApiKey(secret) }
+}
+
+export async function issuePrincipalInvitation(): Promise<IssuedPrincipalInvitation> {
+  const prefix = `mwi_${randomBase64Url(API_KEY_PREFIX_BYTES)}`
   const secret = `${prefix}_${randomBase64Url(API_KEY_SECRET_BYTES)}`
   return { secret, prefix, hash: await hashApiKey(secret) }
 }
@@ -211,6 +247,49 @@ export async function authenticateBrowserSession(
         principalId: authenticated.principalId,
         ownerRole: authenticated.ownerRole,
         browserSessionId: authenticated.id,
+        prefix,
+      }
+}
+
+/** Authenticates one invitation without revealing its Owner, Principal, or lifecycle state. */
+export async function authenticatePrincipalInvitation(
+  secret: string,
+  lookup: PrincipalInvitationLookup,
+  now: Date = new Date(),
+): Promise<AuthenticatedPrincipalInvitation | null> {
+  const parsed = principalInvitationPattern.exec(secret)
+  if (parsed === null) return null
+  const prefix = `mwi_${parsed[1]}`
+  const candidateHash = parseStoredHash(await hashApiKey(secret))
+  const records = await lookup.findPrincipalInvitationsByPrefix(prefix)
+  let authenticated: StoredPrincipalInvitation | null = null
+  for (const record of records) {
+    if (record.prefix !== prefix) {
+      throw new AuthenticationDataError(
+        "Principal-invitation lookup returned a record with a different prefix",
+      )
+    }
+    const matches = constantTimeEqual(candidateHash, parseStoredHash(record.hash))
+    const active =
+      record.revokedAt == null &&
+      record.redeemedAt == null &&
+      record.principalDisabledAt == null &&
+      record.expiresAt.getTime() > now.getTime()
+    if (matches && active) {
+      if (authenticated !== null) {
+        throw new AuthenticationDataError(
+          "Multiple active Principal invitations have the same digest",
+        )
+      }
+      authenticated = record
+    }
+  }
+  return authenticated === null
+    ? null
+    : {
+        id: authenticated.id,
+        ownerId: authenticated.ownerId,
+        principalId: authenticated.principalId,
         prefix,
       }
 }

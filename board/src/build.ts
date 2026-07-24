@@ -1,11 +1,13 @@
 // Build the board SPA with Bun's own bundler + the official Tailwind plugin.
 // No Vite/webpack/esbuild-as-dependency — bundling is Bun's concern per the
 // project's fixed stack. Outputs app.js + styles.css + index.html into dist/.
-import { cp } from "node:fs/promises";
+import { cp, rm } from "node:fs/promises";
 import tailwind from "bun-plugin-tailwind";
 
 const uiDir = new URL("./ui/", import.meta.url).pathname;
 const outdir = new URL("../dist/", import.meta.url).pathname;
+
+await rm(outdir, { recursive: true, force: true });
 
 const result = await Bun.build({
   entrypoints: [`${uiDir}app.tsx`, `${uiDir}styles.css`],

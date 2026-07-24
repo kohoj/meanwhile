@@ -22,6 +22,7 @@ export const createApplicationHarness = async (
     readonly logLevel?: AppConfig["logLevel"]
     readonly runConcurrency?: number
     readonly sessionConcurrency?: number
+    readonly externalAuth?: AppConfig["externalAuth"]
   } = {},
 ): Promise<ApplicationHarness> => {
   const directory = await mkdtemp(join(tmpdir(), "meanwhile-app-"))
@@ -47,6 +48,7 @@ export const createApplicationHarness = async (
     secretSourceCatalog: ["TEST_RUNNER_SECRET"],
     logLevel: options.logLevel ?? "error",
     telemetry: { enabled: false },
+    ...(options.externalAuth === undefined ? {} : { externalAuth: options.externalAuth }),
   }
   const instrumentation = await initializeInstrumentation({
     serviceName: "meanwhile-test",

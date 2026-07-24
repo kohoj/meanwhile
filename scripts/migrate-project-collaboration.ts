@@ -8,6 +8,10 @@ import {
 } from "../src/persistence/schema"
 
 const LEGACY_SCHEMA_FINGERPRINT = "a7ee3aed4ff1cd19095d4c1aa2c4da0fdd5b25ab88fbcc4363b0f9255883b911"
+const PROJECT_WATCH_SCHEMA = {
+  name: CURRENT_SCHEMA.name,
+  fingerprint: "c2defba13120fe341f211a6d56d6abfe4df5ccf91f499959761951be6c79d4f8",
+} as const
 
 const arguments_ = process.argv.slice(2)
 const databaseArgument = arguments_.find((value) => value.startsWith("--database="))?.slice(11)
@@ -43,7 +47,7 @@ try {
   if (!write) {
     console.log(
       JSON.stringify(
-        { mode: "dry-run", database: path, from: identity, to: CURRENT_SCHEMA, counts },
+        { mode: "dry-run", database: path, from: identity, to: PROJECT_WATCH_SCHEMA, counts },
         null,
         2,
       ),
@@ -112,7 +116,7 @@ try {
       rebuildIdempotencyTable(database, "deployment")
       database
         .query("UPDATE schema_identity SET fingerprint=? WHERE singleton=1")
-        .run(CURRENT_SCHEMA.fingerprint)
+        .run(PROJECT_WATCH_SCHEMA.fingerprint)
     })
     .immediate()
   database.exec("PRAGMA foreign_keys=ON")
@@ -122,13 +126,13 @@ try {
     .all()
   if (
     foreignKeyFailures.length > 0 ||
-    databaseSchemaFingerprint(database) !== CURRENT_SCHEMA.fingerprint
+    databaseSchemaFingerprint(database) !== PROJECT_WATCH_SCHEMA.fingerprint
   ) {
     throw new Error("Migration completed but verification failed; restore the pre-migration backup")
   }
   console.log(
     JSON.stringify(
-      { mode: "write", database: path, from: identity, to: CURRENT_SCHEMA, counts },
+      { mode: "write", database: path, from: identity, to: PROJECT_WATCH_SCHEMA, counts },
       null,
       2,
     ),

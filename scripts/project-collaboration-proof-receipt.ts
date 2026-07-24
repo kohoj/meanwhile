@@ -1,11 +1,12 @@
 import { z } from "zod"
 import { digestProofPayload, writeProofReceipt } from "./proof-receipt"
 
-export const PROJECT_COLLABORATION_PROOF_RECEIPT_VERSION = 1 as const
+export const PROJECT_COLLABORATION_PROOF_RECEIPT_VERSION = 5 as const
 
 const timestampSchema = z.string().datetime({ offset: true })
 const identifierSchema = z.string().uuid()
 const taggedSha256Schema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
 const urlSchema = z.string().url()
 
 const deniedSchema = z.literal("not_found")
@@ -47,6 +48,20 @@ const projectCollaborationProofPayloadSchema = z
         carolNeverMember: z.literal(true),
       })
       .strict(),
+    onboarding: z
+      .object({
+        aliceAgentConnected: z.literal(true),
+        bobAgentConnected: z.literal(true),
+        aliceProjectSelected: z.literal(true),
+        bobProjectSelected: z.literal(true),
+      })
+      .strict(),
+    presence: z
+      .object({
+        independentClientLeases: z.literal(true),
+        aliceAndBobVisible: z.literal(true),
+      })
+      .strict(),
     work: z
       .object({
         runId: identifierSchema,
@@ -56,6 +71,27 @@ const projectCollaborationProofPayloadSchema = z
         visibleToBob: z.literal(true),
         conversationVisibleToBob: z.literal(true),
         artifactVisibleToBob: z.literal(true),
+      })
+      .strict(),
+    relay: z
+      .object({
+        id: identifierSchema,
+        workId: identifierSchema,
+        anchorSequence: z.number().int().positive(),
+        aliceCreatedForBob: z.literal(true),
+        bobSawPendingAttention: z.literal(true),
+        bobOpenedSourceAnchor: z.literal(true),
+        bobAcknowledged: z.literal(true),
+      })
+      .strict(),
+    annotation: z
+      .object({
+        id: identifierSchema,
+        workId: identifierSchema,
+        anchorSequence: z.number().int().nonnegative(),
+        sourceDigest: sha256Schema,
+        aliceCreatedExactRange: z.literal(true),
+        bobSawSameAnchor: z.literal(true),
       })
       .strict(),
     authorization: z
@@ -72,14 +108,14 @@ const projectCollaborationProofPayloadSchema = z
         carolArtifactRead: deniedSchema,
         carolSessionRead: deniedSchema,
         boardMutation: z.literal("method_not_allowed"),
-        browserSessionMutation: z.literal("forbidden"),
+        browserSessionForeignRunControl: deniedSchema,
       })
       .strict(),
     browser: z
       .object({
         independentAliceAndBobSessions: z.literal(true),
         httpOnlyCookies: z.literal(true),
-        sameSiteStrictCookies: z.literal(true),
+        sameSiteLaxCookies: z.literal(true),
         bothSeeAliceRun: z.literal(true),
         bobOpenedTaskConversation: z.literal(true),
       })
@@ -108,13 +144,16 @@ const projectCollaborationProofPayloadSchema = z
         restoreVerified: z.literal(true),
         attributionPreserved: z.literal(true),
         currentMembershipEnforced: z.literal(true),
+        relayPreserved: z.literal(true),
+        annotationPreserved: z.literal(true),
         plaintextCredentialsAbsent: z.literal(true),
       })
       .strict(),
     presentation: z
       .object({
         staticAssetsServed: z.literal(true),
-        selectedReferenceDigest: taggedSha256Schema,
+        selectedLiveDeckReferenceDigest: taggedSha256Schema,
+        selectedConversationDetailReferenceDigest: taggedSha256Schema,
         designQa: z.literal("passed"),
       })
       .strict(),

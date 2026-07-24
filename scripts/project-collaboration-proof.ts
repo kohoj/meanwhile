@@ -30,11 +30,13 @@ const apiOrigin = `http://127.0.0.1:${apiPort}`
 const boardOrigin = `http://127.0.0.1:${boardPort}`
 let controlPlane: ManagedProcess | null = null
 let board: ManagedProcess | null = null
+let phase = "initial startup"
 
 try {
   controlPlane = await startControlPlane(livePaths, bootstrap.key, apiPort, previewPort)
   board = await startBoard(apiOrigin, boardPort)
 
+  phase = "identity and membership setup"
   const admin = client(apiOrigin, bootstrap.key)
   const setup = await admin.projects.me()
   const project = required(setup.projects[0], "Bootstrap Project is missing")
@@ -63,7 +65,23 @@ try {
   const bob = client(apiOrigin, bobCredential.secret)
   const carol = client(apiOrigin, carolCredential.secret)
 
+  phase = "connected onboarding"
+  await Promise.all([
+    alice.onboarding.connectAgent("demo"),
+    alice.onboarding.selectProject(project.id, true),
+    bob.onboarding.connectAgent("demo"),
+    bob.onboarding.selectProject(project.id, true),
+  ])
+  const [aliceOnboarding, bobOnboarding] = await Promise.all([
+    alice.onboarding.get(),
+    bob.onboarding.get(),
+  ])
+  assert(onboardingReady(aliceOnboarding, project.id), "Alice did not complete onboarding")
+  assert(onboardingReady(bobOnboarding, project.id), "Bob did not complete onboarding")
+
+  phase = "delegated run"
   const proofToken = `project-collaboration-${crypto.randomUUID()}`
+  const runPrompt = `Return ${proofToken} and publish it as the Project proof page.`
   const run = await alice.runs.wait(
     (
       await alice.runs.create(
@@ -75,7 +93,7 @@ try {
           },
           agentType: "demo",
           provider: "local",
-          prompt: `Return ${proofToken} and publish it as the Project proof page.`,
+          prompt: runPrompt,
           env: { FIXTURE_OUTPUT_PATH: "site/index.html" },
           artifactPaths: ["site"],
           timeoutMs: 20_000,
@@ -88,6 +106,7 @@ try {
   assert(run.status === "succeeded", "Alice Run did not succeed")
   assert(run.delegatedBy.id === alicePrincipal.id, "Run attribution is not Alice")
 
+  phase = "durable session"
   const session = await alice.sessions.create(
     {
       projectId: project.id,
@@ -131,20 +150,120 @@ try {
   const artifactText = await new Response(artifactDownload.body).text()
   assert(artifactText.includes(proofToken), "Bob cannot read Alice's authorized task output")
 
+  phase = "Project Watch sessions"
   const aliceBoardSession = await boardLogin(boardOrigin, aliceCredential.secret)
   const bobBoardSession = await boardLogin(boardOrigin, bobCredential.secret)
   assert(
     aliceBoardSession.secret !== bobBoardSession.secret,
     "Board logins did not create independent browser sessions",
   )
+  phase = "Project presence"
+  const alicePresenceClientId = crypto.randomUUID()
+  const bobPresenceClientId = crypto.randomUUID()
+  assert(alicePresenceClientId !== bobPresenceClientId, "Presence clients collapsed")
+  await Promise.all([
+    boardJson(
+      boardOrigin,
+      `/projects/${project.id}/presence/${alicePresenceClientId}`,
+      aliceBoardSession.cookie,
+      { method: "PUT" },
+    ),
+    boardJson(
+      boardOrigin,
+      `/projects/${project.id}/presence/${bobPresenceClientId}`,
+      bobBoardSession.cookie,
+      { method: "PUT" },
+    ),
+  ])
+  const activePresence = await boardJson(
+    boardOrigin,
+    `/projects/${project.id}/presence`,
+    bobBoardSession.cookie,
+  )
+  assert(
+    boardHasPresence(activePresence, [alicePrincipal.id, bobPrincipal.id]),
+    "Project presence did not expose both active Principals",
+  )
+
   const [aliceBoard, bobBoard, bobConversation] = await Promise.all([
     boardJson(boardOrigin, `/board?projectId=${project.id}`, aliceBoardSession.cookie),
     boardJson(boardOrigin, `/board?projectId=${project.id}`, bobBoardSession.cookie),
-    boardJson(boardOrigin, `/task/run/${run.id}/events`, bobBoardSession.cookie),
+    boardJson(
+      boardOrigin,
+      `/task/run/${run.id}/events?projectId=${project.id}`,
+      bobBoardSession.cookie,
+    ),
   ])
   assert(boardHasWork(aliceBoard, run.id), "Alice's Board does not show the Run")
   assert(boardHasWork(bobBoard, run.id), "Bob's Board does not show Alice's Run")
   assert(boardHasEvents(bobConversation), "Bob cannot open the Run conversation in Project Watch")
+
+  phase = "Task Annotation marginalia"
+  const annotationAnchor = transcriptAnchor(runPrompt, proofToken)
+  const createdAnnotation = await boardJson(
+    boardOrigin,
+    `/projects/${project.id}/annotations`,
+    aliceBoardSession.cookie,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: { kind: "run", id: run.id },
+        anchor: annotationAnchor,
+        body: "Keep this exact execution identity visible during shared review.",
+      }),
+    },
+  )
+  const annotationId = taskAnnotationId(createdAnnotation)
+  const bobAnnotationDetail = await boardJson(
+    boardOrigin,
+    `/task/run/${run.id}/annotations?projectId=${project.id}`,
+    bobBoardSession.cookie,
+  )
+  assert(
+    boardHasAnnotation(bobAnnotationDetail, annotationId, annotationAnchor),
+    "Bob did not see Alice's exact-range Annotation",
+  )
+
+  phase = "Task Relay handoff"
+  const relayAnchor = bobRunEvents.items.at(-1)?.sequence ?? 0
+  assert(relayAnchor > 0, "Alice's Run has no durable Relay anchor")
+  const createdRelay = await boardJson(
+    boardOrigin,
+    `/projects/${project.id}/relays`,
+    aliceBoardSession.cookie,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: { kind: "run", id: run.id },
+        anchorSequence: relayAnchor,
+        recipientPrincipalId: bobPrincipal.id,
+        body: "Carry this exact source moment into Project review.",
+      }),
+    },
+  )
+  const relayId = taskRelayId(createdRelay)
+  const [bobBoardWithRelay, bobRelayDetail] = await Promise.all([
+    boardJson(boardOrigin, `/board?projectId=${project.id}`, bobBoardSession.cookie),
+    boardJson(
+      boardOrigin,
+      `/task/run/${run.id}/relays?projectId=${project.id}`,
+      bobBoardSession.cookie,
+    ),
+  ])
+  assert(boardHasPendingRelay(bobBoardWithRelay, relayId), "Bob did not receive Relay attention")
+  assert(
+    boardHasRelay(bobRelayDetail, relayId, relayAnchor),
+    "Bob cannot open the Relay source anchor",
+  )
+  const acknowledgedRelay = await boardJson(
+    boardOrigin,
+    `/projects/${project.id}/relays/${relayId}/acknowledge`,
+    bobBoardSession.cookie,
+    { method: "POST" },
+  )
+  assert(taskRelayAcknowledged(acknowledgedRelay, relayId), "Bob did not acknowledge the Relay")
   await expectHttpStatus(
     fetch(`${boardOrigin}/task/run/${run.id}/events`, {
       method: "POST",
@@ -154,16 +273,14 @@ try {
     "Project Watch accepted a lifecycle mutation",
   )
   await expectHttpStatus(
-    fetch(`${apiOrigin}/runs`, {
+    fetch(`${apiOrigin}/runs/${run.id}/cancel`, {
       method: "POST",
       headers: {
         Authorization: `Session ${bobBoardSession.secret}`,
-        "Content-Type": "application/json",
       },
-      body: "{}",
     }),
-    403,
-    "A read-only browser session accepted a mutation",
+    404,
+    "Bob's browser session controlled Alice's Run",
   )
 
   await expectNotFound(bob.runs.cancel(run.id), "Bob cancelled Alice's Run")
@@ -190,6 +307,7 @@ try {
   await expectNotFound(carol.artifacts.get(artifact.id), "Carol read Alice's artifact")
   await expectNotFound(carol.sessions.get(session.id), "Carol read Alice's Session")
 
+  phase = "credential rotation"
   const replacementAliceCredential = await alice.apiKeys.create("Alice rotated proof key")
   alice = client(apiOrigin, replacementAliceCredential.secret)
   await alice.apiKeys.revoke(aliceCredential.key.id)
@@ -214,6 +332,7 @@ try {
     "Alice's Principal-bound browser session did not survive API-key rotation",
   )
 
+  phase = "membership revocation"
   await admin.projects.removeMember(project.id, bobPrincipal.id)
   await expectNotFound(bob.projects.work(project.id), "Removed Bob retained SDK Project access")
   await expectNotFound(bob.runs.get(run.id), "Removed Bob retained SDK Run access")
@@ -226,6 +345,7 @@ try {
   )
   assert((await alice.projects.work(project.id)).length >= 2, "Alice lost Project access")
 
+  phase = "session cleanup"
   await alice.sessions.close(session.id)
   await waitForSessionStatus(alice, session.id, "closed")
   await waitForRuntimeCleanup(admin, run.id, session.id)
@@ -235,6 +355,7 @@ try {
   await controlPlane.stop()
   controlPlane = null
 
+  phase = "control-plane restart"
   controlPlane = await startControlPlane(livePaths, bootstrap.key, apiPort, previewPort)
   board = await startBoard(apiOrigin, boardPort)
   alice = client(apiOrigin, replacementAliceCredential.secret)
@@ -258,6 +379,7 @@ try {
   await controlPlane.stop()
   controlPlane = null
 
+  phase = "backup"
   const backup = await backupDataRoot(livePaths, backupPath)
   const verifiedBackup = await verifyDataBackup(backupPath)
   assert(
@@ -266,6 +388,7 @@ try {
   )
   await restoreDataRoot(backupPath, restoredPaths)
 
+  phase = "restored control plane"
   controlPlane = await startControlPlane(restoredPaths, bootstrap.key, apiPort, previewPort)
   board = await startBoard(apiOrigin, boardPort)
   alice = client(apiOrigin, replacementAliceCredential.secret)
@@ -291,23 +414,35 @@ try {
     "Restored Project Watch revived Bob's removed membership",
   )
 
-  const index = await fetch(`${boardOrigin}/`)
-  const indexText = await index.text()
-  assert(
-    index.ok && indexText.includes("Meanwhile · Project Watch"),
-    "Board assets are unavailable",
-  )
+  await assertBoardAssets(boardOrigin)
   const designQa = (await Bun.file(join(repositoryRoot, "design-qa.md")).text()).trim()
   assert(designQa.endsWith("passed"), "Design QA is not accepted")
-  const selectedReferenceDigest = await digestFile(
-    join(repositoryRoot, "docs/assets/project-watch-selected.png"),
+  const selectedLiveDeckReferenceDigest = await digestFile(
+    join(repositoryRoot, "docs/assets/project-room-signal-field-selected.png"),
   )
+  const selectedConversationDetailReferenceDigest = await digestFile(
+    join(repositoryRoot, "docs/assets/conversation-detail-marginalia-selected.png"),
+  )
+  const relayPreserved = (
+    await alice.taskRelays.list(project.id, { kind: "run", id: run.id })
+  ).some((relay) => relay.id === relayId && relay.acknowledgedAt !== null)
+  assert(relayPreserved, "Backup and restore did not preserve the acknowledged Relay")
+  const annotationPreserved = (
+    await alice.taskAnnotations.list(project.id, { kind: "run", id: run.id })
+  ).some(
+    (annotation) =>
+      annotation.id === annotationId &&
+      annotation.anchor.contentDigest === annotationAnchor.contentDigest &&
+      annotation.anchor.quote === annotationAnchor.quote,
+  )
+  assert(annotationPreserved, "Backup and restore did not preserve the exact-range Annotation")
 
   await board.stop()
   board = null
   await controlPlane.stop()
   controlPlane = null
 
+  phase = "credential absence and receipt"
   const privateValues = [
     bootstrap.key,
     aliceCredential.secret,
@@ -342,6 +477,16 @@ try {
       aliceAndBobInitiallyActive: true,
       carolNeverMember: true,
     },
+    onboarding: {
+      aliceAgentConnected: true,
+      bobAgentConnected: true,
+      aliceProjectSelected: true,
+      bobProjectSelected: true,
+    },
+    presence: {
+      independentClientLeases: true,
+      aliceAndBobVisible: true,
+    },
     work: {
       runId: run.id,
       sessionId: session.id,
@@ -350,6 +495,23 @@ try {
       visibleToBob: true,
       conversationVisibleToBob: true,
       artifactVisibleToBob: true,
+    },
+    relay: {
+      id: relayId,
+      workId: run.id,
+      anchorSequence: relayAnchor,
+      aliceCreatedForBob: true,
+      bobSawPendingAttention: true,
+      bobOpenedSourceAnchor: true,
+      bobAcknowledged: true,
+    },
+    annotation: {
+      id: annotationId,
+      workId: run.id,
+      anchorSequence: annotationAnchor.sequence,
+      sourceDigest: annotationAnchor.contentDigest,
+      aliceCreatedExactRange: true,
+      bobSawSameAnchor: true,
     },
     authorization: {
       bobCancelAliceRun: "not_found",
@@ -364,12 +526,12 @@ try {
       carolArtifactRead: "not_found",
       carolSessionRead: "not_found",
       boardMutation: "method_not_allowed",
-      browserSessionMutation: "forbidden",
+      browserSessionForeignRunControl: "not_found",
     },
     browser: {
       independentAliceAndBobSessions: true,
       httpOnlyCookies: true,
-      sameSiteStrictCookies: true,
+      sameSiteLaxCookies: true,
       bothSeeAliceRun: true,
       bobOpenedTaskConversation: true,
     },
@@ -392,11 +554,14 @@ try {
       restoreVerified: true,
       attributionPreserved: true,
       currentMembershipEnforced: true,
+      relayPreserved: true,
+      annotationPreserved: true,
       plaintextCredentialsAbsent: true,
     },
     presentation: {
       staticAssetsServed: true,
-      selectedReferenceDigest,
+      selectedLiveDeckReferenceDigest,
+      selectedConversationDetailReferenceDigest,
       designQa: "passed",
     },
   })
@@ -412,8 +577,17 @@ try {
     })}\n`,
   )
 } catch (error) {
-  const failure = normalizeFailure(error)
-  await Bun.write(Bun.stderr, `${JSON.stringify({ error: failure })}\n`)
+  let serviceFailure: unknown = null
+  try {
+    await board?.stop()
+    board = null
+    await controlPlane?.stop()
+    controlPlane = null
+  } catch (serviceError) {
+    serviceFailure = serviceError
+  }
+  const failure = normalizeFailure(serviceFailure ?? error)
+  await Bun.write(Bun.stderr, `${JSON.stringify({ error: failure, phase })}\n`)
   process.exitCode = 1
 } finally {
   await board?.stop().catch(() => undefined)
@@ -495,6 +669,39 @@ async function startBoard(controlPlaneOrigin: string, port: number): Promise<Man
   }
 }
 
+async function assertBoardAssets(origin: string): Promise<void> {
+  const [index, application, styles] = await Promise.all([
+    fetch(`${origin}/`),
+    fetch(`${origin}/app.js`),
+    fetch(`${origin}/styles.css`),
+  ])
+  const [indexText, applicationBytes, styleBytes] = await Promise.all([
+    index.text(),
+    application.arrayBuffer(),
+    styles.arrayBuffer(),
+  ])
+  assert(
+    index.ok &&
+      index.headers.get("content-type")?.startsWith("text/html") === true &&
+      indexText.includes('<div id="root"></div>') &&
+      indexText.includes('src="/app.js"') &&
+      indexText.includes('href="/styles.css"'),
+    "Board HTML shell is unavailable",
+  )
+  assert(
+    application.ok &&
+      application.headers.get("content-type")?.includes("javascript") === true &&
+      applicationBytes.byteLength > 1_024,
+    "Board application asset is unavailable",
+  )
+  assert(
+    styles.ok &&
+      styles.headers.get("content-type")?.startsWith("text/css") === true &&
+      styleBytes.byteLength > 1_024,
+    "Board stylesheet asset is unavailable",
+  )
+}
+
 function spawnService(argv: readonly string[], environment: Record<string, string>) {
   const process_ = Bun.spawn([...argv], {
     cwd: repositoryRoot,
@@ -541,13 +748,13 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
 async function boardLogin(origin: string, apiKey: string): Promise<BoardSession> {
   const response = await fetch(`${origin}/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Origin: origin },
     body: JSON.stringify({ apiKey }),
   })
   const setCookie = response.headers.get("set-cookie") ?? ""
   assert(response.status === 201, `Project Watch login failed with ${response.status}`)
   assert(setCookie.includes("HttpOnly"), "Project Watch cookie is not HttpOnly")
-  assert(setCookie.includes("SameSite=Strict"), "Project Watch cookie is not SameSite=Strict")
+  assert(setCookie.includes("SameSite=Lax"), "Project Watch cookie is not SameSite=Lax")
   const cookie = setCookie.split(";", 1)[0] ?? ""
   const encodedSecret = cookie.split("=", 2)[1] ?? ""
   const secret = decodeURIComponent(encodedSecret)
@@ -555,10 +762,140 @@ async function boardLogin(origin: string, apiKey: string): Promise<BoardSession>
   return { cookie, secret }
 }
 
-async function boardJson(origin: string, path: string, cookie: string): Promise<unknown> {
-  const response = await fetch(`${origin}${path}`, { headers: { Cookie: cookie } })
+async function boardJson(
+  origin: string,
+  path: string,
+  cookie: string,
+  init: RequestInit = {},
+): Promise<unknown> {
+  const headers = new Headers(init.headers)
+  headers.set("Cookie", cookie)
+  headers.set("Origin", origin)
+  const response = await fetch(`${origin}${path}`, { ...init, headers })
   assert(response.ok, `Project Watch request failed with ${response.status}: ${path}`)
   return response.json()
+}
+
+function taskRelayId(value: unknown): string {
+  if (!isRecord(value) || !isRecord(value["relay"]) || typeof value["relay"]["id"] !== "string") {
+    throw new Error("Project Watch returned an invalid Relay")
+  }
+  return value["relay"]["id"]
+}
+
+function taskAnnotationId(value: unknown): string {
+  if (
+    !isRecord(value) ||
+    !isRecord(value["annotation"]) ||
+    typeof value["annotation"]["id"] !== "string"
+  ) {
+    throw new Error("Project Watch returned an invalid Annotation")
+  }
+  return value["annotation"]["id"]
+}
+
+function transcriptAnchor(content: string, quote: string) {
+  const startOffset = content.indexOf(quote)
+  assert(startOffset >= 0, "Annotation quote is missing from the source transcript block")
+  const endOffset = startOffset + quote.length
+  return {
+    sequence: 0,
+    blockId: "ask.prompt",
+    startOffset,
+    endOffset,
+    quote,
+    prefix: content.slice(Math.max(0, startOffset - 64), startOffset),
+    suffix: content.slice(endOffset, endOffset + 64),
+    contentDigest: sha256Text(content),
+  }
+}
+
+function boardHasAnnotation(
+  value: unknown,
+  annotationId: string,
+  anchor: ReturnType<typeof transcriptAnchor>,
+): boolean {
+  return (
+    isRecord(value) &&
+    Array.isArray(value["annotations"]) &&
+    value["annotations"].some(
+      (annotation) =>
+        isRecord(annotation) &&
+        annotation["id"] === annotationId &&
+        isRecord(annotation["anchor"]) &&
+        annotation["anchor"]["sequence"] === anchor.sequence &&
+        annotation["anchor"]["blockId"] === anchor.blockId &&
+        annotation["anchor"]["startOffset"] === anchor.startOffset &&
+        annotation["anchor"]["endOffset"] === anchor.endOffset &&
+        annotation["anchor"]["quote"] === anchor.quote &&
+        annotation["anchor"]["contentDigest"] === anchor.contentDigest,
+    )
+  )
+}
+
+function boardHasPresence(value: unknown, principalIds: readonly string[]): boolean {
+  if (!isRecord(value) || !Array.isArray(value["items"])) return false
+  const visible = new Set(
+    value["items"].flatMap((lease) =>
+      isRecord(lease) &&
+      isRecord(lease["principal"]) &&
+      typeof lease["principal"]["id"] === "string"
+        ? [lease["principal"]["id"]]
+        : [],
+    ),
+  )
+  return principalIds.every((principalId) => visible.has(principalId))
+}
+
+function onboardingReady(value: unknown, projectId: string): boolean {
+  if (!isRecord(value)) return false
+  const connections = value["agentConnections"]
+  const projects = value["projects"]
+  return (
+    Array.isArray(connections) &&
+    connections.some(
+      (connection) =>
+        isRecord(connection) &&
+        connection["agentType"] === "demo" &&
+        connection["revokedAt"] === null,
+    ) &&
+    Array.isArray(projects) &&
+    projects.some(
+      (project) =>
+        isRecord(project) &&
+        isRecord(project["project"]) &&
+        project["project"]["id"] === projectId &&
+        project["selected"] === true,
+    )
+  )
+}
+
+function boardHasPendingRelay(value: unknown, relayId: string): boolean {
+  return (
+    isRecord(value) &&
+    Array.isArray(value["pendingRelays"]) &&
+    value["pendingRelays"].some((relay) => isRecord(relay) && relay["id"] === relayId)
+  )
+}
+
+function boardHasRelay(value: unknown, relayId: string, anchorSequence: number): boolean {
+  return (
+    isRecord(value) &&
+    Array.isArray(value["relays"]) &&
+    value["relays"].some(
+      (relay) =>
+        isRecord(relay) && relay["id"] === relayId && relay["anchorSequence"] === anchorSequence,
+    )
+  )
+}
+
+function taskRelayAcknowledged(value: unknown, relayId: string): boolean {
+  return (
+    isRecord(value) &&
+    isRecord(value["relay"]) &&
+    value["relay"]["id"] === relayId &&
+    typeof value["relay"]["acknowledgedAt"] === "string"
+  )
 }
 
 function boardHasWork(value: unknown, workId: string): boolean {
@@ -709,6 +1046,10 @@ function containsBytes(haystack: Uint8Array, needle: Uint8Array): boolean {
 async function digestFile(path: string): Promise<string> {
   const bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
   return `sha256:${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}`
+}
+
+function sha256Text(value: string): string {
+  return new Bun.CryptoHasher("sha256").update(value).digest("hex")
 }
 
 async function repositoryRevision(): Promise<{ readonly commit: string; readonly dirty: boolean }> {

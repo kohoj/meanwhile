@@ -2,6 +2,7 @@ import type {
   Principal,
   PrincipalKind,
   Project,
+  ProjectAccess,
   ProjectMember,
   ProjectRole,
   ProjectWorkItem,
@@ -22,8 +23,9 @@ export class ProjectService {
       | "createProjectWithAudit"
       | "getProject"
       | "listProjectsForPrincipal"
-      | "getProjectMember"
+      | "getProjectAccess"
       | "listProjectMembers"
+      | "listProjectParticipants"
       | "addProjectMemberWithAudit"
       | "removeProjectMemberWithAudit"
       | "listProjectWork"
@@ -46,7 +48,11 @@ export class ProjectService {
     }
     return {
       principal,
-      projects: this.store.listProjectsForPrincipal(context.ownerId, context.principalId),
+      projects: this.store.listProjectsForPrincipal(
+        context.ownerId,
+        context.principalId,
+        this.now().toISOString(),
+      ),
     }
   }
 
@@ -109,11 +115,15 @@ export class ProjectService {
   }
 
   list(context: RequestContext): readonly Project[] {
-    return this.store.listProjectsForPrincipal(context.ownerId, context.principalId)
+    return this.store.listProjectsForPrincipal(
+      context.ownerId,
+      context.principalId,
+      this.now().toISOString(),
+    )
   }
 
   get(context: RequestContext, projectId: string): Project {
-    this.#requireMembership(context, projectId)
+    this.#requireAccess(context, projectId)
     const project = this.store.getProject(context.ownerId, projectId)
     if (project === null || project.archivedAt !== null) {
       throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
@@ -122,8 +132,14 @@ export class ProjectService {
   }
 
   members(context: RequestContext, projectId: string): readonly ProjectMember[] {
-    this.#requireMembership(context, projectId)
+    this.#requireAccess(context, projectId)
     return this.store.listProjectMembers(context.ownerId, projectId)
+  }
+
+  participants(context: RequestContext, projectId: string): readonly ProjectAccess[] {
+    const at = this.now().toISOString()
+    this.#requireAccess(context, projectId, at)
+    return this.store.listProjectParticipants(context.ownerId, projectId, at)
   }
 
   addMember(
@@ -192,7 +208,12 @@ export class ProjectService {
   }
 
   work(context: RequestContext, projectId: string): readonly ProjectWorkItem[] {
-    return this.store.listProjectWork(context.ownerId, context.principalId, projectId)
+    return this.store.listProjectWork(
+      context.ownerId,
+      context.principalId,
+      projectId,
+      this.now().toISOString(),
+    )
   }
 
   #requireOwnerAdmin(context: RequestContext): void {
@@ -201,15 +222,20 @@ export class ProjectService {
     }
   }
 
-  #requireMembership(context: RequestContext, projectId: string): ProjectMember {
-    const membership = this.store.getProjectMember(context.ownerId, projectId, context.principalId)
-    if (membership === null) throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
-    return membership
+  #requireAccess(
+    context: RequestContext,
+    projectId: string,
+    at: string = this.now().toISOString(),
+  ): ProjectAccess {
+    const access = this.store.getProjectAccess(context.ownerId, projectId, context.principalId, at)
+    if (access === null) {
+      throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
+    }
+    return access
   }
 
   #requireMaintainer(context: RequestContext, projectId: string): void {
-    const membership = this.#requireMembership(context, projectId)
-    if (membership.role !== "maintainer") {
+    if (this.#requireAccess(context, projectId).access !== "administer") {
       throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
     }
   }

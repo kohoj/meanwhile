@@ -19,7 +19,7 @@ export interface RuntimeCapabilities {
   /** Ordered, idempotent input delivery to an already-running process. */
   readonly processInput: boolean
   readonly portExposure: boolean
-  /** Agent-phase exact-host egress policy enforced outside the runtime. */
+  /** Exact-host setup and agent egress policy enforced outside the runtime. */
   readonly networkPolicy: boolean
   /** Real credentials remain outside the runtime and are redeemed only at trusted egress. */
   readonly credentialMediation: "none" | "http"

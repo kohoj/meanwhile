@@ -31,6 +31,16 @@ Bun loads local `.env` files for development. Production should inject environme
 | `MEANWHILE_DATA_DIR` | Yes in production | Root for SQLite, artifacts, local runtime state, and other durable local data |
 | `MEANWHILE_LOG_LEVEL` | No | Bounded structured-log threshold |
 | `MEANWHILE_API_KEY` | Local bootstrap only | Initial development owner key; never the production key lifecycle |
+| `MEANWHILE_EXTERNAL_AUTH_OWNER_ID` | With external auth | Exact Owner receiving linked external identities; external subjects never choose an Owner |
+| `MEANWHILE_EXTERNAL_REGISTRATION` | No | `closed` by default; `open` permits a verified unknown provider subject to create one stable member Principal inside the configured external-auth Owner |
+| `MEANWHILE_IDENTITY_CREDENTIAL_KEY` | With external auth | 32-byte base64url AES-GCM key kept in deployment secret storage; never logged or returned to the browser |
+| `MEANWHILE_IDENTITY_CREDENTIAL_KEY_VERSION` | No | Stable metadata label for the configured credential key; defaults to `v1` |
+| `MEANWHILE_GITHUB_CLIENT_ID` | With GitHub auth | GitHub App OAuth client identifier; configure only with the matching secret and callback |
+| `MEANWHILE_GITHUB_CLIENT_SECRET` | With GitHub auth | GitHub App OAuth client secret |
+| `MEANWHILE_GITHUB_CALLBACK_URL` | With GitHub auth | Exact public Board callback URL, HTTPS except loopback development |
+| `MEANWHILE_GOOGLE_CLIENT_ID` | With Google auth | Google OIDC client identifier; configure only with the matching secret and callback |
+| `MEANWHILE_GOOGLE_CLIENT_SECRET` | With Google auth | Google OIDC client secret |
+| `MEANWHILE_GOOGLE_CALLBACK_URL` | With Google auth | Exact public Board callback URL, HTTPS except loopback development |
 | `MEANWHILE_RUNNER_PATH` | Yes outside source development | Fixed standalone runner executable |
 | `MEANWHILE_AGENT_CATALOG` | No | Agent catalog path; defaults to `config/agents.json` |
 | `MEANWHILE_DEFAULT_PROVIDER` | No | Registry name used when a request omits an allowed provider |
@@ -101,18 +111,111 @@ Mount the ownership parent of `MEANWHILE_DATA_DIR` on durable storage and ensure
 
 Compose also starts Project Watch on host loopback port 7333. The Board process
 holds no API key and no database connection; it exchanges each person's API
-key once with the private control plane and returns an opaque read-only session
-in an HttpOnly SameSite cookie. To serve people in different locations, place a
+key once with the private control plane and returns an opaque deny-by-default
+session in an HttpOnly SameSite cookie. The session can create and cancel only
+the current person's one-shot Runs, change that Principal's connected-onboarding
+selection, heartbeat/release an expiring Project PresenceLease, and perform exact
+Task Relay and Task Annotation writes; Board mutations also require an exact
+same-origin request. To serve people in different locations, place a
 host-level HTTPS reverse proxy in front of `127.0.0.1:7333`. Publish the Board
 origin, preserve `X-Forwarded-Proto: https`, and do not configure
 `MEANWHILE_API_KEY` on the Project Watch service in team mode.
 
-Keep 7331 and 7332 private by default. If members must delegate from remote
-machines, expose 7331 through a separate operator-owned HTTPS hostname or a
-private network, never through the Board BFF. Principal-bound keys remain the
+### Review the complete Project Watch journey locally
+
+For contributor UX review without a provider account, run:
+
+```console
+bun run board:preview
+```
+
+The command rebuilds the Board and prints a loopback URL plus a local-only
+installation key. The preview begins before onboarding and contains the
+Northstar three-person room, live transcript, foldable work, marginalia,
+addressed Relay, and first-delegation states. Use a different port with
+`MEANWHILE_BOARD_PORT=<port>` when 7543 is occupied.
+
+The non-interactive contract check is:
+
+```console
+bun run board:journey:check
+```
+
+It starts both fixture and BFF on ephemeral ports and asserts login, connected
+onboarding, Lobby, room, conversation detail, Annotation, Relay, delegation,
+authoritative refresh, and self-cancellation. This deterministic path is a
+contributor acceptance surface, not GitHub/Google OAuth, remote-agent, deployed,
+or two-human proof.
+
+Keep 7331 and 7332 private by default. Members can delegate one-shot Runs through
+the Board BFF. Expose 7331 only when remote CLI, SDK, AgentSession, deployment,
+or administration access is required, using a separate operator-owned HTTPS
+hostname or a private network. Principal-bound keys remain the
 application authorization boundary; ingress authentication, rate-limiting,
 and reachability policy remain deployment adapters. Never expose 7332, and
 never distribute the bootstrap key.
+
+### Configure external sign-in
+
+External sign-in is optional and deployment-neutral. Create provider clients
+whose exact callback URLs terminate at the public Board origin:
+
+```text
+https://watch.example.com/auth/github/callback
+https://watch.example.com/auth/google/callback
+```
+
+Generate a 32-byte base64url vault key in a trusted shell and place it directly
+in the deployment secret manager together with the provider secret. Do not put
+the generated value in documentation, command history, or source control:
+
+```console
+bun -e 'console.log(new Uint8Array(32).toBase64({ alphabet: "base64url", omitPadding: true }))'
+```
+
+Configure `MEANWHILE_EXTERNAL_AUTH_OWNER_ID`, the registration policy, the vault key, and one or both
+complete provider tuples from [.env.example](../.env.example). Partial tuples,
+unused vault configuration, non-HTTPS public callbacks, or a callback with a
+path mismatch fail startup. The Board discovers configured providers from the
+control plane; it never receives a provider client secret.
+
+The standard local-bootstrap Owner is
+`00000000-0000-4000-8000-000000000001`; another installation must use the exact
+durable Owner ID it initialized. Startup rejects an unknown Owner rather than
+silently creating a new tenant.
+
+The GitHub App must enable expiring user access tokens and grant only the
+repository permissions the installation needs; private checkout requires
+Contents read access. The current parser deliberately rejects non-expiring token
+responses because they omit refresh/expiry material and violate the bounded
+credential contract.
+
+`MEANWHILE_EXTERNAL_REGISTRATION=closed` maps login only onto an existing active
+Principal, preserving invitation and operator-provisioned deployments. With
+`open`, a verified unknown GitHub or Google subject creates exactly one stable
+member Principal inside the configured Owner; the subject never chooses an
+Owner. This creates identity, not ambient Project access. GitHub Project access
+is computed at request time from a current repository grant matching an active
+Project binding, while explicit local membership remains an independent unioned
+authority. Google users may link GitHub during onboarding to obtain repository
+grants.
+
+An `administer` GitHub grant may atomically import its repository as a Project
+room or bind it to an existing Project. Other Principals with matching current
+grants enter that room as `watch`, `participate`, or `administer`; expiration or
+revocation removes only that provider-derived access and never rewrites durable
+attribution or explicit membership. At Run or AgentSession checkout, the
+control plane revalidates the delegator's own exact installation and repository,
+exposes only that person's access token to the bounded git helper, redacts its
+output, and releases the material before the agent starts. One person's provider
+rejection revokes that grant, not the shared Project binding. GitHub webhook
+invalidation is not yet wired, so keep provider permissions narrow and do not
+describe grant changes as push-invalidated until that receipt exists.
+
+Keep the vault key stable across restarts and backups. The current key-version
+field is audit metadata, not a multi-key decrypt ring. A key change therefore
+requires an explicit maintenance window and relinking affected identities; do
+not rotate it by editing an environment variable during a rolling restart.
 
 ### Add a Project member
 
@@ -192,12 +295,15 @@ bun run proof:deployed-collaboration:verify -- \
   --commit="$(git rev-parse HEAD)"
 ```
 
-The proof creates one deterministic Run per Principal, checks reciprocal
-Project and conversation visibility through both the public API and Project
-Watch, rejects cross-delegator cancellation, rejects Board and browser-session
-mutation, logs both sessions out, and writes a digest-bound receipt with no
-credential material. Its proof class is `deployed-two-principal-system`; it is
-not evidence that two people used separate devices or networks.
+The proof completes connected onboarding for both Principals, publishes two
+independent Presence leases, creates one deterministic Run per Principal,
+checks reciprocal Project and conversation visibility through both the public
+API and Project Watch, reconstructs one exact-range Annotation for the other
+Principal, carries one addressed Relay through acknowledgement, rejects
+cross-delegator cancellation, rejects Board and browser-session mutation, logs
+both sessions out, and writes a digest-bound receipt with no credential
+material. Its proof class is `deployed-two-principal-system`; it is not evidence
+that two people used separate devices or networks.
 
 ### External two-person acceptance
 

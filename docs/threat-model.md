@@ -22,8 +22,8 @@ Meanwhile aims to provide:
 
 The initial architecture does not claim to:
 
-- provide cross-Owner Projects, external identity-provider login, invitation
-  delivery, delegated operator grants, or browser mutation authority;
+- provide cross-Owner Projects, automatic external-identity signup, invitation
+  delivery, delegated operator grants, or provider-derived lifecycle authority;
 - make the local provider a sandbox;
 - make an explicitly authorized model/API destination trustworthy;
 - prevent an agent from exfiltrating workspace data to an explicitly allowed destination;
@@ -43,6 +43,7 @@ High-value assets include:
 
 - owner API keys and key hashes;
 - control-plane, Cloudflare bridge, repository, model, and deployment credentials;
+- sealed external identity access and refresh tokens;
 - prompts, repository inputs, source code, process output, and artifacts;
 - run/session/turn/deployment state, event journals, logs, audit history, and ownership relationships;
 - opaque runtime/process handles;
@@ -65,17 +66,50 @@ High-value assets include:
 | Deployment target | External trusted dependency with scoped credentials |
 | Local host administrator | Fully trusted; can read or alter local state |
 | Internet client | Unauthenticated and hostile by default |
+| External identity/repository provider | Trusted only for its signed identity and current repository grant response; never for Meanwhile lifecycle state |
 
 An API key is authority for its bound stable Principal. Anyone holding it acts
 as that Principal until revocation. Team members must not share one key. The
 Board exchanges each person's key once for an opaque, expiring, revocable,
-read-only browser session; UI filtering is never the authorization boundary.
+deny-by-default browser session. Route-exact self-Run and Relay writes require
+same-origin Board requests and still pass through Project/delegator service
+authorization; UI filtering is never the authorization boundary.
+
+The external-auth boundary uses provider-bound sealed state, PKCE S256, exact
+redirect matching, a five-minute transaction lifetime, and a Board-side
+HttpOnly correlation cookie bound to provider, intent, and state hash. Login,
+link, and invite callbacks are different capabilities: login is public but
+accepts only login state; link requires the same authenticated Principal session
+that opened the transaction; invite state requires a valid high-entropy,
+digest-only, expiring, revocable, single-use invitation to an already
+provisioned person Principal. Invitation redemption, identity binding, and
+browser-session issuance commit atomically, so replay or an identity conflict
+cannot partially consume authority. GitHub and Google subjects map only to an
+existing Owner-scoped Principal; unknown or conflicting subjects fail closed. Provider
+access material is AES-GCM sealed with Owner and identity associated data and is
+never returned to the browser. The opaque Meanwhile session is the browser's
+only resulting authority.
+
+The GitHub directory adapter accepts a user access token only for bounded
+provider calls and never returns, logs, or includes it in normalized failures.
+Repository names and permissions returned by GitHub remain untrusted provider
+data until validated. A repository grant may qualify watch or participation,
+but it never grants control of another Principal's agent. Immediately before a
+bound private checkout, the control plane revalidates the exact installation
+and repository, passes the token only to the short-lived Git helper, redacts its
+output, and releases the material before the agent starts. Expired credentials
+require explicit relinking. Provider rejection or repository absence revokes
+the binding locally. Webhook invalidation is not yet implemented, so changes
+that do not reject provider access are detected at checkout or the next explicit
+authorization refresh rather than pushed immediately.
 
 ## Trust boundaries
 
 ```text
-hostile client
-    │ bearer key + validated JSON
+hostile browser
+    │ same-origin BFF + opaque HttpOnly session
+hostile API client
+    │ Principal-bound bearer key + validated JSON
 ────┼──────── public API boundary ─────────────────────
     ▼
 trusted control plane ───── SQLite / ArtifactStore

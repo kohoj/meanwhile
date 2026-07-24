@@ -50,6 +50,22 @@ const environmentSchema = z.object({
     .string()
     .regex(/^[a-f0-9]{64}$/)
     .optional(),
+  MEANWHILE_EXTERNAL_AUTH_OWNER_ID: z.string().uuid().optional(),
+  MEANWHILE_EXTERNAL_REGISTRATION: z.enum(["closed", "open"]).default("closed"),
+  MEANWHILE_IDENTITY_CREDENTIAL_KEY: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{43}$/)
+    .optional(),
+  MEANWHILE_IDENTITY_CREDENTIAL_KEY_VERSION: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/)
+    .default("v1"),
+  MEANWHILE_GITHUB_CLIENT_ID: z.string().min(1).optional(),
+  MEANWHILE_GITHUB_CLIENT_SECRET: z.string().min(1).optional(),
+  MEANWHILE_GITHUB_CALLBACK_URL: z.url().optional(),
+  MEANWHILE_GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  MEANWHILE_GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+  MEANWHILE_GOOGLE_CALLBACK_URL: z.url().optional(),
 })
 
 export interface AppConfig {
@@ -86,6 +102,22 @@ export interface AppConfig {
     readonly runtimeImageDigest?: string
     readonly runnerDigest?: string
   }
+  readonly externalAuth?: {
+    readonly ownerId: string
+    readonly registration: "closed" | "open"
+    readonly credentialKey: string
+    readonly credentialKeyVersion: string
+    readonly github?: {
+      readonly clientId: string
+      readonly clientSecret: string
+      readonly callbackUrl: string
+    }
+    readonly google?: {
+      readonly clientId: string
+      readonly clientSecret: string
+      readonly callbackUrl: string
+    }
+  }
 }
 
 const absolute = (path: string): string => (isAbsolute(path) ? path : resolve(path))
@@ -111,6 +143,26 @@ export const loadConfig = (
     parsed.MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER,
   )
   const secretSourceCatalog = parseSecretSourceCatalog(parsed.MEANWHILE_SECRET_ENV_ALLOWLIST)
+  const githubConfigured = anyDefined([
+    parsed.MEANWHILE_GITHUB_CLIENT_ID,
+    parsed.MEANWHILE_GITHUB_CLIENT_SECRET,
+    parsed.MEANWHILE_GITHUB_CALLBACK_URL,
+  ])
+  const googleConfigured = anyDefined([
+    parsed.MEANWHILE_GOOGLE_CLIENT_ID,
+    parsed.MEANWHILE_GOOGLE_CLIENT_SECRET,
+    parsed.MEANWHILE_GOOGLE_CALLBACK_URL,
+  ])
+  const externalAuthConfigured = githubConfigured || googleConfigured
+  const externalAuthKeysConfigured = anyDefined([
+    parsed.MEANWHILE_EXTERNAL_AUTH_OWNER_ID,
+    parsed.MEANWHILE_IDENTITY_CREDENTIAL_KEY,
+  ])
+  const externalRegistrationConfigured =
+    environment["MEANWHILE_EXTERNAL_REGISTRATION"] !== undefined
+  const externalAuthKeysComplete =
+    parsed.MEANWHILE_EXTERNAL_AUTH_OWNER_ID !== undefined &&
+    parsed.MEANWHILE_IDENTITY_CREDENTIAL_KEY !== undefined
 
   if (cloudflareConfigured && !(parsed.CLOUDFLARE_BRIDGE_URL && parsed.CLOUDFLARE_BRIDGE_TOKEN)) {
     throw new Error("CLOUDFLARE_BRIDGE_URL and CLOUDFLARE_BRIDGE_TOKEN must be configured together")
@@ -124,6 +176,38 @@ export const loadConfig = (
   if (isWildcardHost(parsed.MEANWHILE_PREVIEW_HOST) && previewPublicUrl === undefined) {
     throw new Error(
       "MEANWHILE_PREVIEW_PUBLIC_URL is required when MEANWHILE_PREVIEW_HOST binds all interfaces",
+    )
+  }
+  if (
+    githubConfigured &&
+    !(
+      parsed.MEANWHILE_GITHUB_CLIENT_ID &&
+      parsed.MEANWHILE_GITHUB_CLIENT_SECRET &&
+      parsed.MEANWHILE_GITHUB_CALLBACK_URL
+    )
+  ) {
+    throw new Error(
+      "MEANWHILE_GITHUB_CLIENT_ID, MEANWHILE_GITHUB_CLIENT_SECRET, and MEANWHILE_GITHUB_CALLBACK_URL must be configured together",
+    )
+  }
+  if (
+    googleConfigured &&
+    !(
+      parsed.MEANWHILE_GOOGLE_CLIENT_ID &&
+      parsed.MEANWHILE_GOOGLE_CLIENT_SECRET &&
+      parsed.MEANWHILE_GOOGLE_CALLBACK_URL
+    )
+  ) {
+    throw new Error(
+      "MEANWHILE_GOOGLE_CLIENT_ID, MEANWHILE_GOOGLE_CLIENT_SECRET, and MEANWHILE_GOOGLE_CALLBACK_URL must be configured together",
+    )
+  }
+  if (
+    externalAuthConfigured !== externalAuthKeysComplete ||
+    (!externalAuthConfigured && (externalAuthKeysConfigured || externalRegistrationConfigured))
+  ) {
+    throw new Error(
+      "External auth providers require MEANWHILE_EXTERNAL_AUTH_OWNER_ID and MEANWHILE_IDENTITY_CREDENTIAL_KEY, and unused auth keys are rejected",
     )
   }
 
@@ -167,6 +251,40 @@ export const loadConfig = (
             ...(parsed.CLOUDFLARE_RUNNER_DIGEST === undefined
               ? {}
               : { runnerDigest: parsed.CLOUDFLARE_RUNNER_DIGEST }),
+          },
+        }
+      : {}),
+    ...(externalAuthConfigured
+      ? {
+          externalAuth: {
+            ownerId: parsed.MEANWHILE_EXTERNAL_AUTH_OWNER_ID as string,
+            registration: parsed.MEANWHILE_EXTERNAL_REGISTRATION,
+            credentialKey: parsed.MEANWHILE_IDENTITY_CREDENTIAL_KEY as string,
+            credentialKeyVersion: parsed.MEANWHILE_IDENTITY_CREDENTIAL_KEY_VERSION,
+            ...(githubConfigured
+              ? {
+                  github: {
+                    clientId: parsed.MEANWHILE_GITHUB_CLIENT_ID as string,
+                    clientSecret: parsed.MEANWHILE_GITHUB_CLIENT_SECRET as string,
+                    callbackUrl: normalizeExternalCallback(
+                      parsed.MEANWHILE_GITHUB_CALLBACK_URL as string,
+                      "MEANWHILE_GITHUB_CALLBACK_URL",
+                    ),
+                  },
+                }
+              : {}),
+            ...(googleConfigured
+              ? {
+                  google: {
+                    clientId: parsed.MEANWHILE_GOOGLE_CLIENT_ID as string,
+                    clientSecret: parsed.MEANWHILE_GOOGLE_CLIENT_SECRET as string,
+                    callbackUrl: normalizeExternalCallback(
+                      parsed.MEANWHILE_GOOGLE_CALLBACK_URL as string,
+                      "MEANWHILE_GOOGLE_CALLBACK_URL",
+                    ),
+                  },
+                }
+              : {}),
           },
         }
       : {}),
@@ -222,6 +340,25 @@ const normalizePublicOrigin = (value: string): string => {
   }
   return url.origin
 }
+
+const normalizeExternalCallback = (value: string, name: string): string => {
+  const url = new URL(value)
+  const loopback =
+    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1"
+  if (
+    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0
+  ) {
+    throw new Error(`${name} must be an exact HTTPS or loopback callback URL`)
+  }
+  return url.href
+}
+
+const anyDefined = (values: readonly (string | undefined)[]): boolean =>
+  values.some((value) => value !== undefined)
 
 const isWildcardHost = (hostname: string): boolean =>
   hostname === "0.0.0.0" || hostname === "::" || hostname === "0:0:0:0:0:0:0:0"

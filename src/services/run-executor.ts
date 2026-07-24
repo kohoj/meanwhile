@@ -45,6 +45,7 @@ import {
 } from "./artifact-collector"
 import { attachAgentCredentialLease } from "./credential-lease-attacher"
 import type { ExecutionContext } from "./execution-context"
+import type { RepositoryCredentialResolver } from "./repository-credential-resolver"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
 const DEFAULT_POLL_MS = 500
@@ -59,6 +60,7 @@ export interface RunExecutorOptions {
   readonly artifactStore: ArtifactStore
   readonly artifactLimits: ArtifactCollectionLimits
   readonly secrets: SecretResolver
+  readonly repositoryCredentials?: RepositoryCredentialResolver
   readonly executionContext?: Pick<ExecutionContext, "renderPrompt">
   readonly logger: StructuredLogger
   readonly telemetry?: Telemetry
@@ -78,6 +80,7 @@ export class RunExecutor implements ManagedComponent {
   readonly #artifactStore: ArtifactStore
   readonly #artifactLimits: ArtifactCollectionLimits
   readonly #secrets: SecretResolver
+  readonly #repositoryCredentials: RepositoryCredentialResolver | undefined
   readonly #executionContext: Pick<ExecutionContext, "renderPrompt"> | undefined
   readonly #logger: StructuredLogger
   readonly #telemetry: Telemetry | undefined
@@ -103,6 +106,7 @@ export class RunExecutor implements ManagedComponent {
     this.#artifactStore = options.artifactStore
     this.#artifactLimits = options.artifactLimits
     this.#secrets = options.secrets
+    this.#repositoryCredentials = options.repositoryCredentials
     this.#executionContext = options.executionContext
     this.#logger = options.logger
     this.#telemetry = options.telemetry
@@ -470,29 +474,6 @@ export class RunExecutor implements ManagedComponent {
       }
       if (processState.status === "missing") throw runtimeLost(provider.name, "process")
     } else {
-      await this.#span(
-        scope,
-        "meanwhile.workspace.prepare",
-        { "run.id": run.id, "provider.name": provider.name },
-        () => this.#prepareWorkspace(run, provider, runtime),
-      )
-      this.#assertRunning()
-      const current = this.#store.getRunInternal(run.id)
-      if (current === null || isTerminalRunStatus(current.status)) return
-      const processId = `runner-${run.id}`.slice(0, 128)
-      const launch = this.#store.ensureRunProcessLaunchIntent({
-        runId: run.id,
-        ownerId: run.ownerId,
-        runtimeId: runtimeRecord.id,
-        processId,
-        timeoutBudgetMs: Math.max(
-          1,
-          Date.parse(run.deadlineAt as string) - this.#clock().getTime(),
-        ),
-        createdAt: this.#now(),
-      })
-      if (launch === null) return
-      const prompt = await this.#renderPrompt(current)
       const resolvedSecrets = await this.#secrets.resolve(
         run.secretRefs,
         secretScope(run.ownerId, "agent", run.id),
@@ -508,9 +489,33 @@ export class RunExecutor implements ManagedComponent {
           providerName: provider.name,
           credentialBroker,
           agentSpec: run.agentSpec,
+          workspace: run.workspace,
           secrets: resolvedSecrets,
           at: this.#now(),
         })
+        await this.#span(
+          scope,
+          "meanwhile.workspace.prepare",
+          { "run.id": run.id, "provider.name": provider.name },
+          () => this.#prepareWorkspace(run, provider, runtime),
+        )
+        this.#assertRunning()
+        const current = this.#store.getRunInternal(run.id)
+        if (current === null || isTerminalRunStatus(current.status)) return
+        const processId = `runner-${run.id}`.slice(0, 128)
+        const launch = this.#store.ensureRunProcessLaunchIntent({
+          runId: run.id,
+          ownerId: run.ownerId,
+          runtimeId: runtimeRecord.id,
+          processId,
+          timeoutBudgetMs: Math.max(
+            1,
+            Date.parse(run.deadlineAt as string) - this.#clock().getTime(),
+          ),
+          createdAt: this.#now(),
+        })
+        if (launch === null) return
+        const prompt = await this.#renderPrompt(current)
         const timeoutBudgetMs = launch.timeoutBudgetMs
         const spec: RunnerSpec = {
           protocolVersion: RUNNER_PROTOCOL_VERSION,
@@ -608,6 +613,7 @@ export class RunExecutor implements ManagedComponent {
         providerName: provider.name,
         credentialBroker,
         agentSpec: run.agentSpec,
+        workspace: run.workspace,
         secrets: resolvedRecoverySecrets,
         at: this.#now(),
       })
@@ -750,6 +756,18 @@ export class RunExecutor implements ManagedComponent {
         secretScope(run.ownerId, "repository", run.id),
       )
       repositoryCredential = repositorySecrets.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
+    } else if (run.workspace.type === "repository") {
+      repositorySecrets =
+        (await this.#repositoryCredentials?.resolve({
+          ownerId: run.ownerId,
+          principalId: run.delegatedBy.id,
+          projectId: run.projectId,
+          repositoryUrl: run.workspace.url,
+          resourceType: "run",
+          resourceId: run.id,
+          signal: this.#observationSignal(),
+        })) ?? null
+      repositoryCredential = repositorySecrets?.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
     }
     try {
       const prepared = await this.#workspace.prepare({

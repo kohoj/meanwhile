@@ -24,7 +24,7 @@ afterEach(async () => {
   temporary = null
 })
 
-test("the exact v0.1.3 migration preserves identity, work, and idempotency", async () => {
+test("the exact v0.1.3 migration chain preserves identity, work, and idempotency", async () => {
   temporary = await mkdtemp(join(tmpdir(), "meanwhile-project-migration-"))
   const path = join(temporary, "meanwhile.sqlite")
   const legacy = new Database(path, { strict: true })
@@ -33,21 +33,21 @@ test("the exact v0.1.3 migration preserves identity, work, and idempotency", asy
   seedLegacyData(legacy)
   legacy.close()
 
-  const migration = Bun.spawn(
-    [
-      Bun.which("bun") ?? "bun",
-      "scripts/migrate-project-collaboration.ts",
-      `--database=${path}`,
-      "--write",
-    ],
-    { cwd: resolve("."), stdout: "pipe", stderr: "pipe" },
-  )
-  const [exitCode, stderr] = await Promise.all([
-    migration.exited,
-    new Response(migration.stderr).text(),
-  ])
-  expect(stderr).toBe("")
-  expect(exitCode).toBe(0)
+  for (const script of [
+    "scripts/migrate-project-collaboration.ts",
+    "scripts/migrate-task-relays.ts",
+  ]) {
+    const migration = Bun.spawn(
+      [Bun.which("bun") ?? "bun", script, `--database=${path}`, "--write"],
+      { cwd: resolve("."), stdout: "pipe", stderr: "pipe" },
+    )
+    const [exitCode, stderr] = await Promise.all([
+      migration.exited,
+      new Response(migration.stderr).text(),
+    ])
+    expect(stderr).toBe("")
+    expect(exitCode).toBe(0)
+  }
 
   const migrated = new Database(path, { strict: true, readonly: true })
   try {
@@ -112,10 +112,38 @@ function legacySchemaStatements(): readonly string[] {
     "run_project_bindings_project_idx",
     "session_project_bindings",
     "session_project_bindings_project_idx",
+    "task_relays",
+    "task_relays_project_task_idx",
+    "task_relays_recipient_idx",
+    "task_relay_acknowledgements",
+    "task_relay_acknowledgements_principal_idx",
+    "task_annotations",
+    "task_annotations_project_task_idx",
+    "task_annotation_resolutions",
+    "task_annotation_resolutions_resolver_idx",
+    "external_identities",
+    "external_identities_principal_idx",
+    "identity_credentials",
+    "identity_credentials_active_identity_idx",
+    "external_project_grants",
+    "external_project_grants_principal_idx",
+    "project_repository_bindings",
+    "project_repository_bindings_active_project_idx",
+    "project_repository_bindings_repository_idx",
+    "agent_connections",
+    "agent_connections_active_agent_idx",
+    "agent_connections_principal_idx",
+    "project_selections",
+    "project_selections_principal_idx",
+    "presence_leases",
+    "presence_leases_project_expiry_idx",
+    "principal_invitations",
+    "principal_invitations_prefix_idx",
+    "principal_invitations_principal_idx",
   ])
   return splitSchemaSql(SCHEMA_SQL)
     .filter((statement) => {
-      const match = /^CREATE\s+(?:TABLE|INDEX)\s+([a-z0-9_]+)/i.exec(statement)
+      const match = /^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+([a-z0-9_]+)/i.exec(statement)
       return match === null || !collaborationObjects.has(match[1] as string)
     })
     .map((statement) =>

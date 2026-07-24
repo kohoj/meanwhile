@@ -62,6 +62,22 @@ export interface ProjectMember {
   readonly joinedAt: Timestamp
 }
 
+/**
+ * Effective, request-time access to one Project. Explicit membership and a
+ * current provider grant remain separate sources; this projection never
+ * rewrites either authority.
+ */
+export interface ProjectAccess {
+  readonly projectId: string
+  readonly principal: PrincipalSummary
+  readonly access: RepositoryAccessLevel
+  readonly source: "membership" | "github"
+  readonly since: Timestamp
+}
+
+/** A Project-visible person or service and the authority currently admitting it. */
+export type ProjectParticipant = ProjectAccess
+
 export interface WorkAttribution {
   readonly projectId: string
   readonly delegatedBy: PrincipalSummary
@@ -79,6 +95,61 @@ export interface ProjectWorkItem {
   readonly updatedAt: Timestamp
 }
 
+/**
+ * An immutable, addressed human handoff anchored to one durable task event.
+ * Relays are visible to the Project, but only the named recipient can acknowledge one.
+ */
+export interface TaskRelay {
+  readonly id: string
+  readonly ownerId: string
+  readonly projectId: string
+  readonly task: {
+    readonly kind: "run" | "session"
+    readonly id: string
+  }
+  /** Sequence 0 anchors the relay to the original delegation. */
+  readonly anchorSequence: number
+  readonly author: PrincipalSummary
+  readonly recipient: PrincipalSummary
+  readonly body: string
+  readonly createdAt: Timestamp
+  readonly acknowledgedAt: Timestamp | null
+}
+
+export interface TranscriptAnchor {
+  /** Sequence 0 addresses the immutable original ask when the task has one. */
+  readonly sequence: number
+  /** Stable presentation-neutral identity for the rendered source block. */
+  readonly blockId: string
+  /** UTF-16 offsets into the exact source text used by the browser selection API. */
+  readonly startOffset: number
+  readonly endOffset: number
+  readonly quote: string
+  readonly prefix: string
+  readonly suffix: string
+  readonly contentDigest: string
+}
+
+/**
+ * Project-visible shared marginalia anchored to immutable task source text.
+ * It is distinct from an addressed TaskRelay and never grants agent control.
+ */
+export interface TaskAnnotation {
+  readonly id: string
+  readonly ownerId: string
+  readonly projectId: string
+  readonly task: {
+    readonly kind: "run" | "session"
+    readonly id: string
+  }
+  readonly anchor: TranscriptAnchor
+  readonly author: PrincipalSummary
+  readonly body: string
+  readonly createdAt: Timestamp
+  readonly resolvedAt: Timestamp | null
+  readonly resolvedBy: PrincipalSummary | null
+}
+
 export interface BrowserSession {
   readonly id: string
   readonly ownerId: string
@@ -87,6 +158,155 @@ export interface BrowserSession {
   readonly expiresAt: Timestamp
   readonly lastUsedAt: Timestamp | null
   readonly revokedAt: Timestamp | null
+}
+
+/**
+ * One high-entropy, single-use invitation to bind an external identity to an
+ * already provisioned Principal. The plaintext secret is shown once and never
+ * persisted; redemption is atomic with identity linking and session issuance.
+ */
+export interface PrincipalInvitation {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly prefix: string
+  readonly createdByPrincipalId: string
+  readonly createdAt: Timestamp
+  readonly expiresAt: Timestamp
+  readonly redeemedAt: Timestamp | null
+  readonly revokedAt: Timestamp | null
+}
+
+/**
+ * One expiring claim that a specific browser client is currently inside a
+ * Project room. Membership grants visibility; this lease alone grants no
+ * additional authority.
+ */
+export interface PresenceLease {
+  readonly ownerId: string
+  readonly projectId: string
+  readonly clientId: string
+  readonly principal: PrincipalSummary
+  readonly connectedAt: Timestamp
+  readonly lastSeenAt: Timestamp
+  readonly expiresAt: Timestamp
+}
+
+export const EXTERNAL_IDENTITY_PROVIDERS = ["github", "google"] as const
+export type ExternalIdentityProvider = (typeof EXTERNAL_IDENTITY_PROVIDERS)[number]
+
+/**
+ * A provider subject linked to one stable Meanwhile Principal. Mutable profile
+ * fields are display metadata; provider plus subjectId is the durable identity.
+ */
+export interface ExternalIdentity {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly provider: ExternalIdentityProvider
+  readonly subjectId: string
+  readonly login: string | null
+  readonly displayName: string | null
+  readonly avatarUrl: string | null
+  readonly createdAt: Timestamp
+  readonly lastVerifiedAt: Timestamp
+  readonly revokedAt: Timestamp | null
+}
+
+/**
+ * Encrypted provider credential material for one external identity. The
+ * plaintext never enters SQLite or a public API contract; key material stays
+ * behind the configured credential vault.
+ */
+export interface IdentityCredential {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly externalIdentityId: string
+  readonly provider: "github"
+  readonly sealedPayload: string
+  readonly keyVersion: string
+  readonly accessExpiresAt: Timestamp
+  readonly refreshExpiresAt: Timestamp | null
+  readonly createdAt: Timestamp
+  readonly updatedAt: Timestamp
+  readonly revokedAt: Timestamp | null
+}
+
+export const REPOSITORY_ACCESS_LEVELS = ["watch", "participate", "administer"] as const
+export type RepositoryAccessLevel = (typeof REPOSITORY_ACCESS_LEVELS)[number]
+
+/** A bounded, expiring provider observation. It is not a Project membership. */
+export interface ExternalProjectGrant {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly externalIdentityId: string
+  readonly provider: "github"
+  readonly accountId: string
+  readonly accountName: string
+  readonly installationId: string
+  readonly repositoryId: string
+  readonly repositoryName: string
+  readonly repositoryFullName: string
+  readonly repositoryUrl: string
+  readonly private: boolean
+  readonly access: RepositoryAccessLevel
+  readonly observedAt: Timestamp
+  readonly expiresAt: Timestamp
+  readonly revokedAt: Timestamp | null
+}
+
+/** One explicit Project-to-repository choice backed by an active provider grant. */
+export interface ProjectRepositoryBinding {
+  readonly id: string
+  readonly projectId: string
+  readonly ownerId: string
+  readonly grantId: string
+  readonly provider: "github"
+  readonly accountId: string
+  readonly accountName: string
+  readonly installationId: string
+  readonly repositoryId: string
+  readonly repositoryName: string
+  readonly repositoryFullName: string
+  readonly repositoryUrl: string
+  readonly private: boolean
+  readonly boundByPrincipalId: string
+  readonly createdAt: Timestamp
+  readonly revokedAt: Timestamp | null
+}
+
+export interface AgentConnectionCapabilities {
+  readonly oneShotRuns: boolean
+  readonly durableSessions: boolean
+  readonly runtimeProviders: readonly string[]
+}
+
+/**
+ * A person's explicit authorization to use one configured agent. Credential
+ * material, when required, stays behind the credential broker and is not part
+ * of this record.
+ */
+export interface AgentConnection {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly agentType: string
+  readonly label: string
+  readonly capabilities: AgentConnectionCapabilities
+  readonly createdAt: Timestamp
+  readonly lastVerifiedAt: Timestamp
+  readonly revokedAt: Timestamp | null
+}
+
+/** A personal Lobby projection preference; it never grants Project access. */
+export interface ProjectSelection {
+  readonly ownerId: string
+  readonly principalId: string
+  readonly projectId: string
+  readonly selectedAt: Timestamp
+  readonly hiddenAt: Timestamp | null
 }
 
 export const AGENT_LAUNCH_SNAPSHOT_VERSION = 1 as const
@@ -650,6 +870,15 @@ export interface AuditRecord {
     | "principal"
     | "project"
     | "project_membership"
+    | "external_identity"
+    | "identity_credential"
+    | "external_project_grant"
+    | "project_repository_binding"
+    | "agent_connection"
+    | "project_selection"
+    | "principal_invitation"
+    | "task_relay"
+    | "task_annotation"
     | "browser_session"
     | "api_key"
     | "run"

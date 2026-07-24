@@ -327,6 +327,251 @@ describe("Meanwhile client contract", () => {
     expect(await Array.fromAsync(client.sessions.followEvents(API_SESSION_ID))).toEqual([event])
   })
 
+  test("creates, lists, and resolves source-anchored Project annotations", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000021"
+    const annotationId = "00000000-0000-4000-8000-000000000022"
+    const anchor = {
+      sequence: 4,
+      blockId: "event.4.reasoning",
+      startOffset: 0,
+      endOffset: 5,
+      quote: "token",
+      prefix: "",
+      suffix: " exchange",
+      contentDigest: "a".repeat(64),
+    }
+    const annotation = {
+      id: annotationId,
+      ownerId: API_OWNER_ID,
+      projectId,
+      task: { kind: "run" as const, id: API_RUN_ID },
+      anchor,
+      author: { id: API_OWNER_ID, kind: "person" as const, displayName: "Alice" },
+      body: "Keep the single-exchange invariant visible.",
+      createdAt: API_TIMESTAMP,
+      resolvedAt: null,
+      resolvedBy: null,
+    }
+    const requests: Array<{ method: string; path: string; body: unknown }> = []
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : input)
+        const method = init?.method ?? (input instanceof Request ? input.method : "GET")
+        requests.push({
+          method,
+          path: `${url.pathname}${url.search}`,
+          body: init?.body === undefined ? null : JSON.parse(String(init.body)),
+        })
+        if (method === "GET") return Response.json({ items: [annotation] })
+        if (url.pathname.endsWith("/resolve")) {
+          return Response.json({
+            annotation: { ...annotation, resolvedAt: API_TIMESTAMP, resolvedBy: annotation.author },
+          })
+        }
+        return Response.json({ annotation }, { status: 201 })
+      },
+    })
+
+    expect(
+      await client.taskAnnotations.create(projectId, {
+        task: annotation.task,
+        anchor,
+        body: annotation.body,
+      }),
+    ).toEqual(annotation)
+    expect(await client.taskAnnotations.list(projectId, annotation.task)).toEqual([annotation])
+    expect(await client.taskAnnotations.resolve(projectId, annotationId)).toMatchObject({
+      resolvedAt: API_TIMESTAMP,
+      resolvedBy: annotation.author,
+    })
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        path: `/projects/${projectId}/annotations`,
+        body: { task: annotation.task, anchor, body: annotation.body },
+      },
+      {
+        method: "GET",
+        path: `/projects/${projectId}/annotations?taskKind=run&taskId=${API_RUN_ID}`,
+        body: null,
+      },
+      {
+        method: "POST",
+        path: `/projects/${projectId}/annotations/${annotationId}/resolve`,
+        body: null,
+      },
+    ])
+  })
+
+  test("drives connected onboarding through typed provider-neutral resources", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000021"
+    const connectionId = "00000000-0000-4000-8000-000000000071"
+    const grantId = "00000000-0000-4000-8000-000000000072"
+    const principal = {
+      id: API_OWNER_ID,
+      ownerId: API_OWNER_ID,
+      kind: "person" as const,
+      displayName: "Alice",
+      ownerRole: "admin" as const,
+      createdAt: API_TIMESTAMP,
+      disabledAt: null,
+    }
+    const project = {
+      id: projectId,
+      ownerId: API_OWNER_ID,
+      name: "Northstar",
+      slug: "northstar",
+      createdAt: API_TIMESTAMP,
+      archivedAt: null,
+    }
+    const connection = {
+      id: connectionId,
+      ownerId: API_OWNER_ID,
+      principalId: principal.id,
+      agentType: "codex",
+      label: "Codex",
+      capabilities: {
+        oneShotRuns: true,
+        durableSessions: true,
+        runtimeProviders: ["local"],
+      },
+      createdAt: API_TIMESTAMP,
+      lastVerifiedAt: API_TIMESTAMP,
+      revokedAt: null,
+    }
+    const binding = {
+      id: "00000000-0000-4000-8000-000000000073",
+      projectId,
+      ownerId: API_OWNER_ID,
+      grantId,
+      provider: "github" as const,
+      accountId: "42",
+      accountName: "kohoz",
+      installationId: "84",
+      repositoryId: "126",
+      repositoryName: "meanwhile",
+      repositoryFullName: "kohoz/meanwhile",
+      repositoryUrl: "https://github.com/kohoz/meanwhile",
+      private: true,
+      boundByPrincipalId: principal.id,
+      createdAt: API_TIMESTAMP,
+      revokedAt: null,
+    }
+    const selection = {
+      ownerId: API_OWNER_ID,
+      principalId: principal.id,
+      projectId,
+      selectedAt: API_TIMESTAMP,
+      hiddenAt: null,
+    }
+    const requests: Array<{ method: string; path: string; body: unknown }> = []
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : input)
+        const method = init?.method ?? (input instanceof Request ? input.method : "GET")
+        requests.push({
+          method,
+          path: url.pathname,
+          body: init?.body === undefined ? null : JSON.parse(String(init.body)),
+        })
+        if (method === "GET") {
+          return Response.json({
+            principal,
+            identities: [],
+            repositoryGrants: [],
+            repositoryBindings: [binding],
+            agentConnections: [connection],
+            availableAgents: [
+              {
+                agentType: connection.agentType,
+                label: connection.label,
+                capabilities: connection.capabilities,
+              },
+            ],
+            projects: [{ project, access: "administer", source: "membership", selected: true }],
+          })
+        }
+        if (url.pathname.endsWith("/selection")) return Response.json({ selection })
+        if (url.pathname.endsWith("/repository")) return Response.json({ binding })
+        if (url.pathname === "/onboarding/projects") {
+          return Response.json({ project, binding, selection, created: false })
+        }
+        return Response.json({
+          connection:
+            method === "DELETE" ? { ...connection, revokedAt: API_TIMESTAMP } : connection,
+        })
+      },
+    })
+
+    expect((await client.onboarding.get()).projects).toEqual([
+      { project, access: "administer", source: "membership", selected: true },
+    ])
+    expect(await client.onboarding.connectAgent("codex")).toEqual(connection)
+    expect(await client.onboarding.selectProject(projectId, true)).toEqual(selection)
+    expect(await client.onboarding.bindRepository(projectId, grantId)).toEqual(binding)
+    expect(await client.onboarding.importRepository(grantId)).toEqual({
+      project,
+      binding,
+      selection,
+      created: false,
+    })
+    expect(await client.onboarding.revokeAgent(connectionId)).toMatchObject({
+      id: connectionId,
+      revokedAt: API_TIMESTAMP,
+    })
+    expect(requests).toEqual([
+      { method: "GET", path: "/onboarding", body: null },
+      { method: "POST", path: "/onboarding/agent-connections", body: { agentType: "codex" } },
+      {
+        method: "PUT",
+        path: `/onboarding/projects/${projectId}/selection`,
+        body: { selected: true },
+      },
+      { method: "PUT", path: `/onboarding/projects/${projectId}/repository`, body: { grantId } },
+      { method: "POST", path: "/onboarding/projects", body: { grantId } },
+      { method: "DELETE", path: `/onboarding/agent-connections/${connectionId}`, body: null },
+    ])
+  })
+
+  test("heartbeats and releases Project presence by explicit browser client identity", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000021"
+    const clientId = "00000000-0000-4000-8000-000000000024"
+    const lease = {
+      ownerId: API_OWNER_ID,
+      projectId,
+      clientId,
+      principal: { id: API_OWNER_ID, kind: "person" as const, displayName: "Alice" },
+      connectedAt: API_TIMESTAMP,
+      lastSeenAt: API_TIMESTAMP,
+      expiresAt: "2026-07-13T00:00:45.000Z",
+    }
+    const requests: Array<{ method: string; path: string }> = []
+    const client = new Meanwhile({
+      baseUrl: "http://127.0.0.1:7331",
+      apiKey: "key",
+      fetch: async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : input)
+        const method = init?.method ?? (input instanceof Request ? input.method : "GET")
+        requests.push({ method, path: url.pathname })
+        if (method === "DELETE") return new Response(null, { status: 204 })
+        return Response.json(method === "PUT" ? { lease } : { items: [lease] })
+      },
+    })
+
+    expect(await client.projects.presence(projectId)).toEqual([lease])
+    expect(await client.projects.heartbeatPresence(projectId, clientId)).toEqual(lease)
+    await client.projects.releasePresence(projectId, clientId)
+    expect(requests).toEqual([
+      { method: "GET", path: `/projects/${projectId}/presence` },
+      { method: "PUT", path: `/projects/${projectId}/presence/${clientId}` },
+      { method: "DELETE", path: `/projects/${projectId}/presence/${clientId}` },
+    ])
+  })
+
   test("preserves structured failures and never includes credentials in diagnostics", async () => {
     const apiKey = "never-print-this-key"
     const client = new Meanwhile({

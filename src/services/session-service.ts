@@ -97,6 +97,7 @@ export class SessionService {
       context.ownerId,
       context.principalId,
       input.projectId,
+      this.#clock().toISOString(),
     )
     const principal = this.#store.getPrincipal(context.ownerId, context.principalId)
     if (principal === null || principal.disabledAt !== null) {

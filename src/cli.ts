@@ -172,6 +172,9 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
     case "api-keys":
       await apiKeysCommand(rest, context)
       return 0
+    case "invitations":
+      await invitationsCommand(rest, context)
+      return 0
     case "principals":
       await principalsCommand(rest, context)
       return 0
@@ -836,6 +839,39 @@ async function apiKeysCommand(args: readonly string[], context: CliContext): Pro
   throw argumentError("Expected: api-keys create|list|revoke")
 }
 
+async function invitationsCommand(args: readonly string[], context: CliContext): Promise<void> {
+  const [subcommand, ...rest] = args
+  const client = apiClient(context)
+  if (subcommand === "create") {
+    const parsed = parseArguments(rest, { values: ["principal", "expires-in"] })
+    parsed.requireNoPositionals()
+    const expiresIn = parsed.one("expires-in")
+    await printJson(
+      context,
+      await client.invitations.create(requiredOption(parsed, "principal"), {
+        ...(expiresIn === undefined
+          ? {}
+          : { expiresInSeconds: parseInvitationDurationSeconds(expiresIn) }),
+        signal: context.signal,
+      }),
+    )
+    return
+  }
+  if (subcommand === "list") {
+    parseArguments(rest).requireNoPositionals()
+    await printJson(context, { items: await client.invitations.list({ signal: context.signal }) })
+    return
+  }
+  if (subcommand === "revoke") {
+    const id = parseArguments(rest).onlyPositional()
+    await printJson(context, {
+      invitation: await client.invitations.revoke(id, { signal: context.signal }),
+    })
+    return
+  }
+  throw argumentError("Expected: invitations create|list|revoke")
+}
+
 async function principalsCommand(args: readonly string[], context: CliContext): Promise<void> {
   const [subcommand, ...rest] = args
   const client = apiClient(context)
@@ -1434,6 +1470,22 @@ function parseDurationOption(value: string, option: string): number {
   return milliseconds
 }
 
+function parseInvitationDurationSeconds(value: string): number {
+  const match = /^(\d+)(s|m|h|d)?$/.exec(value)
+  if (match === null) {
+    throw argumentError("--expires-in must be an integer with s, m, h, or d")
+  }
+  const amount = Number(match[1])
+  const multiplier: number = { s: 1, m: 60, h: 3_600, d: 86_400 }[
+    (match[2] ?? "s") as "s" | "m" | "h" | "d"
+  ]
+  const seconds = amount * multiplier
+  if (!Number.isSafeInteger(seconds) || seconds < 300 || seconds > 30 * 86_400) {
+    throw argumentError("--expires-in must be between 5m and 30d")
+  }
+  return seconds
+}
+
 async function executableExists(
   executable: string,
   requireExecutable = false,
@@ -1540,6 +1592,9 @@ Usage:
   meanwhile api-keys create --name NAME [--principal PRINCIPAL_ID]
   meanwhile api-keys list
   meanwhile api-keys revoke KEY_ID
+  meanwhile invitations create --principal PRINCIPAL_ID [--expires-in 7d]
+  meanwhile invitations list
+  meanwhile invitations revoke INVITATION_ID
   meanwhile providers test PROVIDER
   meanwhile doctor
   meanwhile key generate

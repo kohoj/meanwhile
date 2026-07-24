@@ -7,7 +7,7 @@ import {
   credentialPolicyDigest,
   type RuntimeCredentialBroker,
 } from "../credentials"
-import type { AgentLaunchSnapshot, AuditRecord, JsonObject } from "../domain"
+import type { AgentLaunchSnapshot, AuditRecord, JsonObject, WorkspaceSource } from "../domain"
 import { AppError } from "../errors"
 import type { Store } from "../persistence/store"
 import type { RuntimeHandle } from "../providers/runtime-provider"
@@ -22,13 +22,16 @@ export interface AttachAgentCredentialInput {
   readonly providerName: string
   readonly credentialBroker: RuntimeCredentialBroker | null
   readonly agentSpec: AgentLaunchSnapshot
+  readonly workspace: WorkspaceSource
   readonly secrets: ResolvedSecretMaterial
   readonly at: string
 }
 
 /**
- * Materializes one exact agent-phase network/credential boundary before spawn.
- * Returned environment values are revocable placeholders, never credentials.
+ * Materializes one exact runtime network/credential boundary before trusted
+ * workspace setup and agent spawn. Repository setup contributes only its
+ * validated HTTPS hostname; returned environment values remain revocable
+ * placeholders, never credentials.
  */
 export async function attachAgentCredentialLease(
   store: Pick<Store, "ensureCredentialLease" | "materializeCredentialLease">,
@@ -52,6 +55,7 @@ export async function attachAgentCredentialLease(
   )
   const allowedHosts = [
     ...new Set([
+      ...workspaceAllowedHosts(input.workspace),
       ...input.agentSpec.networkPolicy.allowedHosts,
       ...activePolicies.map(({ host }) => host),
     ]),
@@ -183,6 +187,32 @@ export async function attachAgentCredentialLease(
       await input.secrets.release()
     },
   }
+}
+
+function workspaceAllowedHosts(workspace: WorkspaceSource): readonly string[] {
+  if (workspace.type === "bundle") return []
+  let repository: URL
+  try {
+    repository = new URL(workspace.url)
+  } catch (cause) {
+    throw new AppError({
+      code: "INVALID_REQUEST",
+      message: "Repository workspace URL is invalid",
+      cause,
+    })
+  }
+  if (
+    repository.protocol !== "https:" ||
+    repository.username !== "" ||
+    repository.password !== "" ||
+    repository.hostname === ""
+  ) {
+    throw new AppError({
+      code: "INVALID_REQUEST",
+      message: "Repository workspace must use an HTTPS host without embedded credentials",
+    })
+  }
+  return [repository.hostname.toLowerCase()]
 }
 
 const attachAudit = (

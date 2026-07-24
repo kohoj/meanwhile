@@ -81,6 +81,8 @@ test("session timeline is a deterministic projection over durable cross-turn evi
         text: "hello world",
         firstSequence: 4,
         lastSequence: 5,
+        firstOccurredAt: API_TIMESTAMP,
+        lastOccurredAt: API_TIMESTAMP,
       },
     ],
     toolCalls: [
@@ -94,6 +96,8 @@ test("session timeline is a deterministic projection over durable cross-turn evi
         rawOutput: { bytes: 42 },
         firstSequence: 6,
         lastSequence: 7,
+        firstOccurredAt: API_TIMESTAMP,
+        lastOccurredAt: API_TIMESTAMP,
       },
     ],
   })

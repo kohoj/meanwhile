@@ -1,6 +1,8 @@
 import type { z } from "zod"
 import {
   AddProjectMemberRequestSchema,
+  type AgentConnection,
+  AgentConnectionResponseSchema,
   type AgentSession,
   type AgentSessionPage,
   AgentSessionPageSchema,
@@ -15,16 +17,21 @@ import {
   ArtifactPageSchema,
   type AuditPage,
   AuditPageSchema,
+  BindProjectRepositoryRequestSchema,
   type Brief,
   type BriefPage,
   BriefPageSchema,
   BriefResponseSchema,
+  ConnectAgentRequestSchema,
+  type ConnectedOnboarding,
+  ConnectedOnboardingResponseSchema,
   CreateApiKeyRequestSchema,
   type CreateBriefRequest,
   CreateBriefRequestSchema,
   type CreateDeploymentRequest,
   CreateDeploymentRequestSchema,
   CreatedApiKeyResponseSchema,
+  CreatedPrincipalInvitationResponseSchema,
   type CreatePrincipalRequest,
   CreatePrincipalRequestSchema,
   type CreateProjectRequest,
@@ -35,6 +42,10 @@ import {
   CreateSessionRequestSchema,
   type CreateSessionTurnRequest,
   CreateSessionTurnRequestSchema,
+  type CreateTaskAnnotationRequest,
+  CreateTaskAnnotationRequestSchema,
+  type CreateTaskRelayRequest,
+  CreateTaskRelayRequestSchema,
   type Deployment,
   type DeploymentLogPage,
   DeploymentLogPageSchema,
@@ -43,8 +54,17 @@ import {
   DeploymentResponseSchema,
   ErrorEnvelopeSchema,
   IdentifierSchema,
+  type ImportedProjectRepository,
+  ImportedProjectRepositoryResponseSchema,
+  ImportProjectRepositoryRequestSchema,
   MeResponseSchema,
+  type PresenceLease,
+  PresenceLeasePageSchema,
+  PresenceLeaseResponseSchema,
   type Principal,
+  type PrincipalInvitation,
+  PrincipalInvitationPageSchema,
+  PrincipalInvitationResponseSchema,
   PrincipalPageSchema,
   PrincipalResponseSchema,
   type Project,
@@ -52,7 +72,13 @@ import {
   ProjectMemberPageSchema,
   ProjectMemberResponseSchema,
   ProjectPageSchema,
+  type ProjectParticipant,
+  ProjectParticipantPageSchema,
+  type ProjectRepositoryBinding,
+  ProjectRepositoryBindingResponseSchema,
   ProjectResponseSchema,
+  type ProjectSelection,
+  ProjectSelectionResponseSchema,
   type ProjectWorkItem,
   ProjectWorkPageSchema,
   type ProviderDiagnostics,
@@ -78,6 +104,13 @@ import {
   type SessionTurnPage,
   SessionTurnPageSchema,
   SessionTurnResponseSchema,
+  SetProjectSelectionRequestSchema,
+  type TaskAnnotation,
+  TaskAnnotationPageSchema,
+  TaskAnnotationResponseSchema,
+  type TaskRelay,
+  TaskRelayPageSchema,
+  TaskRelayResponseSchema,
 } from "./api/contracts"
 
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -97,7 +130,7 @@ export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promi
 export type Wait = (milliseconds: number, signal: AbortSignal) => Promise<void>
 
 export interface ClientResponseEvidence {
-  readonly method: "GET" | "POST" | "DELETE"
+  readonly method: "GET" | "POST" | "PUT" | "DELETE"
   readonly path: string
   readonly status: number
   readonly requestId: string
@@ -228,6 +261,9 @@ export interface AuditClient {
         | "principal"
         | "project"
         | "project_membership"
+        | "principal_invitation"
+        | "task_relay"
+        | "task_annotation"
         | "api_key"
         | "browser_session"
         | "run"
@@ -252,6 +288,15 @@ export interface ApiKeysClient {
   revoke(id: string, options?: RequestOptions): Promise<ApiKey>
 }
 
+export interface PrincipalInvitationsClient {
+  create(
+    principalId: string,
+    options?: RequestOptions & { readonly expiresInSeconds?: number },
+  ): Promise<{ readonly invitation: PrincipalInvitation; readonly secret: string }>
+  list(options?: RequestOptions): Promise<readonly PrincipalInvitation[]>
+  revoke(id: string, options?: RequestOptions): Promise<PrincipalInvitation>
+}
+
 export interface ProvidersClient {
   test(name: string, options?: RequestOptions): Promise<ProviderDiagnostics>
 }
@@ -265,6 +310,7 @@ export interface ProjectsClient {
   get(id: string, options?: RequestOptions): Promise<Project>
   create(input: CreateProjectRequest, options?: RequestOptions): Promise<Project>
   members(id: string, options?: RequestOptions): Promise<readonly ProjectMember[]>
+  participants(id: string, options?: RequestOptions): Promise<readonly ProjectParticipant[]>
   addMember(
     id: string,
     principalId: string,
@@ -273,8 +319,62 @@ export interface ProjectsClient {
   ): Promise<ProjectMember>
   removeMember(id: string, principalId: string, options?: RequestOptions): Promise<void>
   work(id: string, options?: RequestOptions): Promise<readonly ProjectWorkItem[]>
+  presence(id: string, options?: RequestOptions): Promise<readonly PresenceLease[]>
+  heartbeatPresence(id: string, clientId: string, options?: RequestOptions): Promise<PresenceLease>
+  releasePresence(id: string, clientId: string, options?: RequestOptions): Promise<void>
   principals(options?: RequestOptions): Promise<readonly Principal[]>
   createPrincipal(input: CreatePrincipalRequest, options?: RequestOptions): Promise<Principal>
+}
+
+export interface ConnectedOnboardingClient {
+  get(options?: RequestOptions): Promise<ConnectedOnboarding>
+  connectAgent(agentType: string, options?: RequestOptions): Promise<AgentConnection>
+  revokeAgent(connectionId: string, options?: RequestOptions): Promise<AgentConnection>
+  selectProject(
+    projectId: string,
+    selected: boolean,
+    options?: RequestOptions,
+  ): Promise<ProjectSelection>
+  bindRepository(
+    projectId: string,
+    grantId: string,
+    options?: RequestOptions,
+  ): Promise<ProjectRepositoryBinding>
+  importRepository(grantId: string, options?: RequestOptions): Promise<ImportedProjectRepository>
+}
+
+export interface TaskRelaysClient {
+  create(
+    projectId: string,
+    input: CreateTaskRelayRequest,
+    options?: RequestOptions,
+  ): Promise<TaskRelay>
+  list(
+    projectId: string,
+    task: { readonly kind: "run" | "session"; readonly id: string },
+    options?: RequestOptions,
+  ): Promise<readonly TaskRelay[]>
+  inbox(projectId: string, options?: RequestOptions): Promise<readonly TaskRelay[]>
+  recent(projectId: string, limit?: number, options?: RequestOptions): Promise<readonly TaskRelay[]>
+  acknowledge(projectId: string, relayId: string, options?: RequestOptions): Promise<TaskRelay>
+}
+
+export interface TaskAnnotationsClient {
+  create(
+    projectId: string,
+    input: CreateTaskAnnotationRequest,
+    options?: RequestOptions,
+  ): Promise<TaskAnnotation>
+  list(
+    projectId: string,
+    task: { readonly kind: "run" | "session"; readonly id: string },
+    options?: RequestOptions,
+  ): Promise<readonly TaskAnnotation[]>
+  resolve(
+    projectId: string,
+    annotationId: string,
+    options?: RequestOptions,
+  ): Promise<TaskAnnotation>
 }
 
 interface MeanwhileErrorInput {
@@ -312,7 +412,11 @@ export class Meanwhile {
   readonly providers: ProvidersClient
   readonly audit: AuditClient
   readonly apiKeys: ApiKeysClient
+  readonly invitations: PrincipalInvitationsClient
   readonly projects: ProjectsClient
+  readonly onboarding: ConnectedOnboardingClient
+  readonly taskAnnotations: TaskAnnotationsClient
+  readonly taskRelays: TaskRelaysClient
 
   constructor(options: MeanwhileOptions) {
     const transport = new Transport(options)
@@ -324,7 +428,11 @@ export class Meanwhile {
     this.providers = new Providers(transport)
     this.audit = new Audit(transport)
     this.apiKeys = new ApiKeys(transport)
+    this.invitations = new PrincipalInvitations(transport)
     this.projects = new Projects(transport)
+    this.onboarding = new Onboarding(transport)
+    this.taskAnnotations = new TaskAnnotations(transport)
+    this.taskRelays = new TaskRelays(transport)
   }
 }
 
@@ -855,6 +963,44 @@ class ApiKeys implements ApiKeysClient {
   }
 }
 
+class PrincipalInvitations implements PrincipalInvitationsClient {
+  constructor(private readonly transport: Transport) {}
+
+  create(
+    principalId: string,
+    options: RequestOptions & { readonly expiresInSeconds?: number } = {},
+  ) {
+    return this.transport.json("principal-invitations", CreatedPrincipalInvitationResponseSchema, {
+      method: "POST",
+      body: {
+        principalId: validId(principalId),
+        ...(options.expiresInSeconds === undefined
+          ? {}
+          : { expiresInSeconds: options.expiresInSeconds }),
+      },
+      ...signalInput(options.signal),
+    })
+  }
+
+  async list(options: RequestOptions = {}): Promise<readonly PrincipalInvitation[]> {
+    const result = await this.transport.json(
+      "principal-invitations",
+      PrincipalInvitationPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async revoke(id: string, options: RequestOptions = {}): Promise<PrincipalInvitation> {
+    const result = await this.transport.json(
+      `principal-invitations/${encodeURIComponent(validId(id))}`,
+      PrincipalInvitationResponseSchema,
+      { method: "DELETE", ...signalInput(options.signal) },
+    )
+    return result.invitation
+  }
+}
+
 class Projects implements ProjectsClient {
   constructor(private readonly transport: Transport) {}
 
@@ -898,6 +1044,18 @@ class Projects implements ProjectsClient {
     return result.items
   }
 
+  async participants(
+    id: string,
+    options: RequestOptions = {},
+  ): Promise<readonly ProjectParticipant[]> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(id))}/participants`,
+      ProjectParticipantPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
   async addMember(
     id: string,
     principalId: string,
@@ -932,6 +1090,35 @@ class Projects implements ProjectsClient {
     return result.items
   }
 
+  async presence(id: string, options: RequestOptions = {}): Promise<readonly PresenceLease[]> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(id))}/presence`,
+      PresenceLeasePageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async heartbeatPresence(
+    id: string,
+    clientId: string,
+    options: RequestOptions = {},
+  ): Promise<PresenceLease> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(id))}/presence/${encodeURIComponent(validId(clientId))}`,
+      PresenceLeaseResponseSchema,
+      { method: "PUT", ...signalInput(options.signal) },
+    )
+    return result.lease
+  }
+
+  async releasePresence(id: string, clientId: string, options: RequestOptions = {}): Promise<void> {
+    await this.transport.empty(
+      `projects/${encodeURIComponent(validId(id))}/presence/${encodeURIComponent(validId(clientId))}`,
+      { method: "DELETE", ...signalInput(options.signal) },
+    )
+  }
+
   async principals(options: RequestOptions = {}): Promise<readonly Principal[]> {
     const result = await this.transport.json(
       "principals",
@@ -954,6 +1141,204 @@ class Projects implements ProjectsClient {
   }
 }
 
+class Onboarding implements ConnectedOnboardingClient {
+  constructor(private readonly transport: Transport) {}
+
+  get(options: RequestOptions = {}): Promise<ConnectedOnboarding> {
+    return this.transport.json(
+      "onboarding",
+      ConnectedOnboardingResponseSchema,
+      signalInput(options.signal),
+    )
+  }
+
+  async connectAgent(agentType: string, options: RequestOptions = {}): Promise<AgentConnection> {
+    const result = await this.transport.json(
+      "onboarding/agent-connections",
+      AgentConnectionResponseSchema,
+      {
+        method: "POST",
+        body: parseInput(ConnectAgentRequestSchema, { agentType }),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.connection
+  }
+
+  async revokeAgent(connectionId: string, options: RequestOptions = {}): Promise<AgentConnection> {
+    const result = await this.transport.json(
+      `onboarding/agent-connections/${encodeURIComponent(validId(connectionId))}`,
+      AgentConnectionResponseSchema,
+      { method: "DELETE", ...signalInput(options.signal) },
+    )
+    return result.connection
+  }
+
+  async selectProject(
+    projectId: string,
+    selected: boolean,
+    options: RequestOptions = {},
+  ): Promise<ProjectSelection> {
+    const result = await this.transport.json(
+      `onboarding/projects/${encodeURIComponent(validId(projectId))}/selection`,
+      ProjectSelectionResponseSchema,
+      {
+        method: "PUT",
+        body: parseInput(SetProjectSelectionRequestSchema, { selected }),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.selection
+  }
+
+  async bindRepository(
+    projectId: string,
+    grantId: string,
+    options: RequestOptions = {},
+  ): Promise<ProjectRepositoryBinding> {
+    const result = await this.transport.json(
+      `onboarding/projects/${encodeURIComponent(validId(projectId))}/repository`,
+      ProjectRepositoryBindingResponseSchema,
+      {
+        method: "PUT",
+        body: parseInput(BindProjectRepositoryRequestSchema, { grantId }),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.binding
+  }
+
+  importRepository(
+    grantId: string,
+    options: RequestOptions = {},
+  ): Promise<ImportedProjectRepository> {
+    return this.transport.json("onboarding/projects", ImportedProjectRepositoryResponseSchema, {
+      method: "POST",
+      body: parseInput(ImportProjectRepositoryRequestSchema, { grantId }),
+      ...signalInput(options.signal),
+    })
+  }
+}
+
+class TaskAnnotations implements TaskAnnotationsClient {
+  constructor(private readonly transport: Transport) {}
+
+  async create(
+    projectId: string,
+    input: CreateTaskAnnotationRequest,
+    options: RequestOptions = {},
+  ): Promise<TaskAnnotation> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/annotations`,
+      TaskAnnotationResponseSchema,
+      {
+        method: "POST",
+        body: parseInput(CreateTaskAnnotationRequestSchema, input),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.annotation
+  }
+
+  async list(
+    projectId: string,
+    task: { readonly kind: "run" | "session"; readonly id: string },
+    options: RequestOptions = {},
+  ): Promise<readonly TaskAnnotation[]> {
+    const query = new URLSearchParams({ taskKind: task.kind, taskId: validId(task.id) })
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/annotations?${query}`,
+      TaskAnnotationPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async resolve(
+    projectId: string,
+    annotationId: string,
+    options: RequestOptions = {},
+  ): Promise<TaskAnnotation> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/annotations/${encodeURIComponent(validId(annotationId))}/resolve`,
+      TaskAnnotationResponseSchema,
+      { method: "POST", ...signalInput(options.signal) },
+    )
+    return result.annotation
+  }
+}
+
+class TaskRelays implements TaskRelaysClient {
+  constructor(private readonly transport: Transport) {}
+
+  async create(
+    projectId: string,
+    input: CreateTaskRelayRequest,
+    options: RequestOptions = {},
+  ): Promise<TaskRelay> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/relays`,
+      TaskRelayResponseSchema,
+      {
+        method: "POST",
+        body: parseInput(CreateTaskRelayRequestSchema, input),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.relay
+  }
+
+  async list(
+    projectId: string,
+    task: { readonly kind: "run" | "session"; readonly id: string },
+    options: RequestOptions = {},
+  ): Promise<readonly TaskRelay[]> {
+    const query = new URLSearchParams({ taskKind: task.kind, taskId: validId(task.id) })
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/relays?${query}`,
+      TaskRelayPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async inbox(projectId: string, options: RequestOptions = {}): Promise<readonly TaskRelay[]> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/relay-inbox`,
+      TaskRelayPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async recent(
+    projectId: string,
+    limit = 3,
+    options: RequestOptions = {},
+  ): Promise<readonly TaskRelay[]> {
+    const query = new URLSearchParams({ limit: String(limit) })
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/recent-relays?${query}`,
+      TaskRelayPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async acknowledge(
+    projectId: string,
+    relayId: string,
+    options: RequestOptions = {},
+  ): Promise<TaskRelay> {
+    const result = await this.transport.json(
+      `projects/${encodeURIComponent(validId(projectId))}/relays/${encodeURIComponent(validId(relayId))}/acknowledge`,
+      TaskRelayResponseSchema,
+      { method: "POST", ...signalInput(options.signal) },
+    )
+    return result.relay
+  }
+}
+
 class Providers implements ProvidersClient {
   constructor(private readonly transport: Transport) {}
 
@@ -968,7 +1353,7 @@ class Providers implements ProvidersClient {
 }
 
 interface TransportRequest {
-  readonly method?: "GET" | "POST" | "DELETE"
+  readonly method?: "GET" | "POST" | "PUT" | "DELETE"
   readonly headers?: Headers
   readonly body?: unknown
   readonly signal?: AbortSignal

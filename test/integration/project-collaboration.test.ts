@@ -221,7 +221,10 @@ test("membership removal reauthorizes a live Project stream before reading more 
   await reader.cancel()
 })
 
-test("browser sessions are opaque, expiring, revocable, and read-only", async () => {
+test("browser sessions are opaque, expiring, revocable, and narrowly self-controlling", async () => {
+  const me = await json<{ principal: { id: string }; projects: Array<{ id: string }> }>(
+    await harness.request("/me"),
+  )
   const created = await json<{ secret: string }>(
     await harness.request("/browser-sessions", { method: "POST" }),
   )
@@ -235,7 +238,50 @@ test("browser sessions are opaque, expiring, revocable, and read-only", async ()
       },
     })
   expect((await sessionRequest("/me")).status).toBe(200)
-  expect((await sessionRequest("/runs", { method: "POST" })).status).toBe(403)
+  const projectId = me.projects[0]?.id
+  if (projectId === undefined) throw new Error("Local bootstrap Project is missing")
+  const presenceClientId = crypto.randomUUID()
+  expect(
+    (
+      await sessionRequest(`/projects/${projectId}/presence/${presenceClientId}`, {
+        method: "PUT",
+      })
+    ).status,
+  ).toBe(200)
+  const presence = await json<{ items: Array<{ clientId: string }> }>(
+    await sessionRequest(`/projects/${projectId}/presence`),
+  )
+  expect(presence.items).toContainEqual(expect.objectContaining({ clientId: presenceClientId }))
+  expect(
+    (
+      await sessionRequest(`/projects/${projectId}/presence/${presenceClientId}`, {
+        method: "DELETE",
+      })
+    ).status,
+  ).toBe(204)
+  const createdRunResponse = await sessionRequest("/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": "browser-first-task" },
+    body: JSON.stringify({
+      workspace: {
+        type: "files",
+        files: [{ path: "TASK.md", contentBase64: Buffer.from("browser task").toString("base64") }],
+      },
+      agentType: "demo",
+      prompt: "Verify the first-task journey",
+      artifactPaths: [],
+      timeoutMs: 5_000,
+    }),
+  })
+  expect(createdRunResponse.status).toBe(201)
+  const createdRun = await json<{ run: { id: string; delegatedBy: { id: string } } }>(
+    createdRunResponse,
+  )
+  expect(createdRun.run.delegatedBy.id).toBe(me.principal.id)
+  expect((await sessionRequest("/sessions", { method: "POST" })).status).toBe(403)
+  expect(
+    (await sessionRequest(`/runs/${createdRun.run.id}/cancel`, { method: "POST" })).status,
+  ).toBe(202)
   expect((await sessionRequest("/browser-sessions/current", { method: "DELETE" })).status).toBe(200)
   expect((await sessionRequest("/me")).status).toBe(401)
 })

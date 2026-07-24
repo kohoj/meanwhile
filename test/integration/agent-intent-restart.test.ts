@@ -15,10 +15,22 @@ import { Store } from "../../src/persistence/store"
 import { ExecutionProvenanceCatalog } from "../../src/provenance"
 import { RuntimeProviderRegistry } from "../../src/providers/registry"
 import { relativePath } from "../../src/providers/runtime-provider"
-import { EnvironmentSecretResolver } from "../../src/secrets"
+import {
+  EnvironmentSecretResolver,
+  type ResolvedSecretMaterial,
+  SecretRedactor,
+} from "../../src/secrets"
+import type {
+  RepositoryCredentialResolutionInput,
+  RepositoryCredentialResolver,
+} from "../../src/services/repository-credential-resolver"
 import { RunExecutor } from "../../src/services/run-executor"
 import { type RunExecutionProvenance, RunService } from "../../src/services/run-service"
-import { WorkspacePreparer } from "../../src/services/workspace-preparer"
+import {
+  type PreparedWorkspace,
+  type PrepareWorkspaceInput,
+  WorkspacePreparer,
+} from "../../src/services/workspace-preparer"
 import { StructuredLogger } from "../../src/telemetry"
 import { MockRuntimeProvider } from "../fixtures/mock-provider"
 
@@ -144,7 +156,98 @@ describe("immutable agent launch intent", () => {
     expect(store.listRuns(OWNER_ID, { limit: 10 }).items).toHaveLength(1)
     store.close()
   })
+
+  test("a Project-bound repository credential is released before the agent starts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "meanwhile-repository-intent-"))
+    directories.push(directory)
+    const catalogPath = join(directory, "agents.json")
+    await writeCatalog(catalogPath, "accepted-agent", false)
+    const catalog = await AgentCatalog.load(catalogPath)
+    const store = new Store(join(directory, "meanwhile.sqlite"))
+    createIdentity(store)
+    const created = await runService(store, catalog).create(
+      context(),
+      {
+        ...command(),
+        projectId: PROJECT_ID,
+        workspace: {
+          type: "repository",
+          url: "https://github.com/acme/northstar",
+          revision: "main",
+        },
+      },
+      "repository-credential-intent",
+    )
+    let resolvedInput: RepositoryCredentialResolutionInput | undefined
+    let released = false
+    const material: ResolvedSecretMaterial = {
+      environment: { MEANWHILE_REPOSITORY_CREDENTIAL: "repository-token" },
+      redactor: new SecretRedactor(["repository-token"]),
+      release() {
+        released = true
+        delete material.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
+        material.redactor.dispose()
+      },
+    }
+    const repositoryCredentials: RepositoryCredentialResolver = {
+      async resolve(input) {
+        resolvedInput = input
+        return material
+      },
+    }
+    let preparedCredential: string | undefined
+    const workspace = new CapturingWorkspace((input) => {
+      preparedCredential = input.repositoryCredential
+    })
+    const launched = Promise.withResolvers<RunnerSpec>()
+    const executor = new RunExecutor({
+      store,
+      providers: new RuntimeProviderRegistry([new MockRuntimeProvider()]),
+      runner: new CapturingRunner(launched.resolve),
+      workspace,
+      artifactStore: new LocalArtifactStore(join(directory, "artifacts")),
+      artifactLimits: { maxFiles: 8, maxFileBytes: 1_024, maxTotalBytes: 8_192 },
+      secrets: secretResolver(),
+      repositoryCredentials,
+      logger: new StructuredLogger({
+        serviceName: "repository-intent-test",
+        serviceVersion: "test",
+        sink: { write() {} },
+      }),
+      concurrency: 1,
+      pollMs: 60_000,
+    })
+
+    await executor.start()
+    const launchedSpec = await launched.promise
+    expect(resolvedInput).toMatchObject({
+      ownerId: OWNER_ID,
+      projectId: PROJECT_ID,
+      repositoryUrl: "https://github.com/acme/northstar",
+      resourceType: "run",
+      resourceId: created.run.id,
+    })
+    expect(preparedCredential).toBe("repository-token")
+    expect(released).toBe(true)
+    expect(material.environment).toEqual({})
+    expect(launchedSpec.environment).toEqual({})
+    expect(launchedSpec.credentialEnvironmentNames).toEqual([])
+
+    await executor.stop()
+    store.close()
+  })
 })
+
+class CapturingWorkspace extends WorkspacePreparer {
+  constructor(private readonly capture: (input: PrepareWorkspaceInput) => void) {
+    super({ read: async () => [] })
+  }
+
+  override async prepare(input: PrepareWorkspaceInput): Promise<PreparedWorkspace> {
+    this.capture(input)
+    return { resolvedRevision: "a".repeat(40) }
+  }
+}
 
 class CapturingRunner extends RunnerSessionController {
   constructor(private readonly capture: (spec: RunnerSpec) => void) {

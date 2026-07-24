@@ -95,6 +95,59 @@ describe("operational configuration", () => {
     expect(config.previewPublicUrl).toBe("https://previews.example.test")
   })
 
+  test("requires complete external-auth providers and a separate sealed credential key", () => {
+    expect(() => loadConfig({ MEANWHILE_GITHUB_CLIENT_ID: "github-client" })).toThrow(
+      "must be configured together",
+    )
+    expect(() =>
+      loadConfig({
+        MEANWHILE_EXTERNAL_AUTH_OWNER_ID: "93000000-0000-4000-8000-000000000001",
+      }),
+    ).toThrow("unused auth keys")
+    expect(() => loadConfig({ MEANWHILE_EXTERNAL_REGISTRATION: "open" })).toThrow(
+      "unused auth keys",
+    )
+    expect(() =>
+      loadConfig({
+        MEANWHILE_EXTERNAL_AUTH_OWNER_ID: "93000000-0000-4000-8000-000000000001",
+        MEANWHILE_IDENTITY_CREDENTIAL_KEY: "a".repeat(43),
+        MEANWHILE_GITHUB_CLIENT_ID: "github-client",
+        MEANWHILE_GITHUB_CLIENT_SECRET: "github-secret",
+        MEANWHILE_GITHUB_CALLBACK_URL: "http://example.test/auth/github/callback",
+      }),
+    ).toThrow("exact HTTPS or loopback")
+
+    expect(
+      loadConfig({
+        MEANWHILE_EXTERNAL_AUTH_OWNER_ID: "93000000-0000-4000-8000-000000000001",
+        MEANWHILE_IDENTITY_CREDENTIAL_KEY: "a".repeat(43),
+        MEANWHILE_IDENTITY_CREDENTIAL_KEY_VERSION: "key-2026-07",
+        MEANWHILE_EXTERNAL_REGISTRATION: "open",
+        MEANWHILE_GITHUB_CLIENT_ID: "github-client",
+        MEANWHILE_GITHUB_CLIENT_SECRET: "github-secret",
+        MEANWHILE_GITHUB_CALLBACK_URL: "https://meanwhile.example/auth/github/callback",
+        MEANWHILE_GOOGLE_CLIENT_ID: "google-client",
+        MEANWHILE_GOOGLE_CLIENT_SECRET: "google-secret",
+        MEANWHILE_GOOGLE_CALLBACK_URL: "http://127.0.0.1:7333/auth/google/callback",
+      }).externalAuth,
+    ).toEqual({
+      ownerId: "93000000-0000-4000-8000-000000000001",
+      registration: "open",
+      credentialKey: "a".repeat(43),
+      credentialKeyVersion: "key-2026-07",
+      github: {
+        clientId: "github-client",
+        clientSecret: "github-secret",
+        callbackUrl: "https://meanwhile.example/auth/github/callback",
+      },
+      google: {
+        clientId: "google-client",
+        clientSecret: "google-secret",
+        callbackUrl: "http://127.0.0.1:7333/auth/google/callback",
+      },
+    })
+  })
+
   test("fails application composition when the configured default provider is absent", async () => {
     const instrumentation = await initializeInstrumentation({
       serviceName: "meanwhile-config-test",

@@ -66,6 +66,22 @@ describe("external collaboration acceptance receipt", () => {
       ]),
     ).toThrow("Participants must reciprocally observe each other's delegated work")
 
+    expect(() =>
+      createExternalCollaborationAcceptanceReceipt(deployedReceipt(), [
+        first,
+        createExternalCollaborationParticipantAttestation({
+          ...participantInput("second"),
+          experience: {
+            ...participantInput("second").experience,
+            annotation: {
+              ...participantInput("second").experience.annotation,
+              id: "00000000-0000-4000-8000-000000000098",
+            },
+          },
+        }),
+      ]),
+    ).toThrow("Participants must attest to the same anchored Project annotation")
+
     const dirtySystemReceipt = createDeployedCollaborationProofReceipt({
       ...deployedInput(),
       revision: { commit: "c".repeat(40), dirty: true },
@@ -75,7 +91,7 @@ describe("external collaboration acceptance receipt", () => {
     ).toThrow("External collaboration acceptance requires a clean deployed revision")
   })
 
-  test("requires a real live-agent journey and three-second comprehension", () => {
+  test("requires a real live-agent journey and bounded Live Deck discovery", () => {
     expect(() =>
       createExternalCollaborationParticipantAttestation({
         ...participantInput("first"),
@@ -85,7 +101,7 @@ describe("external collaboration acceptance receipt", () => {
     expect(() =>
       createExternalCollaborationParticipantAttestation({
         ...participantInput("first"),
-        experience: { ...participantInput("first").experience, triageSeconds: 4 },
+        experience: { ...participantInput("first").experience, otherWorkFoundSeconds: 16 },
       }),
     ).toThrow()
     expect(() =>
@@ -229,20 +245,34 @@ function participantInput(role: "first" | "second") {
         : "00000000-0000-4000-8000-000000000020",
     },
     experience: {
-      projectAndViewerEstablished: true as const,
+      connectedOnboardingCompleted: true as const,
+      projectLobbyEntered: true as const,
+      ownTaskDelegatedFromBoard: true as const,
+      liveDeckUnderstood: true as const,
       otherWorkVisible: true as const,
       otherDelegatorIdentified: true as const,
       otherConversationOpened: true as const,
-      personalAttentionUnderstood: true as const,
-      attention: {
-        workId: "00000000-0000-4000-8000-000000000020",
-        relationship: first ? ("own" as const) : ("other" as const),
-        condition: "failed" as const,
-        projectConditionVisible: true as const,
-        personalVerdict: first ? ("needs_me" as const) : ("does_not_need_me" as const),
+      liveTranscriptFollowed: true as const,
+      foldableDetailsUnderstood: true as const,
+      annotation: {
+        id: "00000000-0000-4000-8000-000000000029",
+        workId: "00000000-0000-4000-8000-000000000021",
+        relationship: first ? ("author" as const) : ("viewer" as const),
+        sourceAnchorUnderstood: true as const,
+        progressRailUnderstood: true as const,
+        projectVisibilityUnderstood: true as const,
+      },
+      relay: {
+        id: "00000000-0000-4000-8000-000000000030",
+        workId: "00000000-0000-4000-8000-000000000021",
+        relationship: first ? ("author" as const) : ("recipient" as const),
+        roomAttentionUnderstood: true as const,
+        sourceAnchorUnderstood: true as const,
+        acknowledged: true as const,
+        acknowledgementReceiptUnderstood: true as const,
       },
       noCrossMemberControlsPresented: true as const,
-      triageSeconds: 2,
+      otherWorkFoundSeconds: first ? 7 : 9,
       trustedEnoughToLookAway: true as const,
       wouldUseAgain: true as const,
     },
@@ -277,6 +307,14 @@ function deployedInput(): Parameters<typeof createDeployedCollaborationProofRece
       id: "00000000-0000-4000-8000-000000000003",
       bothMembersActive: true,
     },
+    onboarding: {
+      bothAgentsConnected: true,
+      bothProjectsSelected: true,
+    },
+    presence: {
+      independentClientLeases: true,
+      bothPrincipalsVisible: true,
+    },
     work: {
       firstRunId: "00000000-0000-4000-8000-000000000004",
       secondRunId: "00000000-0000-4000-8000-000000000005",
@@ -287,16 +325,33 @@ function deployedInput(): Parameters<typeof createDeployedCollaborationProofRece
       firstOpenedSecondConversation: true,
       secondOpenedFirstConversation: true,
     },
+    relay: {
+      id: "00000000-0000-4000-8000-000000000006",
+      workId: "00000000-0000-4000-8000-000000000005",
+      anchorSequence: 7,
+      firstCreatedForSecond: true,
+      secondSawPendingAttention: true,
+      secondOpenedSourceAnchor: true,
+      secondAcknowledged: true,
+    },
+    annotation: {
+      id: "00000000-0000-4000-8000-000000000007",
+      workId: "00000000-0000-4000-8000-000000000005",
+      anchorSequence: 0,
+      sourceDigest: "d".repeat(64),
+      firstCreatedOnSecondWork: true,
+      secondSawSameAnchor: true,
+    },
     authorization: {
       firstCannotCancelSecondRun: "not_found",
       secondCannotCancelFirstRun: "not_found",
       boardMutation: "method_not_allowed",
-      browserSessionMutation: "forbidden",
+      browserSessionForeignRunControl: "not_found",
     },
     browser: {
       independentSessions: true,
       httpOnlyCookies: true,
-      sameSiteStrictCookies: true,
+      sameSiteLaxCookies: true,
       secureCookies: true,
       bothBoardsSeeBothRuns: true,
     },

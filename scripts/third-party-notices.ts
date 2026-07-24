@@ -12,7 +12,11 @@ type PackageManifest = {
   readonly optionalDependencies?: Readonly<Record<string, string>>
 }
 
-type DependencyScope = "control-plane-and-runner" | "cloudflare-bridge" | "cloudflare-runtime-agent"
+type DependencyScope =
+  | "control-plane-and-runner"
+  | "project-watch"
+  | "cloudflare-bridge"
+  | "cloudflare-runtime-agent"
 
 type PackageNotice = {
   readonly id: string
@@ -31,13 +35,21 @@ const licenseCandidates = [
   "LICENCE",
   "LICENCE.md",
   "LICENCE.txt",
+  "license",
 ] as const
+const licenseDeclarationOverrides = new Map<string, string>([["khroma@2.1.0", "MIT"]])
 
 const packageScopes = [
   {
     name: "control-plane-and-runner" as const,
     packagePath: `${repositoryRoot}/package.json`,
     resolveFrom: repositoryRoot,
+    resolutionBoundary: repositoryRoot,
+  },
+  {
+    name: "project-watch" as const,
+    packagePath: `${repositoryRoot}/board/package.json`,
+    resolveFrom: `${repositoryRoot}/board`,
     resolutionBoundary: repositoryRoot,
   },
   {
@@ -114,11 +126,22 @@ async function renderNotices(): Promise<string> {
       if (visited.has(id)) continue
       visited.add(id)
 
+      if (packageManifest.name === projectManifest.name) {
+        for (const child of await dependencyNames(
+          packageManifest,
+          packageRoot,
+          resolutionBoundary,
+        )) {
+          pending.push({ name: child, resolveFrom: packageRoot })
+        }
+        continue
+      }
+
       const existing = notices.get(id)
       if (existing) {
         existing.scopes.add(scope.name)
       } else {
-        const license = packageManifest.license?.trim()
+        const license = packageManifest.license?.trim() || licenseDeclarationOverrides.get(id)
         if (!license) throw new Error(`${id} does not declare a license`)
         notices.set(id, {
           id,
@@ -143,7 +166,7 @@ async function renderNotices(): Promise<string> {
     "graphs pinned by bun.lock. `bun run notices:check` fails when this file drifts.",
     "",
     "The inventory covers JavaScript packages distributed by the Meanwhile control plane,",
-    "standalone runner, and Cloudflare Worker bridge. Platform images are separately pinned",
+    "standalone runner, Project Watch bundle, and Cloudflare Worker bridge. Platform images are separately pinned",
     "distribution inputs and retain their own authoritative package inventories and terms:",
     "",
     `- oven/bun:${bunVersion}-slim (Bun runtime plus its Debian base)`,

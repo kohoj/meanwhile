@@ -5,8 +5,8 @@ import {
 } from "./deployed-collaboration-proof-receipt"
 import { digestProofPayload, writeProofReceipt } from "./proof-receipt"
 
-export const EXTERNAL_COLLABORATION_PARTICIPANT_ATTESTATION_VERSION = 1 as const
-export const EXTERNAL_COLLABORATION_ACCEPTANCE_RECEIPT_VERSION = 1 as const
+export const EXTERNAL_COLLABORATION_PARTICIPANT_ATTESTATION_VERSION = 3 as const
+export const EXTERNAL_COLLABORATION_ACCEPTANCE_RECEIPT_VERSION = 3 as const
 
 const timestampSchema = z.string().datetime({ offset: true })
 const identifierSchema = z.string().uuid()
@@ -47,22 +47,38 @@ const participantAttestationInputSchema = z
       .strict(),
     experience: z
       .object({
-        projectAndViewerEstablished: z.literal(true),
+        connectedOnboardingCompleted: z.literal(true),
+        projectLobbyEntered: z.literal(true),
+        ownTaskDelegatedFromBoard: z.literal(true),
+        liveDeckUnderstood: z.literal(true),
         otherWorkVisible: z.literal(true),
         otherDelegatorIdentified: z.literal(true),
         otherConversationOpened: z.literal(true),
-        personalAttentionUnderstood: z.literal(true),
-        attention: z
+        liveTranscriptFollowed: z.literal(true),
+        foldableDetailsUnderstood: z.literal(true),
+        annotation: z
           .object({
+            id: identifierSchema,
             workId: identifierSchema,
-            relationship: z.enum(["own", "other"]),
-            condition: z.enum(["failed", "timed_out", "continuity_lost"]),
-            projectConditionVisible: z.literal(true),
-            personalVerdict: z.enum(["needs_me", "does_not_need_me"]),
+            relationship: z.enum(["author", "viewer"]),
+            sourceAnchorUnderstood: z.literal(true),
+            progressRailUnderstood: z.literal(true),
+            projectVisibilityUnderstood: z.literal(true),
+          })
+          .strict(),
+        relay: z
+          .object({
+            id: identifierSchema,
+            workId: identifierSchema,
+            relationship: z.enum(["author", "recipient"]),
+            roomAttentionUnderstood: z.literal(true),
+            sourceAnchorUnderstood: z.literal(true),
+            acknowledged: z.literal(true),
+            acknowledgementReceiptUnderstood: z.literal(true),
           })
           .strict(),
         noCrossMemberControlsPresented: z.literal(true),
-        triageSeconds: z.number().int().min(0).max(3),
+        otherWorkFoundSeconds: z.number().int().min(0).max(15),
         trustedEnoughToLookAway: z.literal(true),
         wouldUseAgain: z.literal(true),
       })
@@ -212,33 +228,32 @@ const externalCollaborationAcceptancePayloadSchema = z
         message: "Participants must reciprocally observe each other's delegated work",
       })
     }
-    const needsAttention = receipt.participants.find(
-      (participant) => participant.experience.attention.personalVerdict === "needs_me",
-    )
-    const observesAttention = receipt.participants.find(
-      (participant) => participant.experience.attention.personalVerdict === "does_not_need_me",
-    )
-    if (needsAttention === undefined || observesAttention === undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["participants", "experience", "attention"],
-        message: "Acceptance requires one personal attention recipient and one Project observer",
-      })
-    } else if (
-      needsAttention.experience.attention.relationship !== "own" ||
-      observesAttention.experience.attention.relationship !== "other" ||
-      needsAttention.experience.attention.workId !== needsAttention.work.ownWorkId ||
-      observesAttention.experience.attention.workId !==
-        observesAttention.work.observedOtherWorkId ||
-      needsAttention.experience.attention.workId !==
-        observesAttention.experience.attention.workId ||
-      needsAttention.experience.attention.condition !==
-        observesAttention.experience.attention.condition
+    if (
+      first.experience.annotation.relationship !== "author" ||
+      second.experience.annotation.relationship !== "viewer" ||
+      first.experience.annotation.id !== second.experience.annotation.id ||
+      first.experience.annotation.workId !== second.experience.annotation.workId ||
+      first.experience.annotation.workId !== first.work.observedOtherWorkId ||
+      second.experience.annotation.workId !== second.work.ownWorkId
     ) {
       context.addIssue({
         code: "custom",
-        path: ["participants", "experience", "attention"],
-        message: "Personal attention must belong only to the delegator of the same troubled work",
+        path: ["participants", "experience", "annotation"],
+        message: "Participants must attest to the same anchored Project annotation",
+      })
+    }
+    if (
+      first.experience.relay.relationship !== "author" ||
+      second.experience.relay.relationship !== "recipient" ||
+      first.experience.relay.id !== second.experience.relay.id ||
+      first.experience.relay.workId !== second.experience.relay.workId ||
+      first.experience.relay.workId !== first.work.observedOtherWorkId ||
+      second.experience.relay.workId !== second.work.ownWorkId
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["participants", "experience", "relay"],
+        message: "Participants must attest to the same authored and acknowledged Relay",
       })
     }
 

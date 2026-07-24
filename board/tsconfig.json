@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": ["bun", "react", "react-dom"]
   },
-  "include": ["src"]
+  "include": ["src", "dev"]
 }

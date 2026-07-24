@@ -96,6 +96,42 @@ describe("complete public resource boundary", () => {
     expect((await otherClient.deployments.list()).items).toHaveLength(0)
     expect((await otherClient.audit.list({ resourceId: createdKey.key.id })).items).toHaveLength(0)
   })
+
+  test("Principal invitations expose plaintext once and remain owner-scoped and revocable", async () => {
+    const harness = await application()
+    const client = sdk(harness)
+    const principal = await client.projects.createPrincipal({
+      kind: "person",
+      displayName: "Priya Shah",
+    })
+
+    const created = await client.invitations.create(principal.id, { expiresInSeconds: 300 })
+    expect(created.secret).toStartWith(`${created.invitation.prefix}_`)
+    expect(created.invitation.principalId).toBe(principal.id)
+    expect((await client.invitations.list()).map(({ id }) => id)).toContain(created.invitation.id)
+
+    const otherClient = sdk(harness, await createOtherOwner(harness))
+    expect((await otherClient.invitations.list()).map(({ id }) => id)).not.toContain(
+      created.invitation.id,
+    )
+    await expect(otherClient.invitations.revoke(created.invitation.id)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+    })
+
+    const revoked = await client.invitations.revoke(created.invitation.id)
+    expect(revoked.revokedAt).not.toBeNull()
+    expect(
+      (
+        await client.audit.list({
+          resourceType: "principal_invitation",
+          resourceId: created.invitation.id,
+        })
+      ).items.map(({ action }) => action),
+    ).toEqual(
+      expect.arrayContaining(["principal_invitation.create", "principal_invitation.revoke"]),
+    )
+  })
 })
 
 async function application(): Promise<ApplicationHarness> {

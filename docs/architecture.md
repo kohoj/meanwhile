@@ -98,13 +98,57 @@ Project maintainer can manage membership. Principal-scoped idempotency prevents
 two members using the same client key from colliding. Inaccessible resources
 return `NOT_FOUND`.
 
-The Board is a deployment-neutral BFF over the public client. In team mode it
+The Board is a deployment-neutral BFF over the public client. When external
+identity is configured, its same-origin start/callback routes correlate the
+browser transaction with a short-lived HttpOnly cookie, while the control plane
+owns PKCE, sealed provider-bound state, exact redirect validation, code exchange,
+identity linking, credential sealing, grant observation, and browser-session
+issuance in one transaction. Login, link, and invitation callbacks are separate
+route capabilities; link must reauthenticate the initiating Principal, while
+invite state can be created only from a valid digest-backed, expiring,
+single-use invitation to an already provisioned person Principal. Redemption,
+identity binding, and browser-session issuance are atomic. Provider tokens never
+enter browser storage. A login identity must already map to a stable Principal;
+the invitation path is the explicit first-visit identity-binding bridge. A
+pending invitation takes precedence over an existing Board session until the
+viewer explicitly keeps that session or completes provider authorization; the
+two Principal identities are never merged. The Board then completes connected
+onboarding and composes an authorized Project Lobby from public
+Project, member, work, Relay, repository-binding, and PresenceLease reads,
+then opens Project Watch for one selected Project. Lobby counts are projections,
+not a second journal. Online people are deduped from unexpired
+`(owner, project, principal, client)` leases; durable membership is never
+presented as online presence. In team mode the Board
 exchanges a person's API key once for a revocable, expiring control-plane
 browser session, stores only that opaque secret in an HttpOnly SameSite cookie,
-and uses it for read-only Project requests. The authoritative Project work list
-is conditionally polled; task detail reads the native Run or Session event
-journal. There is no second task table or Project activity truth source. See
+and uses it for deny-by-default Project requests. Exact same-origin Board writes
+may create a Run as the authenticated Principal, cancel only a Run whose
+delegator is that Principal, update that Principal's onboarding selection and
+agent connections, heartbeat/release that client's presence, or perform the
+Task Relay and Annotation operations from ADRs 0006 and 0009.
+The authoritative Project work list is conditionally polled; task detail reads
+the native Run or Session event journal. There is no second task table or
+Project activity truth source. See
 [Shared Project definition](project-collaboration.md) and the Project ADRs.
+
+ADR 0007 adds a provider-neutral `RepositoryProjectDirectory` beside, not
+inside, Project authorization. The GitHub implementation consumes a transient
+GitHub App user token, lists only the installations and repositories GitHub
+returns for that user/App intersection, normalizes the result to
+watch/participate/administer, and returns no credential. The wired Lobby uses
+selected existing Projects and groups explicit repository bindings by provider
+account. External identity, repository binding, expiring grant, AgentConnection,
+Project-selection persistence, OAuth/PKCE, sealed identity credentials, and
+opaque browser-session issuance are implemented. GitHub checkout authority is
+resolved only for the exact active Project/repository binding and is revalidated
+against the current App/user repository intersection immediately before
+workspace preparation. The access token is passed only to the bounded git
+helper, its output is exact-value redacted, and the material is released before
+the agent starts. Expired credentials fail closed and require relinking;
+provider rejection or a missing repository revokes the local binding. Webhooks
+remain an invalidation accelerator to add after live-provider acceptance, not a
+correctness dependency. Owner continues to partition every resource request;
+provider discovery cannot issue cross-Owner SQL.
 
 The public contract has one implementation path. Pure Zod schemas define requests and responses, generate OpenAPI through the Hono route layer, and validate SDK traffic at runtime. `src/client.ts` adds the deep consumer semantics that raw HTTP should not force every caller to rebuild: authentication, request correlation, durable waits, structured safe failures, and cursor-correct `AsyncIterable` event following. `src/timeline.ts` is a pure projection from durable events to messages, tool calls, plans, usage, and statuses. The CLI and executable demos are presentation layers over that client. None may call a service or store directly, so local convenience cannot become a second control plane.
 
@@ -137,7 +181,7 @@ One executor calls the store's dedicated `claimRunProvisioning` compare-and-swap
 
 Before compute, the executor verifies that current provider/runner provenance still matches the accepted snapshot. A mismatch fails closed without a provider operation. It then atomically records a stable runtime identity in a durable provisioning intent before calling the provider. `RuntimeProvider.create` is idempotent for that identity: if allocation succeeds but the process dies before the returned handle is persisted, restart reconciliation reacquires the same logical runtime, materializes its opaque handle, and either resumes active work or destroys it for terminal work. The provider then starts compute and receives safe workspace input. Core code never inspects provider-private handle fields.
 
-After trusted workspace setup and before any agent process exists, the executor resolves referenced agent credentials in the control plane and attaches one durable `RuntimeCredentialBroker` lease. The snapshotted agent catalog supplies exact host/method grants. A mediating provider closes agent-phase egress to that allowlist, stores the source values outside the sandbox, returns only opaque placeholders, and stream-redacts exact values from authorized upstream responses. Providers without this boundary reject secret-bearing agent admission. Setup credentials and deployment credentials remain separate operations and never inherit the agent lease.
+For a repository-backed Run or AgentSession without an explicit credential reference, the executor may first resolve one exact Project-bound checkout credential. `WorkspacePreparer` uses it only as a Git HTTP header for init/fetch/checkout, never serializes it into durable intent, and the resolver releases it in a `finally` boundary before the runner starts. Before those control-plane-authored Git commands, the executor resolves referenced agent credentials in the control plane and attaches one durable `RuntimeCredentialBroker` lease whose exact-host policy is the union of the validated repository hostname and the snapshotted agent grants. Repository content and agent code do not execute during setup, agent values remain outside the sandbox, and the setup process receives no agent placeholders. The same lease then governs agent execution; recovery must reproduce the identical policy. A mediating provider denies every other destination, substitutes values only inside its trusted boundary, returns only opaque placeholders, and stream-redacts exact values from authorized upstream responses. Providers without this boundary reject secret-bearing agent admission. Setup credentials and deployment credentials remain separate operations and never inherit agent credentials.
 
 Immediately before one-shot runner spawn, the executor persists a run-process launch intent containing stable runtime/process identities and the accepted remaining timeout budget, but no secret values. This freezes the full process specification across a control-plane crash: an exact `spawn` retry reacquires the same provider process instead of recomputing a different relative timeout and conflicting with it. Process handle, public run process identity, and start audit then materialize in one transaction.
 

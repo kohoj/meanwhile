@@ -24,6 +24,7 @@ import type { StructuredLogger, Telemetry, TelemetryScope } from "../telemetry"
 import { workspaceBasis } from "../workspace-basis"
 import { attachAgentCredentialLease } from "./credential-lease-attacher"
 import type { ExecutionContext } from "./execution-context"
+import type { RepositoryCredentialResolver } from "./repository-credential-resolver"
 import type { WorkspacePreparer } from "./workspace-preparer"
 
 const DEFAULT_POLL_MS = 250
@@ -42,6 +43,7 @@ export interface SessionExecutorOptions {
   readonly workspace: WorkspacePreparer
   readonly executionContext?: Pick<ExecutionContext, "renderPrompt">
   readonly secrets: SecretResolver
+  readonly repositoryCredentials?: RepositoryCredentialResolver
   readonly logger: StructuredLogger
   readonly telemetry?: Telemetry
   readonly concurrency?: number
@@ -58,6 +60,7 @@ export class SessionExecutor implements ManagedComponent {
   readonly #workspace: WorkspacePreparer
   readonly #executionContext: Pick<ExecutionContext, "renderPrompt"> | undefined
   readonly #secrets: SecretResolver
+  readonly #repositoryCredentials: RepositoryCredentialResolver | undefined
   readonly #logger: StructuredLogger
   readonly #telemetry: Telemetry | undefined
   readonly #concurrency: number
@@ -79,6 +82,7 @@ export class SessionExecutor implements ManagedComponent {
     this.#workspace = options.workspace
     this.#executionContext = options.executionContext
     this.#secrets = options.secrets
+    this.#repositoryCredentials = options.repositoryCredentials
     this.#logger = options.logger
     this.#telemetry = options.telemetry
     this.#concurrency = options.concurrency ?? 2
@@ -325,9 +329,6 @@ export class SessionExecutor implements ManagedComponent {
       )
     }
 
-    if (!lease?.processHandle) {
-      await this.#prepareWorkspace(session, provider, runtime)
-    }
     session = this.#store.getAgentSessionInternal(session.id) as AgentSession
     if (session.runtimeId === null) {
       throw new AppError({
@@ -352,10 +353,12 @@ export class SessionExecutor implements ManagedComponent {
         providerName: provider.name,
         credentialBroker,
         agentSpec: session.agentSpec,
+        workspace: session.workspace,
         secrets: resolvedAgentSecrets,
         at: this.#now(),
       })
       if (!lease?.processHandle) {
+        await this.#prepareWorkspace(session, provider, runtime)
         session = this.#store.getAgentSessionInternal(session.id) as AgentSession
         if (session.status === "closing") {
           this.#store.closeAgentSession(session.id, "closed_before_agent_start", this.#now())
@@ -527,6 +530,18 @@ export class SessionExecutor implements ManagedComponent {
         },
       )
       repositoryCredential = repositorySecrets.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
+    } else if (session.workspace.type === "repository") {
+      repositorySecrets =
+        (await this.#repositoryCredentials?.resolve({
+          ownerId: session.ownerId,
+          principalId: session.delegatedBy.id,
+          projectId: session.projectId,
+          repositoryUrl: session.workspace.url,
+          resourceType: "session",
+          resourceId: session.id,
+          ...(this.#observation === null ? {} : { signal: this.#observation.signal }),
+        })) ?? null
+      repositoryCredential = repositorySecrets?.environment["MEANWHILE_REPOSITORY_CREDENTIAL"]
     }
     try {
       const prepared = await this.#workspace.prepare({

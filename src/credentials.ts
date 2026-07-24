@@ -67,7 +67,8 @@ export interface AttachedCredentialLease {
 
 /**
  * A provider-side security boundary, deliberately separate from RuntimeProvider.
- * It owns trusted egress mediation and revocable credential leases, not compute.
+ * It owns trusted setup/agent egress mediation and revocable credential leases,
+ * not compute.
  */
 export interface RuntimeCredentialBroker {
   readonly credentialProvider: string

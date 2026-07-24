@@ -68,7 +68,10 @@ export class WorkspacePreparer {
       }
       environment["GIT_CONFIG_COUNT"] = "1"
       environment["GIT_CONFIG_KEY_0"] = "http.extraHeader"
-      environment["GIT_CONFIG_VALUE_0"] = `Authorization: Bearer ${input.repositoryCredential}`
+      const authorization = /^(?:Basic|Bearer) [^\r\n]+$/.test(input.repositoryCredential)
+        ? input.repositoryCredential
+        : `Bearer ${input.repositoryCredential}`
+      environment["GIT_CONFIG_VALUE_0"] = `Authorization: ${authorization}`
     }
 
     const prefix = input.runId.replaceAll(/[^A-Za-z0-9_-]/g, "-").slice(0, 80)
