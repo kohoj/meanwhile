@@ -343,6 +343,8 @@ await meanwhile.sessions.close(session.id)
 
 `reject` refuses a turn while another is open, `enqueue` preserves order, and `interrupt_and_send` durably interrupts the active turn before starting the replacement. Turn timeout ends only that turn; session continuity remains available. Closing a session is idempotent and releases its runtime through durable cleanup.
 
+`runDurationSummaryFromEvents(events)` from `meanwhile/timeline` summarizes provisioning, running, and total elapsed milliseconds from authoritative `run.status` transitions. Total time includes the queued interval; an active run is measured through its latest status transition.
+
 The equivalent CLI surface is intentionally small:
 
 ```console

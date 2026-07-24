@@ -1,11 +1,31 @@
 import { expect, test } from "bun:test"
-import type { SessionEvent } from "../../src/api/contracts"
+import type { RunEvent, SessionEvent } from "../../src/api/contracts"
+import type { RunStatus } from "../../src/domain"
 import {
   emptySessionTimeline,
   reduceSessionTimeline,
+  runDurationSummaryFromEvents,
   sessionTimelineFromEvents,
 } from "../../src/timeline"
-import { API_OWNER_ID, API_SESSION_ID, API_TIMESTAMP, API_TURN_ID } from "../fixtures/api"
+import {
+  API_OWNER_ID,
+  API_RUN_ID,
+  API_SESSION_ID,
+  API_TIMESTAMP,
+  API_TURN_ID,
+} from "../fixtures/api"
+
+test("summarizes queued, provisioning, and running time from durable run events", () => {
+  const summary = runDurationSummaryFromEvents([
+    runStatusEvent(1, null, "queued", "2025-01-01T00:00:00.000Z"),
+    runStatusEvent(2, "queued", "provisioning", "2025-01-01T00:00:02.000Z"),
+    runnerEvent(3, "2025-01-01T00:00:08.000Z"),
+    runStatusEvent(4, "provisioning", "running", "2025-01-01T00:00:07.000Z"),
+    runStatusEvent(5, "running", "succeeded", "2025-01-01T00:00:18.000Z"),
+  ])
+
+  expect(summary).toEqual({ provisioningMs: 5_000, runningMs: 11_000, totalMs: 18_000 })
+})
 
 test("session timeline is a deterministic projection over durable cross-turn evidence", () => {
   const events: SessionEvent[] = [
@@ -171,5 +191,36 @@ function updateEvent(sequence: number, update: Record<string, unknown>): Session
     source: "runner",
     payload: { turnId: API_TURN_ID, update, truncated: false },
     createdAt: API_TIMESTAMP,
+  }
+}
+
+function runStatusEvent(
+  sequence: number,
+  fromStatus: RunStatus | null,
+  toStatus: RunStatus,
+  createdAt: string,
+): RunEvent {
+  return {
+    version: 1,
+    runId: API_RUN_ID,
+    ownerId: API_OWNER_ID,
+    sequence,
+    type: "run.status",
+    source: "control-plane",
+    payload: { fromStatus, toStatus, statusVersion: sequence, reason: "test" },
+    createdAt,
+  } as RunEvent
+}
+
+function runnerEvent(sequence: number, createdAt: string): RunEvent {
+  return {
+    version: 1,
+    runId: API_RUN_ID,
+    ownerId: API_OWNER_ID,
+    sequence,
+    type: "runner.started",
+    source: "runner",
+    payload: {},
+    createdAt,
   }
 }

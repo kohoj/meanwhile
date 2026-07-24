@@ -1,4 +1,5 @@
 import type { RunEvent, SessionEvent } from "./api/contracts"
+import { isTerminalRunStatus, type RunStatus } from "./domain"
 
 export type TimelineRole = "agent" | "thought" | "user"
 
@@ -86,6 +87,53 @@ export const timelineFromEvents = (events: Iterable<RunEvent>): AgentTimeline =>
   let timeline = emptyTimeline()
   for (const event of events) timeline = reduceTimeline(timeline, event)
   return timeline
+}
+
+export interface RunDurationSummary {
+  readonly provisioningMs: number
+  readonly runningMs: number
+  readonly totalMs: number
+}
+
+export const runDurationSummaryFromEvents = (events: Iterable<RunEvent>): RunDurationSummary => {
+  let runId: string | null = null
+  let cursor = 0
+  let status: RunStatus | null = null
+  let previousAt: number | null = null
+  let provisioningMs = 0
+  let runningMs = 0
+  let totalMs = 0
+
+  for (const event of events) {
+    if (runId !== null && runId !== event.runId) {
+      throw new TypeError("A duration summary cannot contain events from different runs")
+    }
+    if (event.sequence <= cursor) continue
+    if (event.sequence !== cursor + 1) {
+      throw new TypeError(
+        `Run event sequence is not contiguous: expected ${cursor + 1}, received ${event.sequence}`,
+      )
+    }
+
+    runId = event.runId
+    cursor = event.sequence
+    if (event.type !== "run.status") continue
+
+    const at = Date.parse(event.createdAt)
+    if (!Number.isFinite(at)) throw new TypeError("Run status timestamp is invalid")
+    if (previousAt !== null) {
+      if (at < previousAt) throw new TypeError("Run status timestamps are not monotonic")
+      const elapsed = at - previousAt
+      if (status !== null && !isTerminalRunStatus(status)) totalMs += elapsed
+      if (status === "provisioning") provisioningMs += elapsed
+      if (status === "running") runningMs += elapsed
+    }
+
+    previousAt = at
+    status = event.payload.toStatus
+  }
+
+  return { provisioningMs, runningMs, totalMs }
 }
 
 export const emptySessionTimeline = (): SessionTimeline => ({
