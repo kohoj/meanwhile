@@ -16,6 +16,9 @@ const result = await Bun.build({
   minify: true,
   target: "browser",
   naming: "[name].[ext]",
+  // The Board is an SPA with nested conversation routes. Asset imports must
+  // resolve from the deployment root rather than relative to the current URL.
+  publicPath: "/",
 });
 
 if (!result.success) {

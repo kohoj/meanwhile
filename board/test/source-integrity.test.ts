@@ -15,6 +15,12 @@ test("production collaboration surfaces never recognize preview identities", asy
   }
 });
 
+test("bundled assets remain valid on nested Project and conversation routes", async () => {
+  const build = await Bun.file(new URL("../src/build.ts", import.meta.url)).text();
+
+  expect(build).toContain('publicPath: "/"');
+});
+
 test("Conversation Detail keeps the selected option 3 composition as a source-locked contract", async () => {
   const styles = await Bun.file(new URL("../src/ui/styles.css", import.meta.url)).text();
   const detail = await Bun.file(new URL("../src/ui/conversation-detail.tsx", import.meta.url)).text();
