@@ -82,6 +82,35 @@ If any step fails, stop. Preserve the failure as product feedback, fix the
 smallest owning contract, and repeat on a new clean revision. Do not edit an
 attestation to turn a failed journey into an accepted one.
 
+## ADR 0012 local-first extension
+
+The receipt schema and commands below describe the implemented native
+Run/AgentSession acceptance path. They do not yet claim the Local Companion
+path. Before a release may claim Linked conversation collaboration, the same
+clean revision must add and verify a separate local-source receipt with this
+journey:
+
+1. one participant pairs their own Companion and grants exactly one supported
+   Codex or Claude source and one Project;
+2. an unrelated local conversation remains absent;
+3. the participant starts or continues real work in Codex.app, Codex CLI, or
+   Claude Code without launching it through Meanwhile;
+4. the other participant sees a `Linked` card, source app, delegator, observed
+   condition, and last successful sync, then follows the live mirror transcript;
+5. a Companion restart and duplicate batch preserve one contiguous transcript;
+   a conflicting replay, revoked grant, and revoked device are denied;
+6. both participants complete one exact mirror Annotation and one Relay through
+   acknowledgement on that source-owned conversation;
+7. both confirm that no Stop, Send, Interrupt, Recover, Artifact, or Deploy
+   control is presented for the mirror and that the source application retains
+   lifecycle authority.
+
+A deterministic fixture adapter, local transcript tail, browser screenshot, or
+two test Principals may support this receipt but cannot replace its two-person
+attestation. Conversely, this local-source receipt does not prove that a
+Meanwhile-owned task ran inside a local sandbox; that topology needs its own
+RuntimeProvider and isolation receipt.
+
 ## Participant input
 
 After completing the journey, each participant creates a private JSON input on

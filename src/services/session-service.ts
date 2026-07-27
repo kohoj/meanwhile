@@ -14,6 +14,7 @@ import { hashCanonical } from "../idempotency"
 import type { Store } from "../persistence/store"
 import type { SecretReferenceValidator } from "../secrets"
 import type { BriefService } from "./brief-service"
+import { lockWorkspaceToProjectRepository } from "./project-repository-workspace"
 import type {
   RunAgentIntentResolver,
   RunExecutionProvenance,
@@ -107,7 +108,15 @@ export class SessionService {
         message: "Authentication required",
       })
     }
-    this.#validateInput(context.ownerId, input)
+    const repositoryBinding = this.#store.getActiveProjectRepositoryBinding(
+      context.ownerId,
+      project.id,
+    )
+    const admittedWorkspace =
+      repositoryBinding === null
+        ? input.workspace
+        : lockWorkspaceToProjectRepository(repositoryBinding, input.workspace)
+    this.#validateInput(context.ownerId, { ...input, workspace: admittedWorkspace })
     const agentIntent = this.#agentIntents.resolveIntent(
       input.agentType,
       input.env,
@@ -143,11 +152,11 @@ export class SessionService {
     })
     let prepared: PreparedWorkspaceBundle | null = null
     let workspace: WorkspaceSource
-    if (input.workspace.type === "files") {
-      prepared = this.#workspaceInputs.prepare(input.workspace.files)
+    if (admittedWorkspace.type === "files") {
+      prepared = this.#workspaceInputs.prepare(admittedWorkspace.files)
       workspace = prepared.source
     } else {
-      workspace = input.workspace
+      workspace = admittedWorkspace
     }
     const requestHash =
       idempotencyKey === undefined

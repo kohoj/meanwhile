@@ -32,6 +32,15 @@ const environmentSchema = z.object({
   MEANWHILE_SESSION_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
   MEANWHILE_LOCAL_PROVIDER: z.enum(["auto", "enabled", "disabled"]).default("auto"),
   MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER: booleanFromEnvironment,
+  MEANWHILE_OCI_LOCAL_IMAGE: z
+    .string()
+    .regex(/^\S{1,512}$/)
+    .optional(),
+  MEANWHILE_OCI_LOCAL_IMAGE_DIGEST: z
+    .string()
+    .regex(/^sha256:[a-f0-9]{64}$/)
+    .optional(),
+  MEANWHILE_OCI_LOCAL_ENGINE: z.string().min(1).max(512).default("docker"),
   MEANWHILE_SECRET_ENV_ALLOWLIST: z.string().default(""),
   MEANWHILE_LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   MEANWHILE_OTEL_ENABLED: booleanFromEnvironment,
@@ -89,6 +98,11 @@ export interface AppConfig {
     readonly enabled: boolean
     readonly unsafeHostExecution: boolean
   }
+  readonly ociLocal?: {
+    readonly imageReference: string
+    readonly imageDigest?: string
+    readonly engineExecutable: string
+  }
   readonly secretSourceCatalog: readonly string[]
   readonly logLevel: "debug" | "info" | "warn" | "error"
   readonly telemetry: {
@@ -142,6 +156,12 @@ export const loadConfig = (
     parsed.MEANWHILE_HOST,
     parsed.MEANWHILE_ALLOW_UNSAFE_LOCAL_PROVIDER,
   )
+  if (
+    parsed.MEANWHILE_OCI_LOCAL_IMAGE_DIGEST !== undefined &&
+    parsed.MEANWHILE_OCI_LOCAL_IMAGE === undefined
+  ) {
+    throw new Error("MEANWHILE_OCI_LOCAL_IMAGE is required when its digest is configured")
+  }
   const secretSourceCatalog = parseSecretSourceCatalog(parsed.MEANWHILE_SECRET_ENV_ALLOWLIST)
   const githubConfigured = anyDefined([
     parsed.MEANWHILE_GITHUB_CLIENT_ID,
@@ -229,6 +249,17 @@ export const loadConfig = (
     runConcurrency: parsed.MEANWHILE_RUN_CONCURRENCY,
     sessionConcurrency: parsed.MEANWHILE_SESSION_CONCURRENCY,
     localProvider,
+    ...(parsed.MEANWHILE_OCI_LOCAL_IMAGE === undefined
+      ? {}
+      : {
+          ociLocal: {
+            imageReference: parsed.MEANWHILE_OCI_LOCAL_IMAGE,
+            ...(parsed.MEANWHILE_OCI_LOCAL_IMAGE_DIGEST === undefined
+              ? {}
+              : { imageDigest: parsed.MEANWHILE_OCI_LOCAL_IMAGE_DIGEST }),
+            engineExecutable: parsed.MEANWHILE_OCI_LOCAL_ENGINE,
+          },
+        }),
     secretSourceCatalog,
     logLevel: parsed.MEANWHILE_LOG_LEVEL,
     telemetry: {

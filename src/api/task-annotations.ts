@@ -17,7 +17,7 @@ const AnnotationParamSchema = z
   .object({ projectId: IdentifierSchema, annotationId: IdentifierSchema })
   .strict()
 const TaskAnnotationQuerySchema = z
-  .object({ taskKind: z.enum(["run", "session"]), taskId: IdentifierSchema })
+  .object({ taskKind: z.enum(["run", "session", "mirror"]), taskId: IdentifierSchema })
   .strict()
 
 const createAnnotationRoute = createRoute({

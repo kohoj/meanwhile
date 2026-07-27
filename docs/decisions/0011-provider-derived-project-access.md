@@ -33,7 +33,7 @@ Project authorization is a request-time union, never a copied membership:
 1. active explicit membership maps `maintainer` to `administer` and `member` to
    `participate`;
 2. an unexpired GitHub grant matching an active Project repository binding by
-   provider, installation, and repository contributes its native `watch`,
+   provider and immutable repository ID contributes its native `watch`,
    `participate`, or `administer` access;
 3. the strongest current authority wins, with explicit membership winning an
    equal-access tie;
@@ -44,21 +44,28 @@ Project authorization is a request-time union, never a copied membership:
 `watch` may enter the Lobby and room, read native task conversations and shared
 room facts, and publish ephemeral Presence. `participate` additionally may
 delegate its own work, annotate transcript text, and send or acknowledge Relays.
-`administer` additionally may import an authorized repository as a Project,
-change the Project repository binding, and administer explicit local members.
+`administer` additionally may import an authorized repository as a Project and
+administer explicit local members. A Project repository binding can never be
+changed.
 Lifecycle control remains restricted to the immutable original delegator at
 every access level.
 
 Repository import is one immediate SQLite transaction. An `administer` grant
-either reuses the existing active room for the same installation and repository
-or creates a provider-governed Project plus binding, then selects it for the
-caller. It does not fabricate `ProjectMembership`. This makes the same room
-visible to every Principal with a matching current grant.
+either reuses the existing room for the same immutable GitHub repository ID or
+creates its sole provider-governed Project plus binding, then selects it for the
+caller. The database enforces at most one such binding per `(Owner, provider,
+repository ID)`, and the application rejects rebinding a Project to another
+repository. Repository name, canonical URL, account display metadata, and App
+installation may refresh in place; none changes the room identity. Import does
+not fabricate `ProjectMembership`. This makes the same room visible to every
+Principal with a matching current grant and prevents installation churn from
+forking it.
 
 Private checkout uses the delegator's own current grant, external identity, and
 sealed credential. The binding identifies the shared repository; it is not a
 pointer to the room creator's authority. Provider rejection revokes only the
-caller's grant. The shared binding remains available to other authorized people.
+caller's grant. The durable repository binding remains available to other
+authorized people and cannot be repurposed while nobody currently has access.
 The token still exists only inside the bounded git preparation path and never
 enters browser state, Run or Session input, runtime, agent, transcript, or
 artifact.
@@ -69,8 +76,10 @@ artifact.
   levels without becoming the Owner, Principal, work lifecycle, or audit store.
 - Google remains identity-only; a Google user links GitHub before importing or
   participating in a private GitHub-backed room.
-- Local Projects, explicit memberships, API-key login, invitations, and closed
-  self-hosted deployments remain first-class and do not require GitHub.
+- API-key login, invitations, explicit memberships, and closed self-hosted
+  deployments remain first-class. The execution core may retain unbound
+  operator fixtures, but the collaboration Lobby admits only GitHub-bound
+  Project rooms.
 - Project participant lists expose effective access and authority source instead
   of misrepresenting provider users as durable members.
 - Live provider, clean-revision, credentialed-agent, and two-human acceptance
@@ -83,4 +92,6 @@ artifact.
 - Treating sign-in as ambient access to every Project in an Owner.
 - Using the binding creator's GitHub token for another person's checkout.
 - Revoking a shared Project binding when one person's provider grant disappears.
+- Treating App installation ID, mutable repository name, or URL as the room identity.
+- Letting a Project switch repositories or one repository create multiple rooms.
 - Making open registration mandatory for self-hosted installations.

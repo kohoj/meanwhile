@@ -1,11 +1,10 @@
 import { Database } from "bun:sqlite"
 import { resolve } from "node:path"
+import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../src/persistence/schema"
 import {
-  CURRENT_SCHEMA,
-  databaseSchemaFingerprint,
-  SCHEMA_SQL,
-  splitSchemaSql,
-} from "../src/persistence/schema"
+  migrateConversationMirrorSchema,
+  preConversationMirrorSchemaStatements,
+} from "./conversation-mirror-schema"
 
 const CONNECTED_ONBOARDING_SCHEMA_FINGERPRINT =
   "2efd73c952ba0134f08c63b2baba111245f3a798b6765a30e8b60c7dacb0f53b"
@@ -52,14 +51,17 @@ try {
     process.exit(0)
   }
 
+  database.exec("PRAGMA foreign_keys=OFF")
   database
     .transaction(() => {
       for (const statement of presenceSchemaStatements()) database.query(statement).run()
+      migrateConversationMirrorSchema(database)
       database
         .query("UPDATE schema_identity SET fingerprint=? WHERE singleton=1")
         .run(CURRENT_SCHEMA.fingerprint)
     })
     .immediate()
+  database.exec("PRAGMA foreign_keys=ON")
 
   if (
     database.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all().length > 0 ||
@@ -95,7 +97,7 @@ function presenceSchemaStatements(): readonly string[] {
     "principal_invitations_prefix_idx",
     "principal_invitations_principal_idx",
   ])
-  return splitSchemaSql(SCHEMA_SQL).filter((statement) => {
+  return preConversationMirrorSchemaStatements().filter((statement) => {
     const match = /^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+([a-z0-9_]+)/i.exec(statement)
     return match !== null && ownedObjects.has(match[1] as string)
   })

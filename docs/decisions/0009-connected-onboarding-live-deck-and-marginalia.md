@@ -82,18 +82,18 @@ The target onboarding model separates:
   bounded capabilities;
 - the existing Project membership and delegator authority owned by Meanwhile.
 
-Project Lobby selection is personal visibility, not repository governance. A
-person may select any Project they already belong to, including an unbound local
-Project, even when the same identity also has GitHub repository grants. An
-optional Project-to-repository binding is shown separately and may be changed
-only by a Project maintainer using an `administer` grant. Onboarding readiness
-therefore requires an agent connection plus at least one selected Project; it
-never requires every selected Project to impersonate a GitHub repository.
+As amended by ADR 0011 and the repository-fidelity contract, Project Lobby
+selection is personal visibility over GitHub-bound rooms, not mutable
+repository governance. A person may select any bound Project they may currently
+enter. The immutable Project-to-repository identity is shown separately and can
+never be changed; onboarding readiness requires an agent connection plus at
+least one selected bound Project.
 
-GitHub is an optional identity and repository authorization provider, not the
-Meanwhile tenant boundary or run-control authority. Google may establish the
-same Principal but grants no GitHub repository access. Local API-key bootstrap
-remains viable for self-hosted and offline installations.
+GitHub supplies the current collaboration Lobby's repository identity and
+eligibility, not the Meanwhile tenant boundary or run-control authority. Google
+may establish the same Principal but grants no GitHub repository access. Local
+API-key bootstrap remains viable for self-hosted operator access, while unbound
+engine Projects are not presented as collaboration rooms.
 
 ### Presence
 

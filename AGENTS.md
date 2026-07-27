@@ -15,7 +15,9 @@ attention, and the correct control boundary while agents and runtimes remain
 replaceable. The human promise is: hand the work off without handing away its
 truth, responsibility, or control.
 
-Meanwhile is the open control plane for running any coding agent in any isolated runtime.
+Meanwhile is the open custody and control plane for coding-agent work: it can
+own execution in an isolated runtime or truthfully share an explicitly linked
+conversation already owned by a person's local agent tool.
 
 > Bring your agent. Bring your sandbox. Meanwhile owns the run.
 
@@ -35,7 +37,42 @@ meanwhile api-keys create --name "Bob laptop" --principal <principal-id>
 
 The original challenge is the acceptance floor. The product bar is that a failed remote run can be explained, cancelled, recovered, or cleaned up without SSH access.
 
-The active product outcome is the coherent collaboration journey selected in ADRs 0009 and 0011: GitHub/Google or installation sign-in, connected onboarding, Project Lobby, Project Room as a Live Deck of simultaneous human-agent conversations, then one full Conversation Detail with foldable agent work, Project-visible transcript marginalia, and addressed Task Relays. People establish a deployment-appropriate identity, separately authorize repository discovery and agent connections, choose the Projects they may surface, see where work is live, enter one room, delegate their own work, and open any authorized participant's conversation without gaining lifecycle control of that participant's agent. Do not introduce `evidence` as a separate collaboration UI concept; logs, events, artifacts, and audit records remain system facts exposed through task detail where useful. Lobby and Live Deck are read models over native work and task events; neither creates a second task lifecycle, transcript, or Project activity journal. The implementation uses stable Principals, Owner-contained Projects, an effective request-time union of explicit membership and current matching GitHub repository grants, immutable Project/delegator bindings, delegator-only lifecycle control, Principal-scoped idempotency, revocable browser sessions with route-exact capabilities, authoritative Project polling, and native task-event following. GitHub and Google remain optional; neither becomes a prerequisite or replaces Meanwhile lifecycle, attribution, or audit authority. Keep [`docs/product-constitution.md`](docs/product-constitution.md), [`docs/project-collaboration.md`](docs/project-collaboration.md), ADRs 0009 and 0011, implementation, tests, and Board aligned.
+The active product outcome is the coherent collaboration journey selected in
+ADRs 0009, 0011, and 0012: GitHub/Google or installation sign-in, connected
+onboarding, Project Lobby, Project Room as a Live Deck of simultaneous
+human-agent conversations, then one full Conversation Detail with foldable
+agent work, Project-visible transcript marginalia, and addressed Task Relays.
+People establish a deployment-appropriate identity, separately authorize
+repository discovery, managed execution, and local observation, choose the
+GitHub repositories they may surface as Projects, see where work is live, enter one room, delegate
+their own work, and open any authorized participant's conversation without
+gaining lifecycle control of that participant's agent. Local Companion makes
+explicitly shared Codex.app, Codex CLI, and Claude Code conversations visible as
+`ConversationMirror` records; product UI calls them Linked conversations. A
+mirror never impersonates a Run or AgentSession and exposes no execution,
+artifact, deployment, or recovery authority. Meanwhile-owned work should prefer
+a real local sandbox where one is available, while Cloudflare remains an
+optional remote provider. Do not introduce `evidence` as a separate
+collaboration UI concept; logs, events, artifacts, audit records, and accepted
+mirror events remain system facts exposed through task detail where useful.
+Lobby and Live Deck are read models over native work and linked conversations;
+neither creates a second mutable task lifecycle or Project activity journal.
+The collaboration product uses one immutable GitHub repository identity per
+Project and at most one Project per `(Owner, GitHub repository ID)`. Repository
+name, URL, App installation, and current grants may change without changing the
+room; no Run, AgentSession, or ConversationMirror may enter a Project from a
+different repository. The implementation uses stable Principals, Owner-contained Projects, an
+effective request-time union of explicit membership and current matching GitHub
+repository grants, immutable Project/delegator bindings, delegator-only
+lifecycle control, Principal-scoped idempotency, revocable browser and device
+credentials with route-exact capabilities, authoritative Project polling, and
+cursor-correct event following. A self-hosted deployment may avoid Google,
+Cloudflare, and any managed service, but the current collaboration Lobby uses
+GitHub repository identity as the Project-room namespace. GitHub does not
+replace Meanwhile attribution, authorization, or owned-work lifecycle authority. Keep
+[`docs/product-constitution.md`](docs/product-constitution.md),
+[`docs/project-collaboration.md`](docs/project-collaboration.md), ADRs 0009,
+0011, and 0012, implementation, tests, and Board aligned.
 
 Meanwhile is not a generic shell API, agent/model provider, workflow engine, provider-specific wrapper, secrets manager, CI system, IDE, or dashboard. Do not add Redis, Kafka, a distributed queue, DAG engine, DI container, ORM, MCP facade, second remote provider, or UI merely to look complete.
 
@@ -59,9 +96,39 @@ Interactive continuity adds four entities without changing those lifecycles:
 
 A `Run` remains the atomic execution and promotion unit. An `AgentSession` is the interactive continuity unit. Do not add optional fields until one entity can impersonate the other.
 
+Source-owned collaboration adds four more entities without changing an
+execution lifecycle:
+
+1. **ConnectorDevice** — one revocable Principal-bound local Companion.
+2. **ConversationShareGrant** — explicit permission for one device/source to
+   publish a locally selected conversation into one Project.
+3. **ConversationMirror** — immutable Project/delegator custody record for one
+   pseudonymous external source session.
+4. **MirrorEvent** — append-only, replayable, normalized source observation.
+
+A mirror is never a Run or AgentSession, owns no Runtime, and cannot produce an
+authoritative Meanwhile terminal state, Artifact, Deployment, or Brief source.
+
 A `Brief` is not another execution lifecycle. It is an immutable, owner-curated reference from reusable context back to authoritative artifact evidence.
 
-Project collaboration adds identity, discovery, visibility, marginalia, presence, and human handoff, not another execution lifecycle. `Owner` remains the hard tenant boundary; stable `Principal` records represent people or services; `ProjectMembership` grants explicit local authority; a current external Project grant matching an active Project repository binding contributes provider-derived `watch`, `participate`, or `administer` access without being copied into membership or erasing historical attribution. New Runs and AgentSessions bind one immutable Project and delegating Principal. `Annotation` is Project-visible shared marginalia anchored by exact source identity, quote context, offsets, and digest. `TaskRelay` is an immutable Project-visible person-to-person message anchored to one task event, with recipient-only acknowledgement. A `PresenceLease` is expiring ephemeral online state and is never inferred from either authority. None enters the Run or Session event journal, and none grants lifecycle control. API keys, external credentials, browser sessions, provider grants, and agent connections are revocable credentials or grants, not durable people. Generic social comments, delegated operator control, and a durable Project activity stream remain outside this contract.
+Project collaboration adds identity, discovery, visibility, marginalia,
+presence, source observation, and human handoff, not another execution
+lifecycle. `Owner` remains the hard tenant boundary; stable `Principal` records
+represent people or services; `ProjectMembership` grants explicit local
+authority; a current external Project grant matching an active Project
+repository binding contributes provider-derived `watch`, `participate`, or
+`administer` access without being copied into membership or erasing historical
+attribution. New Runs, AgentSessions, and ConversationMirrors bind one immutable
+Project and delegating Principal. `Annotation` is Project-visible shared
+marginalia anchored by exact source identity, quote context, offsets, and digest.
+`TaskRelay` is an immutable Project-visible person-to-person message anchored to
+one task event, with recipient-only acknowledgement. A `PresenceLease` is
+expiring ephemeral online state and is never inferred from either authority.
+None enters a Run, Session, or Mirror event journal, and none grants lifecycle
+control. API keys, external credentials, browser sessions, device credentials,
+share grants, provider grants, and agent connections are revocable credentials
+or grants, not durable people. Generic social comments, delegated operator
+control, and a durable Project activity stream remain outside this contract.
 
 ```text
 User / upstream agent
@@ -69,22 +136,34 @@ User / upstream agent
         ▼
 ┌─────────────────────────────────────────────┐
 │ Meanwhile control plane                    │
-│ run/session intent · policy · audit · state│
+│ run/session intent · mirror custody · policy│
+│ audit · state                              │
 └──────────────┬───────────────┬──────────────┘
                │               │
        RuntimeProvider     DeployAdapter
                │               │
-      ┌────────┴───────┐       └── local-static
-      │                │
- local runtime   Cloudflare bridge
-      │                │
-      └──── meanwhile-runner ───┘
-                    │ local ACP over stdio
-                    ▼
-                 ACP agent
+      ┌────────┼───────────┐       └── local-static
+      │        │           │
+ host local  local OCI  Cloudflare bridge
+ process     sandbox         │
+ (unsafe)       └────────────┴── isolated runtime
+      │                      │
+      └────────── meanwhile-runner
+                             │ local ACP over stdio
+                             ▼
+                          ACP agent
+
+Codex.app / Codex CLI / Claude Code
+        │ selected local transcript + hook wake-up
+        ▼
+Meanwhile Companion durable outbox
+        │ device credential · exact replay
+        └──────────────► ConversationMirror / MirrorEvent
 ```
 
-The control plane decides. Adapters execute and report facts. ACP stays local to the runner and agent.
+The control plane decides. Runtime adapters execute and report facts. Source
+adapters observe only explicitly shared local facts. ACP stays local to the
+runner and agent.
 
 ## 3. Fixed stack: one owner per concern
 
@@ -99,7 +178,9 @@ Use the smallest current primitive that owns each responsibility completely.
 | Validation and OpenAPI | Zod 4 + `@hono/zod-openapi` | Runtime validation and API documentation from one schema source |
 | Agent protocol | official `@agentclientprotocol/sdk` | Harness-neutral typed ACP instead of per-agent CLI scraping |
 | Persistence | `bun:sqlite` in WAL mode | Durable local control plane without an ORM or sidecar |
-| Local execution | `Bun.spawn` with argv arrays and Web streams | No shell interpolation and no compatibility layer |
+| Local deterministic execution | `Bun.spawn` with argv arrays and Web streams | No shell interpolation; explicit non-isolation |
+| Local isolated execution | `RuntimeProvider` over an OCI/VM backend, with Colima first and Apple Container eligible behind the same contract | Local-first sandboxing without product coupling to one container CLI |
+| Local source observation | Bun Companion with source adapters and a SQLite outbox | Outbound-only, replayable, source-local integration without credential copying |
 | Remote runtime | official Cloudflare Sandbox SDK behind a bridge | One real remote provider with lifecycle, process, file, and preview primitives |
 | Telemetry API | `@opentelemetry/api` | Vendor-neutral trace and metric semantics at ownership boundaries |
 | Telemetry SDK/export | OTel base SDK + OTLP/HTTP, behind a Bun contract test | Standard backend interoperability without Node auto-instrumentation |
@@ -120,10 +201,11 @@ Do not use `@hono/node-server`, Express, Fastify, `better-sqlite3`, `dotenv`, `t
 The control plane exclusively owns:
 
 - authentication, owner identity, and authorization;
-- run, session, turn, brief, and deployment records, with state machines only for lifecycle entities;
+- run, session, turn, brief, deployment, device, share-grant, mirror, and
+  mirror-event records, with state machines only for lifecycle entities;
 - idempotency and concurrency decisions;
 - secret-reference resolution, lifetime, and redaction policy;
-- durable run/session event streams, run logs, artifact metadata, and audit evidence;
+- durable run/session/mirror event streams, run logs, artifact metadata, and audit evidence;
 - timeout, cancellation, reconciliation, and cleanup policy;
 - normalized errors, API, SDK, CLI, and OpenAPI contracts.
 
@@ -160,6 +242,36 @@ ACP remains local between runner and child. Cloud-provider process APIs transpor
 `ArtifactStore` owns immutable bytes. SQLite owns metadata and references only.
 
 A `DeployAdapter` receives a validated immutable artifact plus target configuration. It reports status, logs, a structured error, and URLs. It never authorizes an owner, reads a mutable runtime workspace, or updates run state.
+
+### 4.5 Local Companion
+
+`meanwhile companion` runs the outbound-only local integration mode in the same
+Bun CLI; it is not a second application package. That mode owns:
+
+- bounded device-local discovery and explicit selection of supported local
+  Codex and Claude conversations; a non-interactive caller never defaults to
+  the newest transcript;
+- device-local Connector credential generation and proof-of-possession
+  adoption: the browser receives only a prefix plus SHA-256 verifier, chooses
+  one Project, and never receives the plaintext secret;
+- an exact device-local profile freezing source conversation ID and transcript
+  path plus a platform supervisor adapter; the macOS
+  adapter uses one user LaunchAgent per profile and macOS Keychain for the
+  Connector credential;
+- source-private file handles, byte cursors, rotation segments, and parser versions;
+- matching source conversations against explicit Project share grants;
+- source-neutral event normalization, local-path and known-secret redaction;
+- a bounded durable outbox and exact checkpoint resume;
+- private runtime diagnostics plus explicit pause, resume, and uninstall;
+- preservation of the local outbox on uninstall unless destructive purge is
+  separately requested.
+
+It never owns Project authorization, Run or Session state, agent credentials,
+prompts, tool approval, agent lifecycle, artifacts, deployments, SQL in the
+control-plane database, or another source application's transcript. The
+control plane never scans a user home directory or reaches inbound to a device.
+Source hooks are wake-ups, not the durable network delivery path. Raw source
+records remain local by default.
 
 ## 5. Stable contracts
 
@@ -268,13 +380,90 @@ The initial contract is deliberately explicit and artifact-to-run/turn. A turn's
 
 ### 5.8 Project collaboration
 
-The Shared Project, first-task, live transcript, Task Relay, durable Annotation, and local Project Lobby vertical slices are implemented through the control-plane and Board transport boundaries. Bearer API keys bind one stable Principal; opaque expiring browser sessions bind the same identity and authorize reads, self-revocation, exact Run creation and self-cancellation, exact Relay creation and recipient-only acknowledgement, plus exact Annotation creation and author-or-maintainer resolution. Run creation derives the Project and delegator through the authenticated Principal rather than browser input. Owner contains Projects, membership is explicit, new Runs and AgentSessions freeze Project and delegator identity, and idempotency includes the Principal. Active Project members may read authoritative work, conversation, Task Relays, Task Annotations, artifacts, Briefs, and deployments. All lifecycle commands and deployment creation remain restricted to the immutable original delegator; browser sessions expose only exact self-cancellation for one-shot Runs. Inaccessible resources continue to return no existence signal.
+The Shared Project, first-task, live transcript, Task Relay, durable Annotation,
+and local Project Lobby vertical slices are implemented through the
+control-plane and Board transport boundaries. Bearer API keys bind one stable
+Principal; opaque expiring browser sessions bind the same identity and
+authorize reads, self-revocation, exact Run creation and self-cancellation,
+exact Relay creation and recipient-only acknowledgement, plus exact Annotation
+creation and author-or-maintainer resolution. Run creation derives the Project
+and delegator through the authenticated Principal rather than browser input.
+Owner contains Projects, membership is explicit, and new Runs, AgentSessions,
+and ConversationMirrors freeze Project and delegator identity. Active Project
+participants may read the authorized `run | session | mirror` work projection
+and its corresponding conversation; artifact, Brief, and deployment reads
+remain native-work capabilities only. All lifecycle commands and deployment
+creation remain restricted to the immutable original delegator of a native
+work item. A mirror has no such commands. Inaccessible resources continue to
+return no existence signal.
 
 The public CLI exposes the existing identity and collaboration contracts rather than inventing a private administration plane: operators can create/list Principals and Projects, add/remove Project members, issue a key or one-time invitation for one selected Principal, revoke invitations, and bind Runs or AgentSessions with `--project`. An invitation carries only identity-binding authority for an already provisioned person Principal; it never creates an Owner, Principal, Project membership, provider grant, or lifecycle authority. Its high-entropy plaintext is returned once, only its digest is stored, and redemption is atomic with external-identity linking and browser-session issuance.
 
-The Board reference client opens in Project Lobby and enters the selected Live Deck for one Project. The Lobby composes authorized Project reads. The Live Deck presents one angular acrylic card per authoritative Run or AgentSession, with bounded previews projected from native task events; presentation collapse never deletes or rewrites the source transcript. Opening a card enters Conversation Detail, where Streamdown renders readable agent Markdown and working notes, tool calls, plans, usage, and system facts remain structurally foldable. Task Relays remain source-anchored addressed handoffs: the recipient sees waiting Lobby attention, `Passed to you` on the matching Deck card, the sender's note beside the exact source moment, a recipient-only acknowledgement action, and the author sees the resulting receipt. The room rail reads a bounded recent Relay projection for the Project independently of the current viewer's pending inbox; it is not a second Project activity stream. These are projections of one Relay, not copied messages or another activity stream. The Board owns no SQL, hidden authorization, copied transcript, Project activity journal, or agent control. Presence comes only from active PresenceLeases; the three-person Northstar state is a named deterministic visual fixture, not deployed presence proof. `MEANWHILE_API_KEY` remains an explicit local single-user bootstrap; team mode exchanges each person's API key once for an opaque browser session held in an HttpOnly SameSite cookie.
+The Board reference client opens in Project Lobby and enters the selected Live
+Deck for one Project. The Lobby composes authorized Project reads. The Live Deck
+presents one angular acrylic card per authoritative Run or AgentSession and one
+clearly source-owned card per ConversationMirror. Bounded previews project from
+the matching native or mirror event journal; presentation collapse never
+deletes or rewrites source facts. Opening any card enters Conversation Detail,
+where Streamdown renders readable agent Markdown and working notes, tool calls,
+plans, usage, and system facts remain structurally foldable. A mirror card names
+its source and synchronization condition and contains no invented execution,
+artifact, deployment, or recovery control. Task Relays remain source-anchored
+addressed handoffs: the recipient sees waiting Lobby attention, `Passed to you`
+on the matching Deck card, the sender's note beside the exact source moment, a
+recipient-only acknowledgement action, and the author sees the resulting
+receipt. The room rail reads a bounded recent Relay projection for the Project
+independently of the current viewer's pending inbox; it is not a second Project
+activity stream. These are projections of one Relay, not copied messages or
+another activity stream. The Board owns no SQL, hidden authorization, copied
+transcript, Project activity journal, or agent control. Presence comes only
+from active PresenceLeases; the three-person Northstar state is a named
+deterministic visual fixture, not deployed presence proof.
+Project and Conversation surfaces have stable URLs and must recover through
+refresh plus browser back/forward without treating the address as authority.
+A person with a selected authorized Project may enter the Lobby to watch even
+without an agent connection; delegation remains unavailable until that person
+authorizes an eligible managed agent. `companion connect` selects one local
+conversation, generates its secret locally, opens verifier-only browser
+approval for one Project, then proves possession before Keychain installation.
+`MEANWHILE_API_KEY` remains an explicit local single-user bootstrap; team mode
+exchanges each person's API key once for an opaque browser session held in an
+HttpOnly SameSite cookie.
 
-The controlling contract and remaining release boundary are in [`docs/project-collaboration.md`](docs/project-collaboration.md). ADR 0007 controls the optional GitHub-backed directory boundary; ADR 0009 controls connected onboarding, Live Deck, PresenceLease, and transcript marginalia; ADR 0010 retains the sealed external-credential and checkout-isolation contract; ADR 0011 controls explicit owner-scoped registration, provider-derived Project access, repository import, participant projection, and per-delegator checkout authority. The provider-neutral directory, GitHub permission adapter, durable Annotation, ExternalIdentity, GitHub/Google OAuth/OIDC with PKCE, sealed credential, one-time Principal invitation, explicit `closed|open` registration policy, Project binding/import, effective participant access, agent connection, PresenceLease, and JIT checkout contracts are implemented through the control-plane/BFF boundary. Checkout revalidation is the current correctness path; provider webhooks, invitation delivery, live-provider acceptance, and the deployed two-human receipt remain outstanding. The local clean-revision system proof and deployed two-Principal HTTPS proof remain separate receipts; neither may claim that two real people completed external acceptance. Delegated operator grants and a durable Project activity stream remain deferred.
+The controlling contract and remaining release boundary are in
+[`docs/project-collaboration.md`](docs/project-collaboration.md). ADR 0007
+controls the optional GitHub-backed directory boundary; ADR 0009 controls
+connected onboarding, Live Deck, PresenceLease, and transcript marginalia; ADR
+0010 retains the sealed external-credential and checkout-isolation contract;
+ADR 0011 controls explicit owner-scoped registration, provider-derived Project
+access, repository import, participant projection, and per-delegator checkout
+authority; ADR 0012 controls Companion observation, mirror truth, device/share
+authority, exact replay, and local-first sandboxing. Provider webhooks,
+invitation delivery, live-provider acceptance, real local-source acceptance,
+and the deployed two-human receipt remain separate outstanding gates.
+Deterministic source fixtures, a local file tail, and two test Principals may
+prove their respective boundaries but never two-person use. Delegated operator
+grants and a durable Project activity stream remain deferred.
+
+### 5.9 ConversationMirror
+
+The complete mirror contract is in ADR 0012. The control plane accepts only
+versioned normalized events from a Principal-bound ConnectorDevice under an
+active exact ConversationShareGrant. `(mirrorId, sequence)` is immutable: an
+exact digest retry is idempotent, a conflicting retry fails closed, and a gap
+returns the last contiguous checkpoint. The device keeps source-private
+handles, paths, cursors, parser state, and the durable outbox; the control plane
+stores only pseudonymous source identity, optional safe repository basis,
+bounded normalized content, source digest, source-observed time, and acceptance
+time.
+
+Source adapters are Companion-local. Codex and Claude hooks may wake them, but
+the replayable selected source record is the read path. A separately launched
+app-server or vendor remote-control service is not attachment to an existing
+session. The Companion never sends input, approves a tool, interrupts, imports
+source credentials, or claims recovery. Project authorization and public reads
+remain in the control plane; the Board consumes only the public mirror and
+Project work contracts.
 
 ## 6. Run state machine
 
@@ -472,9 +661,20 @@ Never return provider bodies, stack traces, SQL text, tokens, secret values, pro
 
 SQLite is the source of truth for a single-active-control-plane topology. Enable foreign keys, WAL, busy timeout, and transactional current-schema initialization; use no ORM.
 
-The store initializes one exact schema only when the database is empty, records its source fingerprint atomically, and rejects every nonempty database whose identity differs. Startup never upgrades, backfills, repairs, or dual-reads database state. Separate offline migrations each accept one exact source: `migrate:projects` accepts the published v0.1.3 fingerprint, `migrate:task-relays` accepts the Project Watch fingerprint and reaches the current Relay-plus-Annotation schema directly, and `migrate:task-annotations` accepts the intermediate exact Task Relay fingerprint. All default to a dry run and verify the resulting current fingerprint plus foreign keys after explicit `--write`; unknown or partially modified schemas fail closed. Schema SQL executes statement-by-statement because Bun does not reliably surface every statement-level failure through multi-statement `Database.exec()`.
+The store initializes one exact schema only when the database is empty, records its source fingerprint atomically, and rejects every nonempty database whose identity differs. Startup never upgrades, backfills, repairs, or dual-reads database state. Separate offline migrations each accept one exact source: `migrate:projects` accepts the published v0.1.3 fingerprint, `migrate:task-relays` accepts the Project Watch fingerprint and reaches the current Relay-plus-Annotation schema directly, `migrate:task-annotations` accepts the intermediate exact Task Relay fingerprint, `migrate:conversation-mirrors` accepts the exact pre-mirror schema, and `migrate:project-repository-identity` accepts the exact pre-repository-identity schema. All default to a dry run and verify the resulting current fingerprint plus foreign keys after explicit `--write`; unknown, ambiguous, or partially modified schemas fail closed. Schema SQL executes statement-by-statement because Bun does not reliably surface every statement-level failure through multi-statement `Database.exec()`.
 
-The schema includes its exact identity, Owners, stable Principals, Projects and memberships, hashed API keys and Principal bindings, opaque browser sessions, immutable Run/Session Project and delegator bindings, immutable addressed Task Relays plus recipient acknowledgements, immutable source-anchored Task Annotations plus separate resolution facts, durable run events, turns, session commands and events, immutable run-input references, durable runtime-provisioning and run-process-launch intents, runtime instances and session runtime leases with cleanup state, runner/provider cursors, Principal-scoped admission idempotency, sequenced run logs, artifact metadata, deployments and logs, and append-only audit records.
+The schema includes its exact identity, Owners, stable Principals, Projects and
+memberships, hashed API keys and Principal bindings, opaque browser sessions,
+hashed ConnectorDevice credentials, explicit ConversationShareGrants,
+immutable Run/Session/Mirror Project and delegator bindings, append-only
+sequenced MirrorEvents with exact replay digests, immutable addressed Task
+Relays plus recipient acknowledgements, immutable source-anchored Task
+Annotations plus separate resolution facts, durable run events, turns, session
+commands and events, immutable run-input references, durable
+runtime-provisioning and run-process-launch intents, runtime instances and
+session runtime leases with cleanup state, runner/provider cursors,
+Principal-scoped admission idempotency, sequenced run logs, artifact metadata,
+deployments and logs, and append-only audit records.
 
 Do not store artifact bodies or resolved secrets in SQLite. Use relational constraints for ownership, ordering, state, and uniqueness rather than hiding invariants in JSON. Owner-scoped indexes start with `owner_id`. State claims use compare-and-swap predicates or status versions.
 
@@ -530,13 +730,32 @@ Structured logs use stable event names and fields; prose belongs in `message`. T
 
 ## 12. Provider implementations
 
-### 12.1 Local
+### 12.1 Local process
 
 The local provider is a POSIX-only full adapter for development, deterministic tests, and the no-account demo. It uses one process-group implementation and the same runner and contract: lifecycle, persistable process identity, replay, ordered/idempotent process input, cancellation, files, artifacts, and exposure where applicable.
 
 It is not a security sandbox. README and provider diagnostics must say so. Never run untrusted code locally while claiming isolation.
 
-### 12.2 Cloudflare Sandbox
+### 12.2 Local sandbox
+
+The selected owned-execution default is a separate local sandbox provider. It
+implements the unchanged `RuntimeProvider` contract and must truthfully declare
+process recovery, event replay, process input, network policy, credential
+mediation, and isolation capabilities. An OCI backend through Colima is the
+first supported route on the target macOS development environment; Apple
+Container may implement the same contract when present. Core code and public
+resources never branch on either backend name.
+
+The provider uses digest-pinned images, explicit bounded mounts, no host-socket
+mount inside the workload, default-deny networking when claimed, idempotent
+runtime/process identities, cursor-correct replay, and durable cleanup. It may
+admit credential-bearing agents only after the existing broker contract is
+implemented and proved for that backend. Host Codex.app or Claude Code
+credentials are never copied into the sandbox. Until its full contract suite
+and live receipt pass, the provider is selected architecture rather than a
+claimed supported isolation path.
+
+### 12.3 Cloudflare Sandbox
 
 `src/providers/cloudflare-provider.ts` talks to the independently deployable bridge in `providers/cloudflare-sandbox/`. The bridge uses authenticated versioned HTTP between the control plane and Worker, then the official Sandbox SDK's HTTP container transport to translate requests into Sandbox/Container/Durable Object primitives.
 
@@ -609,15 +828,21 @@ src/services/artifact-service.ts  Project-member immutable artifact reads
 src/services/brief-service.ts     curated artifact reference and run-resolution boundary
 src/services/project-service.ts   Principal, Project, membership, and work read model
 src/services/browser-session-service.ts opaque deny-by-default browser credential lifecycle
+src/services/connector-device-service.ts Principal-bound device issue/list/revoke lifecycle
+src/services/conversation-mirror-service.ts device/share authorization, mirror ingest/replay, Project reads
 src/services/audit-service.ts     Owner-admin audit reads
 src/services/api-key-service.ts   Principal-bound API-key lifecycle
 src/services/deployment-executor.ts
 src/services/runtime-reaper.ts
 
+src/api/connector-devices.ts     human-issued device and share-grant routes
+src/api/conversation-mirrors.ts  device ingest plus Project-readable mirror follow
+
 src/agents/catalog.ts             validated catalog resolution
 src/agents/runner-evidence.ts     control-plane runner redaction boundary
 src/agents/runner-session.ts      launch/reconnect/event ingestion
 src/agents/session-runner.ts      session launch/command/event ingestion
+src/connectors/                   Codex/Claude source adapters, normalization, and device-local outbox
 runner/protocol.ts                run/session spec, command, and frame schemas
 runner/acp-session.ts             ACP client over local child stdio
 runner/acp-supervisor.ts          one ACP context across ordered turns
@@ -625,10 +850,11 @@ runner/main.ts                    fixed standalone Bun runner
 
 src/providers/runtime-provider.ts stable compute contract
 src/providers/registry.ts         explicit provider resolution
-src/providers/local-provider.ts   complete local implementation
+src/providers/local-provider.ts   complete non-isolated host-process implementation
+src/providers/oci-local-provider.ts selected isolated local RuntimeProvider
 src/providers/cloudflare-provider.ts bridge client adapter
 providers/cloudflare-sandbox/     isolated Cloudflare package
-board/                            isolated Project Lobby/Live Deck BFF (self-delegation through the public client; no SQL or cross-member control)
+board/                            isolated Project Lobby/Live Deck BFF (native and mirror reads; self-delegation through the public client; no SQL or cross-member control)
 
 src/artifacts/                    immutable storage contract + local store
 src/artifacts/workspace-bundle.ts uploaded immutable workspace input
@@ -773,7 +999,16 @@ Build in dependency order:
 6. Cloudflare bridge and real remote provider.
 7. CLI, doctor, demo, documentation, containers, complete verification.
 
-The existing execution stack has completed that sequence. The Shared Project Definition Gate, schema/API/Board implementation, container packaging, and deployed two-Principal proof contract are complete. The local Project Lobby, live transcript, and Task Relay slice now requires a fresh clean-revision system receipt and inclusion in external two-person acceptance. Forward product work closes that path in `docs/project-collaboration.md`: separate HTTPS API and Board ingress where remote delegation is required, separate people and credentials in different locations, Lobby-to-Project entry, same-Project observation, a real Relay receipt, credential rotation, membership removal, and recorded outcomes. GitHub OAuth and repository binding proceed only through ADR 0007's identity and grant boundary. Do not broaden into generic comments, fake presence, task management, operator grants, or another intelligence layer to avoid that acceptance.
+The existing execution stack has completed that sequence. The Shared Project
+Definition Gate, schema/API/Board implementation, container packaging, and
+deployed two-Principal proof contract are complete. ADR 0012 now adds one
+bounded vertical sequence: mirror contracts and schema; device/share
+authorization; deterministic Codex/Claude adapters and local outbox; mirror
+ingestion/follow; Project/Board/Annotation/Relay projection; then a local
+sandbox RuntimeProvider and its independent proof. This is product closure for
+the selected local-first journey, not permission to add a second agent console,
+source-specific control plane, generic comments, fake presence, task
+management, operator grants, or another intelligence layer.
 
 For every change:
 
@@ -791,6 +1026,11 @@ For every change:
 Honest current limits:
 
 - local execution is not isolation;
+- the local sandbox is selected but is not a supported isolation claim until
+  its actual provider contract and clean live receipt pass;
+- a ConversationMirror is observation-only; Companion pairing, deterministic
+  parsing, or local file tail does not prove external-agent control or
+  two-person use;
 - API keys, opaque browser sessions, optional linked GitHub/Google identities, single-use Principal invitations, and explicit owner-scoped open registration are wired login paths; invitation delivery, federation, provider webhook invalidation, and seamless credential-key rotation are not;
 - Project Lobby, the source-locked Live Deck room, native live transcript, Task Relays, durable Annotation marginalia, connected onboarding, and PresenceLease are implemented for existing Projects; external two-person use of one deployed HTTPS origin is not yet accepted;
 - Project authorization is Owner-contained and unions explicit membership with current matching GitHub grants at request time; cross-Owner Projects, materialized provider-derived membership, delegated operator grants, and a durable Project activity stream are not implemented;
@@ -807,7 +1047,8 @@ Change the correct boundary when evidence demands it:
 - interactive approval requires an explicit permission-response command and policy on the existing runner command channel;
 - horizontal scale requires shared leases and a multi-writer database;
 - very large logs require a durable log-object/index boundary;
-- stronger local isolation requires a container/VM provider;
+- additional local-isolation backends implement the same container/VM provider
+  contract rather than entering core execution or Project semantics;
 - a new harness belongs behind ACP or an ACP adapter;
 - a new cloud implements `RuntimeProvider` and passes the same contract suite;
 - a new deployment target implements `DeployAdapter` over immutable input.
@@ -824,6 +1065,15 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 - The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. The image gate proves installation and bootability. Each separate credential-gated acceptance command requires remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup; only its clean current-revision receipt establishes that path as passed.
 - Version `0.1.3` is the current published release baseline. Its earlier Board proves one owner's read/delegate/detail loop; the current branch replaces that product surface with the unreleased Connected Onboarding → Project Lobby → Live Deck → Conversation Detail journey.
 - The branch also contains unreleased Brief reuse across one-shot Runs and turn-scoped Sessions with workspace relevance and dispatch-time byte revalidation. Project-member reads now follow the source Run relationship; Fact discovery, ranking, conflict handling, and broader intelligence work remain paused until Shared Project is externally accepted and released.
-- The active milestone follows ADRs 0009, 0010, and 0011: connected onboarding, Project Lobby, Live Deck, Conversation Detail marginalia, optional external login, provider-derived Project rooms, per-delegator private checkout, then a fresh clean-revision system proof followed by live-provider and external two-person acceptance in `docs/project-collaboration.md`. Stable Principals, Owner-contained Projects, explicit membership, current provider-derived access, delegator attribution, Project reads, delegator-only control, opaque browser sessions with exact self-delegation, self-cancellation, Relay and Annotation writes, exact migrations, Project Lobby, repository import, participant projection, the first-task composer, Live Deck, the native transcript with foldable details, Task Relays, marginalia, PresenceLease, GitHub/Google login/link/open registration, one-time invitation binding, sealed identity credentials, provider-neutral repository discovery, GitHub JIT checkout revalidation with the delegator's own credential, and container packaging are implemented. Provider webhooks, invitation delivery, live-provider receipts, and deployed two-human acceptance are not. This branch carries one current data and execution contract with no alternate path; current evolution limits are recorded in Section 17 and README.
+- The active milestone follows ADRs 0009 through 0012: preserve the implemented
+  connected onboarding, Project Lobby, Live Deck, Conversation Detail,
+  optional external identity and provider-derived access path; add the Local
+  Companion, explicit source consent, ConversationMirror replay and Project
+  projection; then close a real local sandbox provider. Provider webhooks,
+  invitation delivery, real local-source acceptance, local-sandbox isolation
+  proof, remaining live-provider receipts, and deployed two-human acceptance
+  are separate outstanding claims. This branch carries one product and
+  authorization contract across local, self-hosted, cloud, and optional managed
+  topology; current evolution limits are recorded in Section 17 and README.
 
 Keep this section factual. Never describe an interface, mock-only path, local container proof, or skipped account test as stronger evidence than it is.

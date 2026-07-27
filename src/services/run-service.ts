@@ -16,6 +16,7 @@ import { hashCanonical } from "../idempotency"
 import type { CreateRunInput, Page, Store } from "../persistence/store"
 import type { SecretReferenceValidator } from "../secrets"
 import type { BriefService } from "./brief-service"
+import { lockWorkspaceToProjectRepository } from "./project-repository-workspace"
 
 export interface UploadedFilesWorkspaceSource {
   readonly type: "files"
@@ -86,6 +87,7 @@ export interface RunServiceOptions {
     | "resolveProjectForPrincipal"
     | "getPrincipal"
     | "getRunForPrincipal"
+    | "getActiveProjectRepositoryBinding"
     | "requireRunDelegator"
   >
   readonly commands: RunCommandSink
@@ -171,22 +173,30 @@ export class RunService {
         message: "Authentication required",
       })
     }
+    const repositoryBinding = this.#store.getActiveProjectRepositoryBinding(
+      context.ownerId,
+      project.id,
+    )
+    const admittedWorkspace =
+      repositoryBinding === null
+        ? input.workspace
+        : lockWorkspaceToProjectRepository(repositoryBinding, input.workspace)
     this.#secretReferences.validate(input.secretRefs, {
       ownerId: context.ownerId,
       purpose: "agent",
     })
-    if (input.workspace.type === "repository") {
+    if (admittedWorkspace.type === "repository") {
       if (
-        input.workspace.revision !== undefined &&
-        !isSafeRepositoryRevision(input.workspace.revision)
+        admittedWorkspace.revision !== undefined &&
+        !isSafeRepositoryRevision(admittedWorkspace.revision)
       ) {
         throw new AppError({
           code: "INVALID_REQUEST",
           message: "Repository revision must be a literal branch, tag, or commit name",
         })
       }
-      if (input.workspace.credentialRef !== undefined) {
-        if (!input.workspace.url.startsWith("https://")) {
+      if (admittedWorkspace.credentialRef !== undefined) {
+        if (!admittedWorkspace.url.startsWith("https://")) {
           throw new AppError({
             code: "INVALID_REQUEST",
             message: "Repository credentials are supported only for HTTPS repositories",
@@ -194,7 +204,7 @@ export class RunService {
         }
         this.#secretReferences.validate(
           {
-            MEANWHILE_REPOSITORY_CREDENTIAL: input.workspace.credentialRef,
+            MEANWHILE_REPOSITORY_CREDENTIAL: admittedWorkspace.credentialRef,
           },
           {
             ownerId: context.ownerId,
@@ -245,11 +255,11 @@ export class RunService {
         : await (this.#briefs as Pick<BriefService, "resolve">).resolve(context, briefIds)
     let preparedWorkspace: PreparedWorkspaceBundle | null = null
     let workspace: WorkspaceSource
-    if (input.workspace.type === "files") {
-      preparedWorkspace = this.#requireWorkspaceInputs().prepare(input.workspace.files)
+    if (admittedWorkspace.type === "files") {
+      preparedWorkspace = this.#requireWorkspaceInputs().prepare(admittedWorkspace.files)
       workspace = preparedWorkspace.source
     } else {
-      workspace = input.workspace
+      workspace = admittedWorkspace
     }
     const { briefIds: _requestedBriefs, ...inputWithoutContext } = input
     const normalizedInput = {

@@ -7,6 +7,7 @@ const apiKeyPattern = /^mwk_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
 const storedHashPattern = /^sha256:([0-9a-f]{64})$/
 const browserSessionPattern = /^mws_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
 const principalInvitationPattern = /^mwi_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
+const connectorDevicePattern = /^mwd_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/
 
 export const LOCAL_BOOTSTRAP_OWNER_ID = "00000000-0000-4000-8000-000000000001"
 export const LOCAL_BOOTSTRAP_API_KEY_ID = "00000000-0000-4000-8000-000000000002"
@@ -71,6 +72,35 @@ export interface IssuedPrincipalInvitation {
   readonly hash: string
 }
 
+export interface IssuedConnectorDeviceSecret {
+  readonly secret: string
+  readonly prefix: string
+  readonly hash: string
+}
+
+export interface StoredConnectorDeviceCredential {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly ownerRole: "admin" | "member"
+  readonly prefix: string
+  readonly hash: string
+  readonly revokedAt?: Date | null
+  readonly principalDisabledAt?: Date | null
+}
+
+export interface ConnectorDeviceLookup {
+  findConnectorDevicesByPrefix(prefix: string): Promise<readonly StoredConnectorDeviceCredential[]>
+}
+
+export interface AuthenticatedConnectorDevice {
+  readonly ownerId: string
+  readonly principalId: string
+  readonly ownerRole: "admin" | "member"
+  readonly connectorDeviceId: string
+  readonly prefix: string
+}
+
 export interface StoredPrincipalInvitation {
   readonly id: string
   readonly ownerId: string
@@ -133,6 +163,12 @@ export async function issueBrowserSession(): Promise<IssuedBrowserSession> {
 
 export async function issuePrincipalInvitation(): Promise<IssuedPrincipalInvitation> {
   const prefix = `mwi_${randomBase64Url(API_KEY_PREFIX_BYTES)}`
+  const secret = `${prefix}_${randomBase64Url(API_KEY_SECRET_BYTES)}`
+  return { secret, prefix, hash: await hashApiKey(secret) }
+}
+
+export async function issueConnectorDeviceSecret(): Promise<IssuedConnectorDeviceSecret> {
+  const prefix = `mwd_${randomBase64Url(API_KEY_PREFIX_BYTES)}`
   const secret = `${prefix}_${randomBase64Url(API_KEY_SECRET_BYTES)}`
   return { secret, prefix, hash: await hashApiKey(secret) }
 }
@@ -247,6 +283,48 @@ export async function authenticateBrowserSession(
         principalId: authenticated.principalId,
         ownerRole: authenticated.ownerRole,
         browserSessionId: authenticated.id,
+        prefix,
+      }
+}
+
+/** Authenticates a least-authority local companion credential. */
+export async function authenticateConnectorDevice(
+  authorization: string | null | undefined,
+  lookup: ConnectorDeviceLookup,
+): Promise<AuthenticatedConnectorDevice | null> {
+  if (authorization === null || authorization === undefined) return null
+  const secret = /^Connector[\t ]+([^\s]+)$/i.exec(authorization.trim())?.[1]
+  if (secret === undefined) return null
+  const parsed = connectorDevicePattern.exec(secret)
+  if (parsed === null) return null
+  const prefix = `mwd_${parsed[1]}`
+  const candidateHash = parseStoredHash(await hashApiKey(secret))
+  const records = await lookup.findConnectorDevicesByPrefix(prefix)
+  let authenticated: StoredConnectorDeviceCredential | null = null
+  for (const record of records) {
+    if (record.prefix !== prefix) {
+      throw new AuthenticationDataError(
+        "Connector-device lookup returned a record with a different prefix",
+      )
+    }
+    const matches = constantTimeEqual(candidateHash, parseStoredHash(record.hash))
+    const active = record.revokedAt == null && record.principalDisabledAt == null
+    if (matches && active) {
+      if (authenticated !== null) {
+        throw new AuthenticationDataError(
+          "Multiple active connector-device records have the same digest",
+        )
+      }
+      authenticated = record
+    }
+  }
+  return authenticated === null
+    ? null
+    : {
+        ownerId: authenticated.ownerId,
+        principalId: authenticated.principalId,
+        ownerRole: authenticated.ownerRole,
+        connectorDeviceId: authenticated.id,
         prefix,
       }
 }

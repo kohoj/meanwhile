@@ -4,18 +4,21 @@ This brief supplied the original Definition Gate exploration. ADR 0009 now
 selects Connected Onboarding → Project Lobby → Live Deck → Conversation Detail.
 The older Project Watch comparison remains below as decision history.
 
-## ADR 0009 selected experience
+## ADR 0009 + ADR 0012 selected experience
 
 1. A person signs in with GitHub or Google, or uses the installation's explicit
    local bootstrap path.
-2. Onboarding separately authorizes repository discovery and one or more agent
-   connections, then lets the person select Projects to surface.
+2. Onboarding separately authorizes repository discovery, managed execution,
+   and local observation. Pairing a Companion uploads nothing until the person
+   grants one device/source access to one Project and selects a conversation.
 3. The Lobby shows one angular frosted-acrylic card per authorized Project with
    truthful task and presence facts.
 4. Entering a Project transitions into Live Deck: one tall acrylic sheet per
-   authoritative human-agent conversation.
-5. Each sheet keeps the human delegator primary, shows explicit agent and state,
-   truncates only its presentation, and opens the complete conversation.
+   authoritative native task or explicitly shared Linked conversation.
+5. Each sheet keeps the human delegator primary, shows explicit agent/source
+   and truthful state, truncates only its presentation, and opens the complete
+   conversation. A Linked sheet says who owns execution and omits controls that
+   Meanwhile cannot enforce.
 6. Conversation Detail behaves like a coding-agent chat: readable message spine,
    foldable reasoning and tool work, exact transcript selection, and a vertical
    marginalia rail.
@@ -26,16 +29,46 @@ Online state comes only from an expiring PresenceLease and is never inferred
 from membership. The three people in the Northstar visual are deterministic
 fixture leases; production visibility requires active leases from real clients.
 
+### Local-first onboarding extension
+
+The onboarding surface asks for capabilities in the order the person can
+understand them; it does not present infrastructure nouns as one permission
+wall.
+
+1. **Welcome and identity.** Explain that Meanwhile shares agent work with a
+   Project and that identity never gives another member agent control.
+2. **Choose Projects.** Show only locally provisioned or provider-authorized
+   Projects. Repository import remains optional.
+3. **Connect this Mac.** Pair one named Companion with a short, one-time handoff.
+   The screen states `Nothing is shared yet` and shows device revocation.
+4. **Choose an agent source.** Codex and Claude are separate rows with exact
+   filesystem/hook permission changes. Existing hook configuration is preserved.
+5. **Choose what to share.** For each selected local conversation, show source,
+   bounded title, repository when safely known, destination Project, and the
+   transcript fields that leave the Mac. Ambiguous Project mapping requires a
+   choice rather than a guess.
+6. **Enter the Lobby.** Pairing success does not trap the person in setup. The
+   selected Project card appears immediately; the first Linked conversation
+   animates into its Live Deck only after the server accepts its first event.
+
+Progress is saved after each independently revocable capability. Back returns
+to the last decision without tearing down earlier valid connections. Skip keeps
+the product usable for native Runs or local-only Projects. Error copy names the
+failing boundary—device pairing, source permission, Project grant, parsing, or
+sync—rather than saying the agent failed.
+
 ## Current acceptance ledger
 
 | Product step | Authoritative implementation | Current proof | Remaining gate |
 | --- | --- | --- | --- |
 | Sign in | Optional GitHub App / Google OIDC plus installation access; all issue one opaque Meanwhile browser session | Contract, API, BFF, migration, and deterministic browser coverage | Live configured GitHub and Google callback receipts |
 | Connected onboarding | Separate ExternalIdentity, repository grant/binding, AgentConnection, and personal Project selection | Mixed GitHub-backed plus local Project browser journey | Provider revocation/relink acceptance on a clean deployment |
+| Local Companion | Principal-bound ConnectorDevice plus separate device/source/Project share consent | Selected ADR 0012 contract and deterministic connector fixtures | Pairing UX, device-local outbox, safe hook installation, real-source restart/revocation receipt |
 | Project Lobby | Provider-neutral `spaces[].tables` read model over authoritative Projects, work, membership, attention, and PresenceLeases | Source-rendered Lobby, empty-room browser proof, and current dirty-tree two-Principal HTTPS system receipt | Two real members entering from separate clients on one clean revision |
-| Live Deck | One card per native Run or AgentSession; no second task lifecycle | Source-locked room comparison, browser interaction proof, and deployed BFF visibility for both Principals | Multi-person observation of credentialed live-agent work |
+| Live Deck | Tagged `run | session | mirror` cards; mirrors are explicitly Linked and observation-only | Native cards have source-locked browser and deployed BFF proof; mirror core is a separate in-progress slice | Board mirror projection plus multi-person observation of one real local source |
 | New task | Contextual self-delegation through the public Project Run contract | Accepted Run enters the room; deterministic journey plus clean local public-repository Demo ACP integration | Real private checkout plus credentialed live-agent receipt |
 | Conversation Detail | Native task events, foldable work, transcript index, exact selection, Marginalia, and Relay | Source-locked comparison, Annotation/Relay journey, reload-free local SSE answer receipt, and reciprocal deployed conversation/Annotation/Relay proof | Two-human author/recipient acceptance |
+| Local owned execution | Actual sandbox behind RuntimeProvider; host-process `local` remains non-isolated | OCI provider candidate has deterministic and machine-local coverage | Registry/config wiring plus clean provider and credential-bound live receipts |
 
 The current development evidence deliberately remains three separate receipts:
 the local collaboration system, the two-Principal separate-HTTPS-origin system,
@@ -118,12 +151,19 @@ Opening a work item reveals the immutable ask, delegator, authoritative state,
 ordered conversation, outputs, workspace/revision basis, and relevant recovery
 facts. It does not manufacture a second summary or task status, and the UI does
 not introduce `evidence` as a separate product object or user-facing mode.
+For a Linked conversation, detail reflects accepted MirrorEvents and explicitly
+does not claim the external source's lifecycle, artifact, deployment, or
+recovery state.
 
 ### Observation does not imply operation
 
 Another member’s item has no cancel, send, interrupt, close, retry, deploy, or
 secret-bearing action. This is enforced by the control plane even when the raw
 API is called directly.
+
+A person's own Linked conversation also omits Stop, Send, Interrupt, Recover,
+Artifact, and Deploy because ownership by that person is not ownership by
+Meanwhile. Control remains in the source app.
 
 ## Alice and Bob storyboard
 
@@ -139,6 +179,11 @@ Alice delegates “Fix OAuth callback race after app resume” from an upstream
 client. She explicitly chooses Project Northstar. Meanwhile accepts the
 Run/Session with immutable Project and delegator attribution.
 
+The ADR 0012 variant starts in Alice's existing Codex.app, Codex CLI, or Claude
+Code conversation. Alice has already paired her Companion, granted that source
+to Northstar, and selected this exact local conversation. Meanwhile accepts a
+ConversationMirror and its ordered MirrorEvents, not a Run or AgentSession.
+
 The Board now also supports one-shot self-delegation from the room, but the
 original cross-member visibility proof remains valid when work originates from
 another public client.
@@ -149,12 +194,19 @@ The item appears in Bob’s shared inventory with Alice’s name, Claude Code,
 current execution condition, and a trustworthy last-update time. It does not
 appear in Bob’s personal attention merely because it is active.
 
+For the linked variant, the card says `Linked`, identifies the source app, and
+uses observed/sync language rather than native Run status language.
+
 ### Scene 4 — Bob opens detail
 
 Bob opens Alice’s item and reads the original ask, ordered agent conversation,
 current result, available outputs, workspace/revision, and relevant recovery
 state. The surface makes read-only observation clear through structure rather
 than a row of disabled controls.
+
+For the linked variant, Bob reads the complete accepted conversation with the
+same foldable work and marginalia model, but sees neither outputs/recovery facts
+that do not exist nor a disabled imitation of source-app controls.
 
 ### Scene 5 — attention diverges by viewer
 
@@ -185,12 +237,18 @@ the selected capability matrix and durable event contracts.
 | Pending permission or explicit `awaiting_input` signal | Waiting on a human | Delegator or explicitly authorized operator |
 | Session `continuity_lost` or `failed` | Needs attention | Delegator by default |
 | Session `closing` or `closed` | Closing or completed | None |
+| Mirror `active` with recent accepted events | Observed live · Linked | None by default |
+| Mirror `idle` | Source ready · Linked | None by itself |
+| Mirror `disconnected` | Sync interrupted · Linked | Sharer if action is required; never another viewer by inference |
+| Mirror `ended` | Source ended · Linked | None; not a Meanwhile success claim |
 | Runtime cleanup failure | Operational issue | Maintainer/operator, not every Project member |
 
 Important consequences:
 
 - `idle` is not synonymous with `waiting on you`;
 - execution status is not rewritten to encode attention;
+- mirror observation status is not translated into Run success, failure,
+  recovery, or cleanup state;
 - the top verdict may say `Nothing needs you` while the Project still contains
   active or troubled work belonging to other members;
 - explicit handoff or mention semantics require a future durable contract.

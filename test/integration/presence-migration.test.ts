@@ -3,12 +3,8 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import {
-  CURRENT_SCHEMA,
-  databaseSchemaFingerprint,
-  SCHEMA_SQL,
-  splitSchemaSql,
-} from "../../src/persistence/schema"
+import { preConversationMirrorSchemaStatements } from "../../scripts/conversation-mirror-schema"
+import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../../src/persistence/schema"
 
 const CONNECTED_ONBOARDING_SCHEMA_FINGERPRINT =
   "2efd73c952ba0134f08c63b2baba111245f3a798b6765a30e8b60c7dacb0f53b"
@@ -74,7 +70,7 @@ function connectedOnboardingSchemaStatements(): readonly string[] {
     "principal_invitations_prefix_idx",
     "principal_invitations_principal_idx",
   ])
-  return splitSchemaSql(SCHEMA_SQL).filter((statement) => {
+  return preConversationMirrorSchemaStatements().filter((statement) => {
     const match = /^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+([a-z0-9_]+)/i.exec(statement)
     return match === null || !presenceObjects.has(match[1] as string)
   })

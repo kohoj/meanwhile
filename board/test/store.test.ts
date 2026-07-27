@@ -85,3 +85,57 @@ test("concurrent transcript readers share one authoritative history request", as
     });
   }
 });
+
+test("loads every authoritative history page instead of silently truncating a conversation", async () => {
+  useBoard.setState({
+    runTimelines: {},
+    sessionTimelines: {},
+    mirrorTimelines: {},
+    taskAnnotations: {},
+    taskRelays: {},
+    loading: {},
+    errors: {},
+  });
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input), "http://meanwhile.local");
+    requests.push(`${url.pathname}${url.search}`);
+    if (url.searchParams.get("after") === null) {
+      return Response.json({
+        events: [events[0]],
+        nextCursor: 1,
+        relays: [],
+        annotations: [],
+      });
+    }
+    return Response.json({
+      events: [events[1]],
+      nextCursor: null,
+      relays: [],
+      annotations: [],
+    });
+  }) as typeof fetch;
+
+  try {
+    expect(await useBoard.getState().loadHistory("run", RUN_ID, PROJECT_ID)).toBeTrue();
+    expect(requests).toEqual([
+      `/task/run/${RUN_ID}/events?projectId=${PROJECT_ID}`,
+      `/task/run/${RUN_ID}/events?projectId=${PROJECT_ID}&after=1`,
+    ]);
+    expect(useBoard.getState().runTimelines[RUN_ID]?.messages).toEqual([
+      expect.objectContaining({ role: "agent", text: "Authoritative answer" }),
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    useBoard.setState({
+      runTimelines: {},
+      sessionTimelines: {},
+      mirrorTimelines: {},
+      taskAnnotations: {},
+      taskRelays: {},
+      loading: {},
+      errors: {},
+    });
+  }
+});

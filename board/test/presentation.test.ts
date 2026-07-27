@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { ProjectWorkItem } from "@kohoz/meanwhile/contracts";
 import {
+  displayWorkStatus,
+  linkedConversationLabel,
   type PresentedBoardRow,
   plainInlineMarkdown,
   projectVerdict,
@@ -98,5 +100,32 @@ describe("Project Watch presentation truth", () => {
 
     expect(workActivityAge(live, now)).toBe("10m");
     expect(workActivityAge(completed, now)).toBe("1h");
+  });
+
+  test("presents linked conversations as observed source state, never native execution", () => {
+    const linked = {
+      ...row("active", { id: "alice", displayName: "Alice" }),
+      kind: "mirror" as const,
+      agentType: "claude-code",
+      status: "active" as const,
+    };
+
+    expect(linkedConversationLabel(linked)).toBe(
+      "Linked conversation · observed from Claude Code",
+    );
+    expect(displayWorkStatus(linked)).toBe("Observed live");
+    expect(displayWorkStatus({
+      ...linked,
+      sourceObservation: { source: "claude-code", syncStatus: "stale", lastSeenAt: null },
+    })).toBe("Sync paused");
+    expect(displayWorkStatus({
+      ...linked,
+      sourceObservation: { source: "claude-code", syncStatus: "revoked", lastSeenAt: null },
+    })).toBe("Sharing revoked");
+    expect(displayWorkStatus({ ...linked, status: "idle" })).toBe("Sync idle");
+    expect(displayWorkStatus({ ...linked, status: "disconnected" })).toBe("Sync idle");
+    expect(displayWorkStatus({ ...linked, status: "ended" })).toBe("Source ended");
+    expect(displayWorkStatus(row("active", { id: "alice", displayName: "Alice" })))
+      .toBe("running");
   });
 });

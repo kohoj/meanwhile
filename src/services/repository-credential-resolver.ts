@@ -111,7 +111,6 @@ export class GitHubRepositoryCredentialResolver implements RepositoryCredentialR
     const entry = entries.find(
       (candidate) =>
         candidate.provider === "github" &&
-        candidate.installationId === authority.binding.installationId &&
         candidate.repository.id === authority.binding.repositoryId,
     )
     if (entry === undefined) {

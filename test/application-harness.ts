@@ -2,9 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createApplication, type MeanwhileApplication } from "../src/app"
-import { issueApiKey } from "../src/auth"
+import { issueApiKey, LOCAL_BOOTSTRAP_OWNER_ID } from "../src/auth"
 import type { AppConfig } from "../src/config"
-import type { Run } from "../src/domain"
+import type { AuditRecord, Run } from "../src/domain"
 import { initializeInstrumentation } from "../src/instrumentation"
 
 export interface ApplicationHarness {
@@ -23,9 +23,12 @@ export const createApplicationHarness = async (
     readonly runConcurrency?: number
     readonly sessionConcurrency?: number
     readonly externalAuth?: AppConfig["externalAuth"]
+    readonly defaultProvider?: string
+    readonly ociLocal?: AppConfig["ociLocal"]
+    readonly directoryRoot?: string
   } = {},
 ): Promise<ApplicationHarness> => {
-  const directory = await mkdtemp(join(tmpdir(), "meanwhile-app-"))
+  const directory = await mkdtemp(join(options.directoryRoot ?? tmpdir(), "meanwhile-app-"))
   const key = await issueApiKey()
   const operationalLogs: string[] = []
   const config: AppConfig = {
@@ -41,10 +44,11 @@ export const createApplicationHarness = async (
     apiKey: key.key,
     runnerPath: resolve("dist/meanwhile-runner"),
     agentCatalogPath: resolve("config/agents.json"),
-    defaultProvider: "local",
+    defaultProvider: options.defaultProvider ?? "local",
     runConcurrency: options.runConcurrency ?? 2,
     sessionConcurrency: options.sessionConcurrency ?? 2,
     localProvider: { enabled: true, unsafeHostExecution: false },
+    ...(options.ociLocal === undefined ? {} : { ociLocal: options.ociLocal }),
     secretSourceCatalog: ["TEST_RUNNER_SECRET"],
     logLevel: options.logLevel ?? "error",
     telemetry: { enabled: false },
@@ -104,6 +108,7 @@ export const createDemoRun = async (
     secretRefs?: Readonly<Record<string, string>>
     env?: Readonly<Record<string, string>>
     briefIds?: readonly string[]
+    provider?: string
   } = {},
 ): Promise<Run> => {
   const files = options.files ?? [
@@ -125,7 +130,7 @@ export const createDemoRun = async (
       prompt: options.prompt ?? "Complete the deterministic task",
       env: options.env ?? {},
       secretRefs: options.secretRefs ?? {},
-      provider: "local",
+      provider: options.provider ?? "local",
       briefIds: options.briefIds ?? [],
       artifactPaths: options.artifactPaths ?? ["dist"],
       timeoutMs: options.timeoutMs ?? 5_000,
@@ -133,4 +138,98 @@ export const createDemoRun = async (
   })
   if (!response.ok) throw new Error(await response.text())
   return ((await response.json()) as { run: Run }).run
+}
+
+export function bindTestGitHubRepository(
+  harness: ApplicationHarness,
+  projectId: string,
+  repositoryName: string,
+): { readonly repositoryId: string; readonly repositoryFullName: string } {
+  const store = harness.application.store
+  const principal = store.listPrincipals(LOCAL_BOOTSTRAP_OWNER_ID)[0]
+  if (principal === undefined) throw new Error("Test bootstrap Principal is missing")
+  const at = new Date().toISOString()
+  const repositoryFullName = `acme/${repositoryName}`
+  const repositoryId = `test-repository:${repositoryName}`
+  const identity =
+    store.getExternalIdentityBySubject(LOCAL_BOOTSTRAP_OWNER_ID, "github", "test-github-user") ??
+    store.upsertExternalIdentityWithAudit({
+      identity: {
+        id: crypto.randomUUID(),
+        ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
+        principalId: principal.id,
+        provider: "github",
+        subjectId: "test-github-user",
+        login: "alice",
+        displayName: principal.displayName,
+        avatarUrl: null,
+        createdAt: at,
+        lastVerifiedAt: at,
+        revokedAt: null,
+      },
+      audit: testAudit("external_identity.link", "external_identity", at),
+    })
+  const grant = store.upsertExternalProjectGrantWithAudit({
+    grant: {
+      id: crypto.randomUUID(),
+      ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
+      principalId: principal.id,
+      externalIdentityId: identity.id,
+      provider: "github",
+      accountId: "test-account",
+      accountName: "acme",
+      installationId: "test-installation",
+      repositoryId,
+      repositoryName,
+      repositoryFullName,
+      repositoryUrl: `https://github.com/${repositoryFullName}`,
+      private: true,
+      access: "administer",
+      observedAt: at,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      revokedAt: null,
+    },
+    audit: testAudit("external_project_grant.observe", "external_project_grant", at),
+  })
+  store.bindProjectRepositoryWithAudit({
+    binding: {
+      id: crypto.randomUUID(),
+      ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
+      projectId,
+      grantId: grant.id,
+      provider: "github",
+      accountId: grant.accountId,
+      accountName: grant.accountName,
+      installationId: grant.installationId,
+      repositoryId: grant.repositoryId,
+      repositoryName: grant.repositoryName,
+      repositoryFullName: grant.repositoryFullName,
+      repositoryUrl: grant.repositoryUrl,
+      private: grant.private,
+      boundByPrincipalId: principal.id,
+      createdAt: at,
+      revokedAt: null,
+    },
+    audit: testAudit("project_repository_binding.bind", "project_repository_binding", at),
+  })
+  return { repositoryId, repositoryFullName }
+}
+
+function testAudit(
+  action: string,
+  resourceType: AuditRecord["resourceType"],
+  createdAt: string,
+): AuditRecord {
+  return {
+    id: crypto.randomUUID(),
+    ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
+    actorApiKeyId: null,
+    action,
+    resourceType,
+    resourceId: crypto.randomUUID(),
+    requestId: "application-harness",
+    traceId: null,
+    metadata: {},
+    createdAt,
+  }
 }

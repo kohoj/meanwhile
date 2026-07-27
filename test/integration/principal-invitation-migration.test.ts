@@ -3,12 +3,8 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import {
-  CURRENT_SCHEMA,
-  databaseSchemaFingerprint,
-  SCHEMA_SQL,
-  splitSchemaSql,
-} from "../../src/persistence/schema"
+import { preConversationMirrorSchemaStatements } from "../../scripts/conversation-mirror-schema"
+import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../../src/persistence/schema"
 
 const IDENTITY_CREDENTIAL_SCHEMA_FINGERPRINT =
   "3b505e0f61a2ae2e7f142c6b5f237566b3c66a5ec9c36b5c6eff3e75cc55d686"
@@ -66,7 +62,7 @@ function identityCredentialSchemaStatements(): readonly string[] {
     "principal_invitations_prefix_idx",
     "principal_invitations_principal_idx",
   ])
-  return splitSchemaSql(SCHEMA_SQL).filter((statement) => {
+  return preConversationMirrorSchemaStatements().filter((statement) => {
     const match = /^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+([a-z0-9_]+)/i.exec(statement)
     return match === null || !invitationObjects.has(match[1] as string)
   })

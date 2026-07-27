@@ -8,6 +8,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Immutable GitHub repository identity for collaboration Projects: one
+  repository ID maps to at most one Project per Owner, a Project can never be
+  rebound, Board delegation derives its checkout from that binding, Run and
+  Session admission reject another repository, and the Companion proves the
+  selected local transcript's GitHub origin before sharing. A dry-run-first
+  exact-fingerprint migration adds the database uniqueness constraint and
+  rejects ambiguous existing bindings.
+
+- ADR 0012 selects the local-first integration architecture: a
+  Principal-bound ConnectorDevice, separate exact Project share consent,
+  observation-only ConversationMirror and append-only MirrorEvents for existing
+  Codex.app, Codex CLI, and Claude Code conversations. The Project read model
+  gains a truthful `mirror` kind without giving linked conversations native
+  Run/AgentSession lifecycle, artifact, deployment, or recovery authority.
+- A source-neutral connector foundation for selected Codex and Claude JSONL
+  transcripts, including strict versioned normalization, byte cursors,
+  rotation/truncation detection, bounded message/work/status events, and exact
+  digests. Deterministic fixtures prove parser behavior only; real local-source
+  and two-person acceptance remain separate evidence gates.
+- An outbound `meanwhile companion` command with a bounded local `0600` SQLite
+  outbox, transactional cursor staging, server checkpoint reconciliation after
+  lost responses, exact batch replay, fail-closed schema and file-rotation
+  handling, bounded explicit transcript discovery, local pre-outbox redaction,
+  and pseudonymous source identity. `companion connect` now generates the
+  Connector secret locally, opens an authenticated browser carrying only a
+  one-way verifier, atomically adopts the device plus its first exact Project
+  grant, proves possession, and moves the secret into Keychain without exposing
+  it to the browser, URL, shell history, profile, plist, or control-plane
+  response.
+- A complete macOS Companion lifecycle: `install`, `status`, `pause`, `resume`,
+  and `uninstall`, with one secret-free LaunchAgent/profile per selected
+  conversation, Connector credential custody in macOS Keychain, durable local
+  runtime diagnostics, and explicit `--purge-state` instead of destructive
+  uninstall by default. Foreground `companion run` remains the portable
+  supervisor boundary for other platforms.
+- Stable Project and exact Conversation URLs survive refresh and browser
+  history. Mirror cards and detail are labeled as Linked conversations observed
+  from Codex or Claude Code and never inherit native execution controls.
+- Exact-fingerprint offline migration adds ConnectorDevice, share-grant,
+  ConversationMirror, and MirrorEvent storage while preserving existing Task
+  Relays and Annotations and extending both to linked conversations.
+- An opt-in local OCI RuntimeProvider for Colima/Docker-compatible engines,
+  with digest-asserted local images, no implicit pulls, network disabled,
+  read-only container roots, dropped capabilities, bounded resources,
+  idempotent runtime/process identity, replayable logs, and explicit lack of
+  credential mediation or ongoing process input. The provider is wired behind
+  explicit configuration; a gated machine-local test now proves both its raw
+  provider contract and one full control-plane Run through the packaged Linux
+  runner image. Clean-revision and cross-host acceptance remain release gates.
 - A concise product constitution that makes safe absence, delegated work,
   shared truth, scoped attention, retained authority, and deployment-neutral
   openness the decision filter for future changes. The external Shared Project

@@ -114,18 +114,11 @@ describe("connected onboarding", () => {
     expect(initial.repositoryGrants).toHaveLength(1)
     expect(initial.repositoryBindings).toEqual([])
     expect(initial.agentConnections).toEqual([])
-    expect(initial.projects).toEqual([
-      {
-        project: expect.objectContaining({ id: projectId, name: "Northstar" }),
-        access: "administer",
-        source: "membership",
-        selected: false,
-      },
-    ])
+    expect(initial.projects).toEqual([])
 
     const connection = service.connectAgent(context, "codex")
-    const selection = service.selectProject(context, projectId, true)
     const binding = service.bindRepository(context, projectId, grantId)
+    const selection = service.selectProject(context, projectId, true)
     expect(connection).toMatchObject({ agentType: "codex", principalId, revokedAt: null })
     expect(selection).toMatchObject({ projectId, hiddenAt: null })
     expect(binding).toMatchObject({ projectId, repositoryFullName: "acme/northstar" })

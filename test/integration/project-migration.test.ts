@@ -3,12 +3,8 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import {
-  CURRENT_SCHEMA,
-  databaseSchemaFingerprint,
-  SCHEMA_SQL,
-  splitSchemaSql,
-} from "../../src/persistence/schema"
+import { preConversationMirrorSchemaStatements } from "../../scripts/conversation-mirror-schema"
+import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../../src/persistence/schema"
 
 const LEGACY_SCHEMA_FINGERPRINT = "a7ee3aed4ff1cd19095d4c1aa2c4da0fdd5b25ab88fbcc4363b0f9255883b911"
 const timestamp = "2026-07-18T00:00:00.000Z"
@@ -141,7 +137,7 @@ function legacySchemaStatements(): readonly string[] {
     "principal_invitations_prefix_idx",
     "principal_invitations_principal_idx",
   ])
-  return splitSchemaSql(SCHEMA_SQL)
+  return preConversationMirrorSchemaStatements()
     .filter((statement) => {
       const match = /^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+([a-z0-9_]+)/i.exec(statement)
       return match === null || !collaborationObjects.has(match[1] as string)

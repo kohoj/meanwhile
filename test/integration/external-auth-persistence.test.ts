@@ -29,7 +29,7 @@ afterEach(async () => {
 })
 
 describe("external auth persistence", () => {
-  test("atomically rotates sealed credentials, refreshes grants, and revokes stale bindings", async () => {
+  test("rotates credentials and grants without changing immutable Project repository identity", async () => {
     const active = await setup()
     const first = await completion(1, ["repo-a", "repo-b"])
     const completed = active.completeExternalAuthentication(first)
@@ -76,7 +76,13 @@ describe("external auth persistence", () => {
     expect(refreshed.identity.id).toBe(identityId)
     expect(active.getActiveIdentityCredential(ownerId, identityId)?.id).toBe(credentialId(2))
     expect(active.listExternalProjectGrants(ownerId, principalId, at)).toHaveLength(1)
-    expect(active.listProjectRepositoryBindingsForPrincipal(ownerId, principalId)).toEqual([])
+    expect(active.listProjectRepositoryBindingsForPrincipal(ownerId, principalId)).toEqual([
+      expect.objectContaining({
+        projectId,
+        repositoryId: staleGrant.repositoryId,
+        revokedAt: null,
+      }),
+    ])
     expect(
       active.database
         .query<{ revoked_at: string | null }, [string]>(

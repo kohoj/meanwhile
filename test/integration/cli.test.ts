@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { issueApiKey } from "../../src/auth"
 import { type CliOptions, runCli } from "../../src/cli"
+import { bindTestGitHubRepository, createApplicationHarness } from "../application-harness"
 import {
   API_OWNER_ID,
   API_PRINCIPAL_ID,
@@ -28,6 +29,99 @@ afterEach(async () => {
 })
 
 describe("Meanwhile CLI", () => {
+  test("connects one explicit local conversation through browser verifier approval without exposing the secret", async () => {
+    const harness = await createApplicationHarness({ runConcurrency: 1 })
+    try {
+      const project = await harness.request("/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Connect Project", slug: "cli-connect" }),
+      })
+      const projectId = ((await project.json()) as { project: { id: string } }).project.id
+      const repository = bindTestGitHubRepository(harness, projectId, "cli-connect")
+      const home = await temporaryDirectory()
+      const transcript = join(home, "selected-codex.jsonl")
+      await Bun.write(
+        transcript,
+        `${[
+          {
+            type: "session_meta",
+            payload: { id: "explicit-connect-session", cwd: "/private/cli-connect" },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "message",
+              id: "connect-user",
+              role: "user",
+              content: [{ type: "input_text", text: "Trace the callback race." }],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join("\n")}\n`,
+      )
+      const fetchThroughHarness = (input: string | URL | Request, init?: RequestInit) => {
+        const url = input instanceof Request ? new URL(input.url) : new URL(input)
+        return Promise.resolve(
+          harness.application.app.request(`${url.pathname}${url.search}`, init),
+        )
+      }
+      const opened: URL[] = []
+      const invocation = capture()
+      const exitCode = await runCli(
+        [
+          "companion",
+          "connect",
+          "--source",
+          "codex",
+          "--transcript",
+          transcript,
+          "--foreground",
+          "--once",
+        ],
+        {
+          ...invocation.options({ HOME: home, MEANWHILE_URL: "http://meanwhile.local" }),
+          fetch: fetchThroughHarness,
+          wait: () => Promise.resolve(),
+          repositoryCommand: fakeGitRepository(repository.repositoryFullName),
+          openUrl: async (url) => {
+            opened.push(url)
+            expect(url.pathname).toBe("/connect")
+            expect(url.toString()).not.toMatch(/mwd_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}/)
+            const response = await harness.request("/connector-devices/adopt", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                deviceId: url.searchParams.get("device"),
+                displayName: url.searchParams.get("name"),
+                source: url.searchParams.get("source"),
+                credentialPrefix: url.searchParams.get("prefix"),
+                credentialHash: url.searchParams.get("verifier"),
+                projectId,
+              }),
+            })
+            expect(response.status).toBe(201)
+          },
+        },
+      )
+
+      expect(exitCode).toBe(0)
+      expect(opened).toHaveLength(1)
+      expect(invocation.stdout).toContain('"type": "companion.authorized"')
+      expect(invocation.stdout).toContain(`"projectId": "${projectId}"`)
+      expect(invocation.stdout).not.toMatch(/mwd_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}/)
+      const work = (await (await harness.request(`/projects/${projectId}/work`)).json()) as {
+        items: Array<{ kind: string; title: string }>
+      }
+      expect(work.items).toContainEqual(
+        expect.objectContaining({ kind: "mirror", title: "Trace the callback race." }),
+      )
+    } finally {
+      await harness.close()
+    }
+  })
+
   test("uploads a bounded link-free workspace and preserves API controls", async () => {
     const root = await temporaryDirectory()
     const workspace = join(root, "workspace")
@@ -722,6 +816,141 @@ describe("Meanwhile CLI", () => {
       },
     })
   })
+
+  test("reads a missing Connector token through the injectable hidden-prompt boundary", async () => {
+    const home = await temporaryDirectory()
+    const invocation = capture()
+    const prompts: string[] = []
+    const exitCode = await runCli(
+      ["companion", "run", "--source", "codex", "--project", API_PROJECT_ID, "--once"],
+      {
+        ...invocation.options({ HOME: home }),
+        readSecret: async (prompt) => {
+          prompts.push(prompt)
+          return "not-a-connector-token"
+        },
+      },
+    )
+
+    expect(exitCode).toBe(2)
+    expect(prompts).toEqual(["Connector pairing token: "])
+    expect(JSON.parse(invocation.stderr)).toMatchObject({
+      error: { code: "CONNECTOR_AUTHENTICATION_REQUIRED" },
+    })
+  })
+
+  test("turns an empty local transcript directory into an actionable selection error", async () => {
+    const home = await temporaryDirectory()
+    const invocation = capture()
+    const exitCode = await runCli(
+      ["companion", "run", "--source", "codex", "--project", API_PROJECT_ID, "--once"],
+      {
+        ...invocation.options({ HOME: home }),
+        readSecret: async () => `mwd_${"a".repeat(12)}_${"b".repeat(43)}`,
+      },
+    )
+
+    expect(exitCode).toBe(2)
+    expect(JSON.parse(invocation.stderr)).toMatchObject({
+      error: {
+        code: "TRANSCRIPT_SELECTION_REQUIRED",
+        message: "No codex conversation is available; open one, then use companion discover",
+      },
+    })
+  })
+
+  test("discovers local conversations but never selects the newest one in a non-TTY", async () => {
+    const home = await temporaryDirectory()
+    const sessions = join(home, ".codex", "sessions")
+    await mkdir(sessions, { recursive: true })
+    await Bun.write(
+      join(sessions, "one.jsonl"),
+      `${JSON.stringify({ type: "session_meta", payload: { id: "session-one", cwd: "/private/one" } })}\n${JSON.stringify(
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "First task" }],
+          },
+        },
+      )}\n`,
+    )
+    await Bun.write(
+      join(sessions, "two.jsonl"),
+      `${JSON.stringify({ type: "session_meta", payload: { id: "session-two", cwd: "/private/two" } })}\n${JSON.stringify(
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Second task" }],
+          },
+        },
+      )}\n`,
+    )
+
+    const discovered = capture()
+    expect(
+      await runCli(
+        ["companion", "discover", "--source", "codex"],
+        discovered.options({ HOME: home }),
+      ),
+    ).toBe(0)
+    expect(JSON.parse(discovered.stdout).items).toHaveLength(2)
+
+    const run = capture()
+    expect(
+      await runCli(
+        ["companion", "run", "--source", "codex", "--project", API_PROJECT_ID, "--once"],
+        {
+          ...run.options({ HOME: home }),
+          readSecret: async () => `mwd_${"a".repeat(12)}_${"b".repeat(43)}`,
+        },
+      ),
+    ).toBe(2)
+    expect(JSON.parse(run.stderr)).toMatchObject({
+      error: {
+        code: "TRANSCRIPT_SELECTION_REQUIRED",
+        details: { discovered: 2 },
+      },
+    })
+  })
+
+  test("verifies an explicit transcript against --conversation", async () => {
+    const home = await temporaryDirectory()
+    const transcript = join(home, "selected.jsonl")
+    await Bun.write(
+      transcript,
+      `${JSON.stringify({ type: "session_meta", payload: { id: "actual-session", cwd: "/private/actual" } })}\n`,
+    )
+    const invocation = capture()
+
+    expect(
+      await runCli(
+        [
+          "companion",
+          "run",
+          "--source",
+          "codex",
+          "--project",
+          API_PROJECT_ID,
+          "--transcript",
+          transcript,
+          "--conversation",
+          "different-session",
+          "--once",
+        ],
+        {
+          ...invocation.options({ HOME: home }),
+          readSecret: async () => `mwd_${"a".repeat(12)}_${"b".repeat(43)}`,
+        },
+      ),
+    ).toBe(2)
+    expect(JSON.parse(invocation.stderr)).toMatchObject({
+      error: { code: "TRANSCRIPT_IDENTITY_MISMATCH" },
+    })
+  })
 })
 
 const capture = () => {
@@ -747,6 +976,11 @@ const capture = () => {
     },
   }
 }
+
+const fakeGitRepository = (repositoryFullName: string) => async (argv: readonly string[]) =>
+  argv.includes("--show-toplevel")
+    ? { exitCode: 0, stdout: "/private/worktree\n" }
+    : { exitCode: 0, stdout: `https://github.com/${repositoryFullName}.git\n` }
 
 async function temporaryDirectory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "meanwhile-cli-test-"))

@@ -48,6 +48,7 @@ interface ConnectedOnboardingStore
     Store,
     | "getPrincipal"
     | "getProjectAccess"
+    | "getActiveProjectRepositoryBinding"
     | "listProjectsForPrincipal"
     | "listExternalIdentities"
     | "listExternalProjectGrants"
@@ -95,6 +96,10 @@ export class ConnectedOnboardingService {
       availableAgents: this.availableAgents(),
       projects: this.store
         .listProjectsForPrincipal(context.ownerId, context.principalId, at)
+        .filter(
+          (project) =>
+            this.store.getActiveProjectRepositoryBinding(context.ownerId, project.id) !== null,
+        )
         .map((project) => {
           const access = this.store.getProjectAccess(
             context.ownerId,
@@ -172,7 +177,10 @@ export class ConnectedOnboardingService {
 
   selectProject(context: RequestContext, projectId: string, selected: boolean): ProjectSelection {
     const at = this.now().toISOString()
-    if (this.store.getProjectAccess(context.ownerId, projectId, context.principalId, at) === null) {
+    if (
+      this.store.getProjectAccess(context.ownerId, projectId, context.principalId, at) === null ||
+      this.store.getActiveProjectRepositoryBinding(context.ownerId, projectId) === null
+    ) {
       throw new AppError({ code: "NOT_FOUND", message: "Project not found" })
     }
     const selection: ProjectSelection = {

@@ -1,11 +1,10 @@
 import { Database } from "bun:sqlite"
 import { resolve } from "node:path"
+import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../src/persistence/schema"
 import {
-  CURRENT_SCHEMA,
-  databaseSchemaFingerprint,
-  SCHEMA_SQL,
-  splitSchemaSql,
-} from "../src/persistence/schema"
+  migrateConversationMirrorSchema,
+  preConversationMirrorSchemaStatements,
+} from "./conversation-mirror-schema"
 
 const PROJECT_WATCH_SCHEMA_FINGERPRINT =
   "c2defba13120fe341f211a6d56d6abfe4df5ccf91f499959761951be6c79d4f8"
@@ -53,14 +52,17 @@ try {
     process.exit(0)
   }
 
+  database.exec("PRAGMA foreign_keys=OFF")
   database
     .transaction(() => {
       for (const statement of taskRelaySchemaStatements()) database.query(statement).run()
+      migrateConversationMirrorSchema(database)
       database
         .query("UPDATE schema_identity SET fingerprint=? WHERE singleton=1")
         .run(CURRENT_SCHEMA.fingerprint)
     })
     .immediate()
+  database.exec("PRAGMA foreign_keys=ON")
 
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -120,7 +122,7 @@ function taskRelaySchemaStatements(): readonly string[] {
     "principal_invitations_prefix_idx",
     "principal_invitations_principal_idx",
   ])
-  return splitSchemaSql(SCHEMA_SQL).filter((statement) => {
+  return preConversationMirrorSchemaStatements().filter((statement) => {
     const match = /^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+([a-z0-9_]+)/i.exec(statement)
     return match !== null && ownedObjects.has(match[1] as string)
   })

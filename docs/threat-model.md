@@ -17,6 +17,10 @@ Meanwhile aims to provide:
 7. **Deployment integrity** — deployment promotes an authorized immutable source; it never executes from an arbitrary host or live runtime path.
 8. **Explainable mutation** — security-sensitive actions and state changes leave append-only audit evidence correlated to requests and traces.
 9. **Safe failure** — public errors and diagnostics do not reveal credentials, provider bodies, SQL, stack traces, prompts, private paths, or cross-owner existence.
+10. **Consensual local observation** — pairing a Companion does not authorize
+    ambient capture; only an explicit device/source/Project share grant may
+    publish bounded normalized events, and observation never implies agent
+    control.
 
 ## Explicit non-goals
 
@@ -25,6 +29,9 @@ The initial architecture does not claim to:
 - provide cross-Owner Projects, automatic external-identity signup, invitation
   delivery, delegated operator grants, or provider-derived lifecycle authority;
 - make the local provider a sandbox;
+- make a ConversationMirror authoritative for an external agent lifecycle,
+  recover or control an existing Codex/Claude session, or preserve raw source
+  files after the source application changes them;
 - make an explicitly authorized model/API destination trustworthy;
 - prevent an agent from exfiltrating workspace data to an explicitly allowed destination;
 - defend against a malicious root/operator on the control-plane host;
@@ -44,6 +51,9 @@ High-value assets include:
 - owner API keys and key hashes;
 - control-plane, Cloudflare bridge, repository, model, and deployment credentials;
 - sealed external identity access and refresh tokens;
+- ConnectorDevice bearer secrets and hashes, ConversationShareGrants,
+  Companion outbox records, source-private transcript paths/cursors, and
+  normalized MirrorEvents;
 - prompts, repository inputs, source code, process output, and artifacts;
 - run/session/turn/deployment state, event journals, logs, audit history, and ownership relationships;
 - opaque runtime/process handles;
@@ -67,6 +77,8 @@ High-value assets include:
 | Local host administrator | Fully trusted; can read or alter local state |
 | Internet client | Unauthenticated and hostile by default |
 | External identity/repository provider | Trusted only for its signed identity and current repository grant response; never for Meanwhile lifecycle state |
+| Local Companion | Trusted only to read selected local source records, normalize them, and deliver an exact sequenced outbox; never for Project policy or agent control |
+| Codex.app, Codex CLI, or Claude Code source | External source authority for its own session; transcript content and schema remain untrusted input to Meanwhile |
 
 An API key is authority for its bound stable Principal. Anyone holding it acts
 as that Principal until revocation. Team members must not share one key. The
@@ -103,6 +115,16 @@ the binding locally. Webhook invalidation is not yet implemented, so changes
 that do not reject provider access are detected at checkout or the next explicit
 authorization refresh rather than pushed immediately.
 
+A ConnectorDevice credential is separately hashed, revocable, and restricted
+to mirror registration, ingestion, checkpoint, and heartbeat routes. Pairing
+grants no content authority. A `ConversationShareGrant` separately binds the
+device, source kind, and Project. The Companion keeps the exact local source
+selection and optional safe repository basis on-device. Ingestion
+rechecks that grant and the Principal's current Project capability. Device
+secrets live in the host OS credential store; browser sessions and API keys do
+not enter the Companion outbox. Revocation blocks future events but does not
+silently rewrite history already shared with the Project.
+
 ## Trust boundaries
 
 ```text
@@ -133,6 +155,16 @@ immutable artifact
 ────┼──────── preview browser boundary ────────────────
     ▼
 untrusted HTML / script / media
+
+Codex.app / Codex CLI / Claude Code records
+    │ explicit local permission · untrusted source schema/content
+────┼──────── local Companion boundary ─────────────────
+    ▼
+source adapter ── redaction ── durable device outbox
+    │ outbound TLS · device credential · share grant
+────┼──────── mirror ingest boundary ───────────────────
+    ▼
+ConversationMirror / append-only MirrorEvents
 ```
 
 The runner and agent share one runtime. Code in that sandbox can observe its filesystem, processes, and environment, including opaque capability placeholders. The runner is a protocol and lifecycle boundary, not a confidentiality boundary. For Cloudflare, outbound network is separately mediated in the trusted Worker/Container boundary.
@@ -148,6 +180,11 @@ The runner and agent share one runtime. Code in that sandbox can observe its fil
 - The control-plane clock is sufficiently accurate for persisted deadline instants, token expiry, and audit ordering. Sandbox clocks are untrusted; runner duration uses a relative monotonic budget and provider timestamps do not order durable evidence.
 - Exact known secret values and issued placeholders are available to the redactor before any corresponding output is consumed.
 - Operators do not run untrusted workloads through the local provider.
+- The host OS credential store protects the Companion device secret from
+  ordinary unprivileged processes; a malicious host administrator remains
+  outside the threat model.
+- Source-file permission and hook installation are explicit user actions; the
+  Companion has no privileged bypass around local OS access control.
 
 If an assumption is false, the associated guarantee is invalid; fail closed where it is observable.
 
@@ -166,6 +203,9 @@ If an assumption is false, the associated guarantee is invalid; fail closed wher
 | Use leaked provider/storage handle | Handles never cross public APIs and are validated by adapter/bridge | Trusted logs or database compromise can expose handles |
 | Cross-owner artifact dedup leak | Authorization and owner-scoped storage key precede byte lookup; no public global digest oracle | Storage-level aggregate side channels remain possible to operators |
 | Reuse another Project's brief or execution context | Brief promotion, listing, selection, and source resolution require current membership in the immutable source Run's Project and return `NOT_FOUND` when inaccessible | A stolen Principal credential carries that Principal's current Project visibility until revocation |
+| Pair a device then upload ambient transcripts | Pairing and content authority are separate; an active exact ConversationShareGrant and current `participate` capability are required for each mirror batch | A compromised paired device can publish selected-source content until device or grant revocation |
+| Give a device full user authority | Device tokens are route-exact and cannot read Project history, create Runs, operate agents, annotate, Relay, manage members, or access artifacts/deployments | A route authorization defect can widen device authority and requires direct contract tests |
+| Infer or enumerate local sessions | Raw source IDs and absolute paths stay local; the control plane receives one pseudonymous identity only after grant matching | Authorized transcript content may itself reveal local context and needs legible consent |
 
 Authorization must be structural. A route-level precheck followed by an unscoped SQL read is not sufficient.
 
@@ -182,6 +222,19 @@ Authorization must be structural. A route-level precheck followed by an unscoped
 | Resource exhaustion | Deadlines, file/log limits, process lifecycle, provider quotas, cleanup monitoring | A permitted run can still consume budget up to limits |
 
 The agent is expected to modify files and run tools; sandbox isolation, credentials, limits, and durable evidence contain that authority. Attempting to classify every agent command as safe is not the model.
+
+### Local source observation
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| Companion scans unrelated files | Explicit source adapters and selected workspace/repository grants; deny by default; no broad home-directory upload | A compromised local process or host administrator can bypass application policy |
+| Source hook overwrites user configuration | Merge and remove only entries carrying the Companion's stable ownership marker; show the exact change | Source-app configuration format changes can require manual recovery |
+| Source schema change creates false transcript | Versioned strict parsers pause unknown shapes; no heuristic coercion into known event types | A valid but semantically changed source schema may evade a syntactic check until adapter review |
+| Duplicate, reordered, or replaced event | Device outbox assigns contiguous sequence; server binds `(mirror, sequence)` to one digest; exact replay is idempotent; gaps/conflicts fail closed | Loss before the local outbox append cannot be recovered from Meanwhile alone |
+| Transcript rotation rewrites history | Rotation or truncation pauses the attachment for an explicit reattachment decision; accepted MirrorEvents never mutate | The external source may delete content before the Companion observes it |
+| Secret or local path enters shared transcript | Source-local redaction, allowlisted normalized fields, strict size bounds, server-side defense-in-depth redaction | Unknown, encoded, or model-repeated secrets may still appear in authorized transcript prose |
+| Mirror implies agent control | Separate object and UI status vocabulary; no send/cancel/interrupt/recover/artifact/deploy routes | Users may still over-trust a live indicator without careful copy |
+| Offline control plane disrupts local agent | Companion is observation-only and outbound; durable outbox retries independently | Prolonged outage may fill the bounded outbox and pause capture |
 
 ### Workspace and artifacts
 

@@ -143,6 +143,27 @@ const importedProjectId = "00000000-0000-4000-8000-000000000216"
 const importedBindingId = "00000000-0000-4000-8000-000000000217"
 let onboardingAgentConnected = false
 const onboardingProjectSelections = new Set<string>()
+const previewConnectorSecret = `mwd_${"c".repeat(12)}_${"d".repeat(43)}`
+let previewConnectorDevices: Array<{
+  id: string
+  ownerId: string
+  principalId: string
+  displayName: string
+  source: "codex" | "claude-code"
+  createdAt: string
+  lastSeenAt: string | null
+  revokedAt: string | null
+}> = []
+let previewConversationShareGrants: Array<{
+  id: string
+  ownerId: string
+  projectId: string
+  connectorDeviceId: string
+  source: "codex" | "claude-code"
+  authorizedByPrincipalId: string
+  createdAt: string
+  revokedAt: string | null
+}> = []
 let importedRepository = false
 const githubIdentity = {
   id: githubIdentityId,
@@ -805,6 +826,83 @@ const upstream = Bun.serve({
     if (request.method === "GET" && url.pathname === "/onboarding") {
       return Response.json(onboardingSnapshot(viewer))
     }
+    if (request.method === "GET" && url.pathname === "/connector-devices") {
+      return Response.json({ items: previewConnectorDevices })
+    }
+    if (request.method === "GET" && url.pathname === "/conversation-share-grants") {
+      return Response.json({ items: previewConversationShareGrants })
+    }
+    if (request.method === "POST" && url.pathname === "/connector-devices") {
+      const input = await request.json() as {
+        displayName: string
+        source: "codex" | "claude-code"
+      }
+      const device = {
+        id: crypto.randomUUID(),
+        ownerId: API_OWNER_ID,
+        principalId: viewer.id,
+        displayName: input.displayName,
+        source: input.source,
+        createdAt: new Date().toISOString(),
+        lastSeenAt: null,
+        revokedAt: null,
+      }
+      previewConnectorDevices = [...previewConnectorDevices, device]
+      return Response.json({ device, secret: previewConnectorSecret }, { status: 201 })
+    }
+    const previewConnectorGrant = url.pathname.match(
+      /^\/connector-devices\/([\w-]+)\/grants$/,
+    )
+    if (request.method === "POST" && previewConnectorGrant !== null) {
+      const input = await request.json() as { projectId: string }
+      const device = previewConnectorDevices.find(
+        (candidate) => candidate.id === previewConnectorGrant[1],
+      )
+      if (device === undefined) return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 })
+      const grant = {
+        id: crypto.randomUUID(),
+        ownerId: API_OWNER_ID,
+        projectId: input.projectId,
+        connectorDeviceId: device.id,
+        source: device.source,
+        authorizedByPrincipalId: viewer.id,
+        createdAt: new Date().toISOString(),
+        revokedAt: null,
+      }
+      previewConversationShareGrants = [...previewConversationShareGrants, grant]
+      return Response.json({ grant }, { status: 201 })
+    }
+    const previewConnectorDevice = url.pathname.match(/^\/connector-devices\/([\w-]+)$/)
+    if (request.method === "DELETE" && previewConnectorDevice !== null) {
+      const device = previewConnectorDevices.find(
+        (candidate) => candidate.id === previewConnectorDevice[1],
+      )
+      if (device === undefined) return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 })
+      const revoked = { ...device, revokedAt: new Date().toISOString() }
+      previewConnectorDevices = previewConnectorDevices.map((candidate) =>
+        candidate.id === revoked.id ? revoked : candidate,
+      )
+      return Response.json({ device: revoked })
+    }
+    const previewGrant = url.pathname.match(/^\/conversation-share-grants\/([\w-]+)$/)
+    if (request.method === "DELETE" && previewGrant !== null) {
+      const grant = previewConversationShareGrants.find((candidate) => candidate.id === previewGrant[1])
+      if (grant === undefined) return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 })
+      const revoked = { ...grant, revokedAt: new Date().toISOString() }
+      previewConversationShareGrants = previewConversationShareGrants.map((candidate) =>
+        candidate.id === revoked.id ? revoked : candidate,
+      )
+      return Response.json({ grant: revoked })
+    }
+    if (request.method === "POST" && url.pathname === "/connector/v1/heartbeat") {
+      const device = previewConnectorDevices.find((candidate) => candidate.revokedAt === null)
+      if (device === undefined) return Response.json({ error: { code: "UNAUTHENTICATED" } }, { status: 401 })
+      const live = { ...device, lastSeenAt: new Date().toISOString() }
+      previewConnectorDevices = previewConnectorDevices.map((candidate) =>
+        candidate.id === live.id ? live : candidate,
+      )
+      return Response.json({ device: live })
+    }
     if (request.method === "POST" && url.pathname === "/onboarding/agent-connections") {
       onboardingAgentConnected = true
       return Response.json({ connection: onboardingSnapshot(viewer).agentConnections[0] }, { status: 201 })
@@ -845,6 +943,10 @@ const upstream = Bun.serve({
     if (request.method === "PUT" && onboardingSelection !== null) {
       const input = await request.json() as { selected: boolean }
       const projectId = onboardingSelection[1] as string
+      const bound = projectId === API_PROJECT_ID || projectId === importedProjectId
+      if (!bound) {
+        return Response.json({ error: { code: "NOT_FOUND" } }, { status: 404 })
+      }
       if (input.selected) onboardingProjectSelections.add(projectId)
       else onboardingProjectSelections.delete(projectId)
       return Response.json({
@@ -1146,9 +1248,14 @@ const runJourneyCheck = async () => {
   )
   const localProjectId = projects[1]?.id
   assertPreview(localProjectId !== undefined, "Local Project fixture is missing")
-  await readJson(
-    await write(`/onboarding/projects/${localProjectId}/selection`, "PUT", { selected: true }),
-    "Local Project selection",
+  const localSelection = await write(
+    `/onboarding/projects/${localProjectId}/selection`,
+    "PUT",
+    { selected: true },
+  )
+  assertPreview(
+    !localSelection.ok,
+    "Unbound Project incorrectly entered collaboration selection",
   )
 
   const ready = await readJson(await read("/onboarding"), "Ready onboarding")
@@ -1174,18 +1281,18 @@ const runJourneyCheck = async () => {
         typeof entry === "object" &&
         entry !== null &&
         (entry as { selected?: unknown }).selected === true,
-    ).length === 2,
-    "Mixed Project selection did not persist",
+    ).length === 1,
+    "Unbound Project entered the collaboration selection",
   )
 
   const lobby = await readJson(await read("/lobby"), "Project Lobby")
-  assertPreview(Array.isArray(lobby.spaces) && lobby.spaces.length === 2, "Lobby source grouping drifted")
+  assertPreview(Array.isArray(lobby.spaces) && lobby.spaces.length === 1, "Lobby source grouping drifted")
   assertPreview(
     (lobby.spaces as readonly { tables?: readonly unknown[] }[]).reduce(
       (total, space) => total + (space.tables?.length ?? 0),
       0,
-    ) === 2,
-    "Mixed GitHub and local Projects did not reach the Lobby",
+    ) === 1,
+    "Unbound Project reached the collaboration Lobby",
   )
 
   const room = await readJson(

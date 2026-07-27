@@ -40,6 +40,24 @@ describe("operational configuration", () => {
     expect(loadConfig({ MEANWHILE_LOCAL_PROVIDER: "disabled" }).localProvider.enabled).toBeFalse()
   })
 
+  test("keeps local OCI isolation opt-in and pairs its image with optional digest evidence", () => {
+    expect(loadConfig({}).ociLocal).toBeUndefined()
+    expect(() =>
+      loadConfig({ MEANWHILE_OCI_LOCAL_IMAGE_DIGEST: `sha256:${"a".repeat(64)}` }),
+    ).toThrow("MEANWHILE_OCI_LOCAL_IMAGE")
+    expect(
+      loadConfig({
+        MEANWHILE_OCI_LOCAL_IMAGE: "meanwhile/local-runtime:0.1.3",
+        MEANWHILE_OCI_LOCAL_IMAGE_DIGEST: `sha256:${"a".repeat(64)}`,
+        MEANWHILE_OCI_LOCAL_ENGINE: "/opt/homebrew/bin/docker",
+      }).ociLocal,
+    ).toEqual({
+      imageReference: "meanwhile/local-runtime:0.1.3",
+      imageDigest: `sha256:${"a".repeat(64)}`,
+      engineExecutable: "/opt/homebrew/bin/docker",
+    })
+  })
+
   test("validates an explicit deny-by-default secret source catalog", () => {
     expect(loadConfig({}).secretSourceCatalog).toEqual([])
     expect(

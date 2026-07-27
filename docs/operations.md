@@ -11,11 +11,21 @@ one active Meanwhile control plane
     ├── local runtime directories, when local provider is enabled
     ├── separate-origin local preview server
     └── zero or more remote provider bridges
+
+zero or more user devices
+    └── one outbound Meanwhile Companion each
+          ├── OS-stored device credential
+          ├── selected Codex/Claude source adapters
+          └── bounded local SQLite outbox
 ```
 
 SQLite deliberately means **one active writer**. Multiple API processes against the same database are not a high-availability mode. Horizontal control-plane scale requires a shared lease-capable store and is an architectural change.
 
 The local runtime provider executes directly on the host. It is not isolation and is inappropriate for untrusted code.
+ADR 0012 selects a separate local sandbox provider for owned execution; its
+backend is not operationally supported until the actual contract and isolation
+receipts pass. The Companion is observation-only and does not make the host
+process provider safer.
 
 ## Configuration
 
@@ -71,6 +81,9 @@ Properties:
 - Artifact objects are immutable and content-addressed.
 - Runtime working directories are disposable even when located beneath the data root.
 - Audit, run/session event journals, run logs, status history, deployments, and both runtime cleanup lifecycles survive service restart.
+- ConversationMirror metadata, accepted MirrorEvents, device/share-grant
+  digests, and audit survive control-plane restart. Source paths, parser cursors,
+  raw envelopes, and the unacknowledged outbox remain on each paired device.
 - Preview output is derived from immutable artifacts; it is not a second source of truth.
 - An adjacent lease directory keyed by physical data-root identity is the single-writer authority for both the service and maintenance commands; a symlink alias cannot acquire a second lease.
 
@@ -88,6 +101,15 @@ The startup order is:
 6. bind the Bun HTTP server and expose readiness.
 
 Invalid configuration, data-root ownership, schema identity, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment and resumes automatically when persisted successful previews exist. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
+
+The collaboration schema makes `(owner, GitHub repository ID)` a unique room
+identity. When upgrading the exact pre-identity ConversationMirror schema, stop
+the control plane, take and verify a backup, run
+`bun run migrate:project-repository-identity -- --database=/absolute/path/to/meanwhile.sqlite`,
+inspect the dry run, then repeat with `--write`. Duplicate historical bindings
+fail closed and require explicit operator resolution; the migration never picks
+a winning Project. A single legacy revoked binding is reactivated because grant
+revocation may remove current access but no longer erases repository identity.
 
 Development target:
 
@@ -205,7 +227,8 @@ room or bind it to an existing Project. Other Principals with matching current
 grants enter that room as `watch`, `participate`, or `administer`; expiration or
 revocation removes only that provider-derived access and never rewrites durable
 attribution or explicit membership. At Run or AgentSession checkout, the
-control plane revalidates the delegator's own exact installation and repository,
+control plane revalidates the delegator's own immutable repository ID through a
+current grant (even if the GitHub App installation has rotated),
 exposes only that person's access token to the bounded git helper, redacts its
 output, and releases the material before the agent starts. One person's provider
 rejection revokes that grant, not the shared Project binding. GitHub webhook
@@ -334,6 +357,66 @@ later mutation and its system-receipt link binds the deployment, Project, and
 revision. It explicitly records that human identity was not machine-verified.
 Use the exact journey and credential-free input schema in
 [External collaboration acceptance](external-collaboration-acceptance.md).
+
+### Local Companion operations
+
+ADR 0012 defines the selected operating contract; exact CLI flags belong in
+this section only after the corresponding command is implemented and tested.
+Operationally:
+
+- use `meanwhile companion connect` to select one exact local conversation and
+  generate its Connector secret on the device;
+- let the authenticated browser approve only the non-secret prefix/verifier and
+  one exact Project; adoption creates the device and first share grant in one
+  control-plane transaction;
+- after proof of possession, freeze the source conversation ID and transcript
+  path, move the secret directly into Keychain, write a credential-free private
+  profile and LaunchAgent, and start outbound observation;
+- keep the local outbox, profile, and runtime status on durable user storage
+  with restrictive permissions; keep the LaunchAgent plist credential-free;
+- use only outbound TLS for a non-loopback control plane;
+- observe checkpoint, parser, outbox-pressure, and last-sync diagnostics without
+  logging transcript bodies or local absolute paths;
+- pause a share grant to stop future capture, or revoke the device to deny every
+  future batch from that installation;
+- retain already accepted Project history under the normal data-root and backup
+  policy; the initial contract has no selective mirror purge command.
+
+The supported macOS lifecycle is explicit and idempotent:
+
+```console
+meanwhile companion discover --source codex
+meanwhile companion connect --source codex
+meanwhile companion connect --source codex \
+  (--conversation <source-conversation-id> | --transcript FILE)
+
+# Legacy operator-managed provisioning remains explicit:
+meanwhile companion install --source codex --project <project-id> \
+  (--conversation <source-conversation-id> | --transcript FILE)
+meanwhile companion status [profile-id]
+meanwhile companion pause <profile-id>
+meanwhile companion resume <profile-id>
+meanwhile companion uninstall <profile-id>
+meanwhile companion uninstall <profile-id> --purge-state
+```
+
+Discovery is bounded and device-local. In a TTY, `connect`, `install`, and `run` can present
+that list for an explicit choice. Without a TTY, one of `--conversation` or
+`--transcript` is required; the CLI never guesses the newest transcript. An
+explicit transcript is inspected before use, and an accompanying
+`--conversation` must match its embedded source identity.
+
+`pause` stops local publication without revoking the Project grant. `resume`
+reloads the same profile and checkpoint. `uninstall` removes the LaunchAgent,
+profile, runtime status, and Keychain item but preserves the outbox by default;
+`--purge-state` is the only destructive local-state path. Non-macOS operators
+use `meanwhile companion run` under their own process supervisor until another
+platform adapter implements this same local lifecycle.
+
+Control-plane backup includes accepted MirrorEvents and credential/share-grant
+digests. It does not back up source transcripts or an unacknowledged device
+outbox. A complete recovery plan must therefore protect those two storage units
+separately until every needed event is acknowledged.
 
 ## Shutdown and restart
 

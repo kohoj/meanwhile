@@ -11,7 +11,12 @@ Meanwhile must answer four questions after any ordinary failure:
 3. Which result is authoritative?
 4. What disposable resources still need cleanup?
 
-That property determines the architecture. The control plane owns durable intent and policy. Adapters execute provider-specific operations and report facts. The runner owns the live ACP conversation. No lower layer decides control-plane state.
+That property determines the architecture. The control plane owns durable
+intent and policy. Adapters execute provider-specific operations and report
+facts. The runner owns a live ACP conversation that Meanwhile created. A local
+Companion may instead observe an explicitly shared conversation owned by Codex
+or Claude; that path produces a `ConversationMirror`, never execution state. No
+lower layer decides control-plane state or upgrades observation into control.
 
 ## Topology
 
@@ -27,16 +32,23 @@ SDK / CLI / upstream agent
                 │                   │ immutable source
        RuntimeProvider         DeployAdapter
                 │                   │
-        ┌───────┴────────┐          └── local-static
-        │                │
- local processes   Cloudflare bridge
-        │                │ authenticated HTTP
-        └──── isolated runtime ─────┘
-                    │
-             meanwhile-runner
-                    │ local stdio ACP
-                    ▼
-                 ACP agent
+        ┌───────────┼───────────────┐   └── local-static
+        │           │               │
+ host process   local OCI      Cloudflare bridge
+ (no isolation) sandbox             │ authenticated HTTP
+        │           └───────────────┴── isolated runtime
+        │                           │
+        └───────────────── meanwhile-runner
+                                    │ local stdio ACP
+                                    ▼
+                                 ACP agent
+
+Codex.app / Codex CLI / Claude Code
+          │ selected transcript · hook wake-up
+          ▼
+local Companion ── durable outbox ── HTTPS ingest
+          │
+          └────────────────────────► ConversationMirror / MirrorEvent
 ```
 
 The public boundary offers two execution shapes over that same data plane:
@@ -46,6 +58,9 @@ one-shot Run ───────────────► immutable Artifact
 
 durable AgentSession ─► Turn 1 ─► Turn 2 ─► …
              └────────► RuntimeLease ─► ordered runner commands
+
+source-owned conversation ─► ConversationMirror ─► ordered MirrorEvents
+                        no Runtime · no lifecycle commands
 ```
 
 The Cloudflare bridge is independently deployable because it runs in a different platform runtime and owns provider translation. It is not a second control plane and stores no owner, run, artifact, or deployment policy. Its narrow Durable Object registry owns only provider-side lifecycle evidence: exact runtime/process admission, immutable terminal process snapshots, input sequence bindings, and encrypted credential leases. This lets an exited SDK process be recovered through matching exit-code closure frames in retained logs without promoting provider state to run authority or re-running the agent.
@@ -62,6 +77,14 @@ The Cloudflare bridge is independently deployable because it runs in a different
 Collapsing any pair creates a correctness failure. Runtime deletion cannot imply run deletion. A successful agent exit cannot imply artifact capture succeeded. Deployment failure cannot rewrite the run. Cleanup failure cannot un-cancel a run.
 
 Interactive work adds `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent`. They do not replace the four concepts above: a session owns ACP continuity, a turn owns one prompt outcome, a lease owns disposable compute cleanup, and the event journal owns replayable cross-turn evidence. A run remains the artifact-promotion boundary.
+
+Source-owned collaboration adds `ConnectorDevice`,
+`ConversationShareGrant`, `ConversationMirror`, and `MirrorEvent`. A device is
+revocable local integration authority; a share grant is explicit
+device/source/Project capture consent; a mirror binds external work to one
+Project and delegator; a mirror
+event is exactly one accepted source observation. None owns runtime continuity,
+terminal state, artifacts, deployment, or recovery.
 
 ## Ownership map
 
@@ -81,6 +104,8 @@ Interactive work adds `AgentSession`, `Turn`, `RuntimeLease`, and `SessionEvent`
 | Artifact collector/store | Safe capture and immutable bytes | Run outcome decisions |
 | Deployment executor/adapter | Deployment state and target execution | Mutable runtime access, run mutation |
 | Credential/runtime reapers | Credential revocation, eligible runtime destruction, cleanup evidence | Deleting durable product history |
+| Local Companion | Source discovery, source-private cursor, safe normalization, durable outbox | Project policy, agent control, source credentials, control-plane SQL |
+| Mirror service | Device/share authorization, immutable binding, exact event replay and Project reads | Parsing source-private files, Run/Session state, artifact or deployment claims |
 
 The most important negative rule is simple: neither executor branches on a provider name. Provider choice is resolved by a registry; capability decisions use explicit provider-neutral facts.
 
@@ -88,9 +113,12 @@ The most important negative rule is simple: neither executor branches on a provi
 
 Authentication resolves an API key or opaque browser session to one stable
 `Principal` inside a hard `Owner` tenant. Projects never cross Owners. Active
-`ProjectMembership` authorizes reading the Project's Runs, AgentSessions,
-conversations, artifacts, Briefs, and deployments. Every Run and AgentSession
-has an immutable Project binding and a snapshotted delegating Principal.
+`ProjectMembership` or a current matching provider grant authorizes the exact
+Project capability resolved for the request. Project readers may see its Runs,
+AgentSessions, ConversationMirrors, and corresponding conversations. Native
+work separately governs artifacts, Briefs, and deployments. Every Run,
+AgentSession, and ConversationMirror has an immutable Project binding and a
+snapshotted delegating Principal.
 
 Visibility does not grant operation. Existing Run and AgentSession lifecycle
 commands, and deployment creation, require the original delegator even when a
@@ -127,30 +155,105 @@ delegator is that Principal, update that Principal's onboarding selection and
 agent connections, heartbeat/release that client's presence, or perform the
 Task Relay and Annotation operations from ADRs 0006 and 0009.
 The authoritative Project work list is conditionally polled; task detail reads
-the native Run or Session event journal. There is no second task table or
-Project activity truth source. See
+the corresponding Run, Session, or Mirror event journal. `ProjectWorkItem` is a
+tagged `run | session | mirror` projection, not a shared status table or another
+mutable task lifecycle. There is no Project activity truth source. See
 [Shared Project definition](project-collaboration.md) and the Project ADRs.
 
 ADR 0007 adds a provider-neutral `RepositoryProjectDirectory` beside, not
 inside, Project authorization. The GitHub implementation consumes a transient
 GitHub App user token, lists only the installations and repositories GitHub
 returns for that user/App intersection, normalizes the result to
-watch/participate/administer, and returns no credential. The wired Lobby uses
-selected existing Projects and groups explicit repository bindings by provider
-account. External identity, repository binding, expiring grant, AgentConnection,
+watch/participate/administer, and returns no credential. The wired Lobby exposes
+only selected GitHub-bound Projects and groups explicit repository bindings by
+provider account. One immutable GitHub repository ID maps to at most one
+Project per Owner; a Project cannot be rebound to a different repository.
+External identity, repository binding, expiring grant, AgentConnection,
 Project-selection persistence, OAuth/PKCE, sealed identity credentials, and
 opaque browser-session issuance are implemented. GitHub checkout authority is
 resolved only for the exact active Project/repository binding and is revalidated
 against the current App/user repository intersection immediately before
 workspace preparation. The access token is passed only to the bounded git
 helper, its output is exact-value redacted, and the material is released before
-the agent starts. Expired credentials fail closed and require relinking;
-provider rejection or a missing repository revokes the local binding. Webhooks
+the agent starts. Expired credentials fail closed and require relinking.
+Provider rejection or a missing repository revokes that Principal's current
+grant, never the durable Project repository identity. Webhooks
 remain an invalidation accelerator to add after live-provider acceptance, not a
 correctness dependency. Owner continues to partition every resource request;
 provider discovery cannot issue cross-Owner SQL.
 
+ADR 0012 adds the outbound-only Local Companion. Pairing creates one
+Principal-bound, route-exact `ConnectorDevice` credential but authorizes no
+content by itself. The user separately creates a `ConversationShareGrant` for
+one Project and source kind, then selects the exact local conversation. The Companion
+keeps local paths, source handles, parser cursors, and a SQLite outbox on the
+device. It sends only bounded normalized events under that grant. The mirror
+service commits one immutable `(mirrorId, sequence, digest)` fact, acknowledges
+only a contiguous prefix, treats exact replay as idempotent, and rejects gaps or
+conflicting reuse. Codex/Claude hooks are wake-ups; selected local session
+records are the replay source. Board and control-plane code never attach to an
+existing app process, copy its credentials, send input, or claim source-agent
+lifecycle authority.
+
+This observation path is independent of local owned execution. The existing
+host-process provider remains explicit non-isolation. A local sandbox provider
+implements the normal `RuntimeProvider` contract through an OCI/VM backend,
+with no provider-name branch in the executor. Cloudflare remains an optional
+remote provider. Native and linked work meet only in Project presentation and
+human collaboration.
+
 The public contract has one implementation path. Pure Zod schemas define requests and responses, generate OpenAPI through the Hono route layer, and validate SDK traffic at runtime. `src/client.ts` adds the deep consumer semantics that raw HTTP should not force every caller to rebuild: authentication, request correlation, durable waits, structured safe failures, and cursor-correct `AsyncIterable` event following. `src/timeline.ts` is a pure projection from durable events to messages, tool calls, plans, usage, and statuses. The CLI and executable demos are presentation layers over that client. None may call a service or store directly, so local convenience cannot become a second control plane.
+
+## Control path of a linked conversation
+
+### 1. Pair and consent
+
+An authenticated person pairs one Companion. The control plane returns its
+device bearer once, stores only a digest, and restricts it to mirror
+registration, ingestion, checkpoint, and heartbeat routes. Pairing does not
+permit transcript upload. The person separately grants one device/source
+permission to one Project and selects the exact local conversation. Both the
+Principal and Project must still authorize `participate` when a mirror is
+created or extended.
+
+### 2. Observe locally
+
+A source adapter discovers only the configured Codex or Claude records and
+retains absolute paths, file identity, byte offset, source segment, and parser
+version locally. Hooks may wake the adapter but do not carry the durable stream.
+Each supported source item becomes a bounded source-neutral event after local
+path and known-secret redaction. Unknown schema pauses that source instead of
+guessing.
+
+### 3. Persist and ingest
+
+The Companion first appends the event to its local outbox with a contiguous
+positive sequence and digest. HTTPS ingestion authenticates the device,
+rechecks its share grant and current Project capability, verifies the immutable
+mirror identity, and atomically appends a `MirrorEvent`. Exact replay returns
+the original acknowledgement. A conflicting sequence or gap fails closed. The
+device discards an outbox prefix only after receiving the highest contiguous
+accepted sequence.
+
+### 4. Project and live detail
+
+The Project service emits a `kind: mirror` work item alongside native work. A
+mirror-specific timeline adapter maps accepted normalized events into the same
+readable message, tool, reasoning, plan, and usage presentation vocabulary.
+Conversation Detail follows the mirror journal with cursor resume and current
+Project authorization. Annotation and Relay anchor the exact mirror event and
+block identity outside that journal. No route translates these reads into an
+agent command.
+
+### 5. Fail truthfully
+
+Network or control-plane failure delays sharing but never interferes with the
+local agent. Restart resumes the outbox. Source rotation or truncation pauses
+the attachment until the person explicitly reattaches it. Parser
+incompatibility, outbox pressure, revoked device/grant, or lost Project
+access pauses future ingestion and preserves already accepted history. Device
+heartbeat proves only connector reachability; it never proves the source agent
+is running or the task is complete.
 
 ## Control path of a run
 

@@ -270,6 +270,9 @@ CREATE TABLE project_repository_bindings (
 CREATE UNIQUE INDEX project_repository_bindings_active_project_idx
         ON project_repository_bindings(owner_id, project_id) WHERE revoked_at IS NULL;
 
+CREATE UNIQUE INDEX project_repository_bindings_repository_identity_idx
+        ON project_repository_bindings(owner_id, provider, repository_id);
+
 CREATE INDEX project_repository_bindings_repository_idx
         ON project_repository_bindings(owner_id, provider, repository_id, revoked_at, project_id);
 
@@ -306,6 +309,104 @@ CREATE TABLE project_selections (
 
 CREATE INDEX project_selections_principal_idx
         ON project_selections(owner_id, principal_id, hidden_at, selected_at, project_id);
+
+CREATE TABLE connector_devices (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 120),
+        source TEXT NOT NULL CHECK(source IN ('codex','claude-code')),
+        prefix TEXT NOT NULL UNIQUE CHECK(
+          length(prefix) = 16 AND prefix GLOB 'mwd_[A-Za-z0-9_-]*'
+        ),
+        hash TEXT NOT NULL CHECK(
+          length(hash) = 71 AND hash GLOB 'sha256:[0-9a-f]*'
+        ),
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT,
+        revoked_at TEXT,
+        UNIQUE(owner_id, id),
+        FOREIGN KEY(owner_id, principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX connector_devices_principal_idx
+        ON connector_devices(owner_id,principal_id,created_at,id);
+
+CREATE TABLE conversation_share_grants (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        connector_device_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK(source IN ('codex','claude-code')),
+        authorized_by_principal_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        UNIQUE(owner_id, id),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, connector_device_id)
+          REFERENCES connector_devices(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, authorized_by_principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE UNIQUE INDEX conversation_share_grants_active_idx
+        ON conversation_share_grants(owner_id,connector_device_id,project_id,source)
+        WHERE revoked_at IS NULL;
+
+CREATE TABLE conversation_mirrors (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        connector_device_id TEXT NOT NULL,
+        share_grant_id TEXT NOT NULL,
+        shared_by_principal_id TEXT NOT NULL,
+        shared_by_name TEXT NOT NULL CHECK(length(shared_by_name) BETWEEN 1 AND 120),
+        shared_by_kind TEXT NOT NULL CHECK(shared_by_kind IN ('person','service')),
+        source TEXT NOT NULL CHECK(source IN ('codex','claude-code')),
+        source_conversation_key TEXT NOT NULL CHECK(
+          length(source_conversation_key) = 64
+          AND source_conversation_key NOT GLOB '*[^0-9a-f]*'
+        ),
+        title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 500),
+        status TEXT NOT NULL CHECK(status IN ('active','idle','ended','disconnected')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        ended_at TEXT,
+        UNIQUE(owner_id, id),
+        UNIQUE(owner_id, id, source),
+        UNIQUE(owner_id, connector_device_id, source, source_conversation_key),
+        FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, connector_device_id)
+          REFERENCES connector_devices(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, share_grant_id)
+          REFERENCES conversation_share_grants(owner_id, id),
+        FOREIGN KEY(owner_id, shared_by_principal_id) REFERENCES principals(owner_id, id)
+      ) STRICT;
+
+CREATE INDEX conversation_mirrors_project_idx
+        ON conversation_mirrors(owner_id,project_id,updated_at,id);
+
+CREATE TABLE mirror_events (
+        owner_id TEXT NOT NULL,
+        mirror_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL CHECK(sequence > 0),
+        version INTEGER NOT NULL CHECK(version = 1),
+        source TEXT NOT NULL CHECK(source IN ('codex','claude-code')),
+        source_cursor TEXT NOT NULL CHECK(length(source_cursor) BETWEEN 1 AND 1024),
+        digest TEXT NOT NULL CHECK(
+          length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        type TEXT NOT NULL CHECK(type IN ('message','work','source_status')),
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        source_timestamp TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(mirror_id, sequence),
+        UNIQUE(mirror_id, source_cursor),
+        FOREIGN KEY(owner_id, mirror_id, source)
+          REFERENCES conversation_mirrors(owner_id, id, source) ON DELETE CASCADE
+      ) WITHOUT ROWID, STRICT;
+
+CREATE INDEX mirror_events_owner_mirror_idx
+        ON mirror_events(owner_id,mirror_id,sequence);
 
 CREATE TABLE runs (
         id TEXT PRIMARY KEY,
@@ -786,6 +887,7 @@ CREATE TABLE task_relays (
         project_id TEXT NOT NULL,
         run_id TEXT,
         session_id TEXT,
+        mirror_id TEXT,
         anchor_sequence INTEGER NOT NULL CHECK(anchor_sequence >= 0),
         author_principal_id TEXT NOT NULL,
         author_name TEXT NOT NULL CHECK(length(author_name) BETWEEN 1 AND 120),
@@ -795,17 +897,23 @@ CREATE TABLE task_relays (
         recipient_kind TEXT NOT NULL CHECK(recipient_kind IN ('person','service')),
         body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 2000),
         created_at TEXT NOT NULL,
-        CHECK((run_id IS NOT NULL) != (session_id IS NOT NULL)),
+        CHECK(
+          (run_id IS NOT NULL) + (session_id IS NOT NULL) + (mirror_id IS NOT NULL) = 1
+        ),
         UNIQUE(owner_id, id),
         FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE,
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, mirror_id)
+          REFERENCES conversation_mirrors(owner_id, id) ON DELETE CASCADE,
         FOREIGN KEY(owner_id, author_principal_id) REFERENCES principals(owner_id, id),
         FOREIGN KEY(owner_id, recipient_principal_id) REFERENCES principals(owner_id, id)
       ) STRICT;
 
 CREATE INDEX task_relays_project_task_idx
-        ON task_relays(owner_id, project_id, run_id, session_id, anchor_sequence, created_at, id);
+        ON task_relays(
+          owner_id,project_id,run_id,session_id,mirror_id,anchor_sequence,created_at,id
+        );
 
 CREATE INDEX task_relays_recipient_idx
         ON task_relays(owner_id, project_id, recipient_principal_id, created_at, id);
@@ -828,6 +936,7 @@ CREATE TABLE task_annotations (
         project_id TEXT NOT NULL,
         run_id TEXT,
         session_id TEXT,
+        mirror_id TEXT,
         anchor_sequence INTEGER NOT NULL CHECK(anchor_sequence >= 0),
         anchor_block_id TEXT NOT NULL CHECK(
           length(anchor_block_id) BETWEEN 1 AND 256
@@ -851,17 +960,21 @@ CREATE TABLE task_annotations (
         author_kind TEXT NOT NULL CHECK(author_kind IN ('person','service')),
         body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 2000),
         created_at TEXT NOT NULL,
-        CHECK((run_id IS NOT NULL) != (session_id IS NOT NULL)),
+        CHECK(
+          (run_id IS NOT NULL) + (session_id IS NOT NULL) + (mirror_id IS NOT NULL) = 1
+        ),
         UNIQUE(owner_id, id),
         FOREIGN KEY(owner_id, project_id) REFERENCES projects(owner_id, id) ON DELETE CASCADE,
         FOREIGN KEY(owner_id, run_id) REFERENCES runs(owner_id, id) ON DELETE CASCADE,
         FOREIGN KEY(owner_id, session_id) REFERENCES agent_sessions(owner_id, id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id, mirror_id)
+          REFERENCES conversation_mirrors(owner_id, id) ON DELETE CASCADE,
         FOREIGN KEY(owner_id, author_principal_id) REFERENCES principals(owner_id, id)
       ) STRICT;
 
 CREATE INDEX task_annotations_project_task_idx
         ON task_annotations(
-          owner_id,project_id,run_id,session_id,
+          owner_id,project_id,run_id,session_id,mirror_id,
           anchor_sequence,anchor_start_offset,created_at,id
         );
 

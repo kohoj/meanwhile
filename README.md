@@ -10,9 +10,20 @@
 
 You hand a task to an AI agent. Then what? You want to know it finished, see what it did, trust it didn't leak a secret or lose your work — without babysitting a terminal. That gap between *delegating* work and *trusting* the result is what Meanwhile closes.
 
-Meanwhile is the durable layer under the agent, not another agent. It lets a person hand work to AI and safely look away. You give it a task; it runs [ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in an isolated runtime, and it stands behind every task like a trusted system: **still tracked after a crash, recoverable after a restart, auditable end to end, and never exposing the credentials the agent used.** A `Run` carries one task to immutable output; an `AgentSession` keeps one agent context alive across ordered `Turn`s. Both survive control-plane restarts. You promote only the immutable output you chose. The governing decision filter is the [product constitution](docs/product-constitution.md).
+Meanwhile is the durable layer around agent work, not another agent. It lets a
+person hand work to AI and safely look away. For work Meanwhile owns, it runs
+[ACP](https://agentclientprotocol.com/) agents (Claude Code, Codex, Pi, …) in a
+selected runtime and stands behind the task through crash, restart, audit,
+cleanup, and immutable output. For work already happening in Codex.app, Codex
+CLI, or Claude Code, the selected Local Companion path shares an explicitly
+authorized live conversation without pretending Meanwhile can control that
+external agent. A `Run` carries one owned task to immutable output; an
+`AgentSession` keeps one owned agent context alive across ordered `Turn`s; a
+`ConversationMirror` is the observation-only custody record for one Linked
+conversation. The governing decision filter is the
+[product constitution](docs/product-constitution.md).
 
-> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements connected onboarding, Project Lobby, the Live Deck Project room, source-backed Conversation Detail, immutable addressed Task Relays, Project-visible source-anchored Annotations, and expiring client-scoped PresenceLeases. Optional GitHub App and Google OIDC authorization now use PKCE, exact callbacks, provider-bound sealed state, Board-side login-CSRF correlation, sealed server-side identity credentials, and opaque HttpOnly Meanwhile sessions. A bound private GitHub repository is revalidated immediately before checkout; its user token exists only in the short-lived Git preparation process and is released before the agent starts. The current dirty worktree has fresh verified development receipts for the complete local collaboration system, two independent Principals through separate HTTPS API and Board origins, and deterministic ACP execution on real Cloudflare remote compute. Those receipts are implementation evidence, not release evidence: the same revision still needs clean verification, configured live GitHub/Google and credentialed-agent receipts, and the [external two-person acceptance](docs/external-collaboration-acceptance.md). Distinct test Principals, fixtures, leases, and cookie sessions are not evidence that two real people used the deployed product.
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements connected onboarding, Project Lobby, the Live Deck Project room, source-backed Conversation Detail, immutable addressed Task Relays, Project-visible source-anchored Annotations, and expiring client-scoped PresenceLeases. Optional GitHub App and Google OIDC authorization now use PKCE, exact callbacks, provider-bound sealed state, Board-side login-CSRF correlation, sealed server-side identity credentials, and opaque HttpOnly Meanwhile sessions. A bound private GitHub repository is revalidated immediately before checkout; its user token exists only in the short-lived Git preparation process and is released before the agent starts. ADR 0012's unreleased vertical slice is also implemented in the current source: Board pairing and exact Project consent, an outbound CLI Companion, strict Codex/Claude JSONL adapters, checkpointed ConversationMirror ingestion, Live Deck/Conversation Detail projection, exact offline schema migration, and an opt-in local OCI provider. Deterministic connector fixtures, a machine-local Colima run, and a packaged OCI control-plane run are development receipts only. The same revision still needs clean verification, one real current Codex.app or Claude Code acceptance, configured live GitHub/Google and credentialed-agent receipts, and the [external two-person acceptance](docs/external-collaboration-acceptance.md). Distinct test Principals, fixtures, leases, cookie sessions, and one-machine containers are not evidence that two real people used the deployed product.
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -44,9 +55,21 @@ Interactive work adds four concepts without weakening those boundaries:
 
 `Run` remains the atomic execution and artifact-promotion unit. `AgentSession` is the interactive continuity unit. Neither is overloaded to imitate the other.
 
+Existing local-agent work adds a deliberately different set:
+
+| Entity | Lifetime | Authority |
+| --- | --- | --- |
+| **Connector device** | Revocable | One paired outbound Local Companion |
+| **Conversation share grant** | Revocable | Explicit source/Project capture consent |
+| **Conversation mirror** | Durable | Immutable Project/delegator binding for a source-owned conversation |
+| **Mirror event** | Durable, append-only | Exactly what Meanwhile accepted from the normalized source stream |
+
+A Linked conversation is readable and collaborative, but has no Meanwhile
+cancel, send, recovery, artifact, or deployment authority.
+
 ## Run it locally
 
-Requires macOS or Linux, [Bun 1.3.13+](https://bun.sh/), and Git. Every Meanwhile application, CLI, demo, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The local provider needs no cloud account, but it is **not a security sandbox**.
+Requires macOS or Linux, [Bun 1.3.13+](https://bun.sh/), and Git. Every Meanwhile application, CLI, Companion, demo, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The current `local` process provider needs no cloud account, but it is **not a security sandbox**. ADR 0012 selects a separate local container/VM provider for isolated owned work and keeps Cloudflare optional.
 
 The fastest way to start the control plane, without cloning anything, is the published package. The standalone runner is compiled once on first start:
 
@@ -100,6 +123,19 @@ bun run migrate:presence-leases -- --database=/absolute/path/to/meanwhile.sqlite
 bun run migrate:identity-credentials -- --database=/absolute/path/to/meanwhile.sqlite --write
 bun run migrate:principal-invitations -- --database=/absolute/path/to/meanwhile.sqlite --write
 ```
+
+An exact pre-ConversationMirror database must first use
+`migrate:conversation-mirrors`. An exact ConversationMirror database from
+before repository identity enforcement must then inspect and apply:
+
+```console
+bun run migrate:project-repository-identity -- --database=/absolute/path/to/meanwhile.sqlite
+bun run migrate:project-repository-identity -- --database=/absolute/path/to/meanwhile.sqlite --write
+```
+
+The final step rejects ambiguous duplicate GitHub repository bindings rather
+than guessing which Project owns the room. It reactivates an unambiguous legacy
+binding because current grant state no longer controls durable room identity.
 
 Unknown or partially modified schema fingerprints fail closed.
 
@@ -387,6 +423,8 @@ All failures use one safe envelope:
 | --- | --- |
 | Identity and Projects | `GET /me`, `POST/GET /principals`, `POST/GET /projects`, Project members and work |
 | Browser sessions | `POST /browser-sessions`, `DELETE /browser-sessions/current` |
+| Local connectors | `POST/GET/DELETE /connector-devices`, Project share-grant create/list/revoke, device-authenticated mirror registration and batch ingest |
+| Linked conversations | `GET /mirrors/:id`, `GET /mirrors/:id/events` with cursor pagination or SSE follow |
 | Runs | `POST /runs`, `GET /runs`, `GET /runs/:id`, `POST /runs/:id/cancel` |
 | Run evidence | `GET /runs/:id/events`, `GET /runs/:id/logs`, `GET /runs/:id/artifacts` |
 | Sessions | `POST /sessions`, `GET /sessions`, `GET /sessions/:id` |
@@ -399,6 +437,77 @@ All failures use one safe envelope:
 | Operations | `GET /audit`, API-key lifecycle, `/healthz`, `/readyz`, `/openapi.json` |
 
 Run and session events support cursor pagination and SSE follow over the same durable sequence. `runs.followEvents()` and `sessions.followEvents()` resume with `Last-Event-ID`, deduplicate replay, reject gaps, and honor caller cancellation. `meanwhile/timeline` folds raw ACP updates into presentation-neutral messages, tool calls, plans, usage, statuses, and turn identity without making a UI part of the control plane.
+
+## Link an existing local conversation
+
+ADR 0012 selects one outbound-only Local Companion path for Codex.app, Codex
+CLI, and Claude Code. The Companion is carried by the same `meanwhile` CLI and
+keeps source adapters in `src/connectors/`; it is not a second server or agent
+harness.
+
+The authorization sequence is intentionally separate:
+
+1. select the exact local conversation and generate the Connector credential
+   on that device;
+2. open an authenticated browser approval carrying only the credential prefix
+   and one-way verifier;
+3. choose one exact Project; the control plane atomically adopts the device and
+   creates its first share grant;
+4. start observation and let the local durable outbox replay from the server's
+   last contiguous checkpoint.
+
+Pairing alone uploads nothing. Source-private IDs, absolute transcript paths,
+file cursors, raw envelopes, and Codex/Claude credentials stay on the device.
+The control plane receives a pseudonymous session identity and bounded
+normalized MirrorEvents only after grant matching. Codex and Claude hooks are
+low-latency wake-ups; the selected local session record is the replay source.
+
+The Board onboarding surface copies one credential-free `companion connect`
+command. The CLI selects the local conversation, creates the durable secret,
+opens the browser approval, proves possession after approval, then moves the
+secret directly into macOS Keychain and starts one user LaunchAgent. The secret
+never enters the browser, URL, shell history, profile, plist, or control-plane
+response. Selection is fail-closed: `discover` lists at most a bounded set of
+device-local IDs, short titles, timestamps, and paths; non-interactive commands
+require `--conversation` or `--transcript`. An explicit transcript is inspected
+locally and cannot be paired with a different source conversation ID:
+
+```console
+export MEANWHILE_URL="https://your-meanwhile.example"
+meanwhile companion connect --source codex
+
+# A non-interactive caller names the exact conversation:
+meanwhile companion connect --source codex \
+  --conversation <source-conversation-id>
+
+meanwhile companion status
+meanwhile companion pause <profile-id>
+meanwhile companion resume <profile-id>
+meanwhile companion uninstall <profile-id>
+
+# Foreground mode remains portable; --once performs one bounded synchronization:
+meanwhile companion connect --source claude-code \
+  --transcript /absolute/path/to/session.jsonl --foreground --once
+```
+
+The older explicit `install`/`run` path with `MEANWHILE_CONNECTOR_TOKEN` remains
+available for headless operator-managed provisioning.
+
+The LaunchAgent plist and profile never contain the token. Profiles, runtime
+status, and the bounded SQLite outbox are written with mode `0600` beneath the
+caller's local state directory. The outbox atomically couples the source cursor
+to every staged event and removes only a server-acknowledged contiguous prefix;
+the token is never stored in it. Malformed or incompatible source records stop
+at the last accepted complete line, outbox overflow pauses capture, and
+truncation or rotation requires explicit reattachment instead of guessing or
+duplicating history. Uninstall preserves that local state unless the operator
+adds `--purge-state` explicitly.
+
+The resulting Live Deck card is labeled as a Linked conversation. It can be
+opened, followed, annotated, and Relayed like other authorized Project detail,
+but exposes no Stop, Send, Interrupt, Recover, Artifact, or Deploy control. A
+separate app-server process or vendor remote-control relay is not represented as
+attachment to an already-running local session.
 
 ## Agent execution
 
@@ -472,7 +581,50 @@ interface RuntimeProvider {
 }
 ```
 
-`local` is the deterministic reference implementation. `cloudflare` is a real provider backed by the official Cloudflare Sandbox SDK through an independently deployable, authenticated bridge. The SDK, digest-pinned base image, standalone runner's Bun runtime, and bundled ACP toolchains are pinned as one compatibility unit; the root `packageManager` is the single Bun-version source and Cloudflare types remain inside the provider package. The image gate proves that the exact Codex, Claude Code, and Pi adapter/runtime executables are installed and bootable; only a successful credentialed live-agent receipt on the same clean revision proves an end-to-end agent path. Production operators can derive smaller agent-profile images from the same contract without changing the control plane. One bounded transport-retry boundary preserves operation identity; event replay preserves its durable cursor. The bridge durably reserves each process before spawn, records its immutable terminal result outside the sandbox, and appends an exit-code closure frame to both streams. If the SDK removes an exited process from `getProcess()`, the bridge recovers that same execution through retained `getProcessLogs()` evidence; it withholds the irreversible exit cursor until both matching frames are visible, so neither an admission retry nor an eventually consistent terminal read can duplicate work or discard a delayed tail.
+`local` is the deterministic host-process reference implementation and claims no
+security isolation. The opt-in `oci-local` provider implements the same stable
+contract through a Docker-compatible engine such as Colima: one process per
+container, no network, read-only root, dropped capabilities, bounded resources,
+bind-mounted workspace, replayable output, idempotent identity, and explicit
+cleanup. Build and select its pinned runtime image explicitly—the provider never
+pulls an image:
+
+```console
+bun run local-runtime:image:build
+export MEANWHILE_OCI_LOCAL_IMAGE=meanwhile/local-runtime:0.1.3
+export MEANWHILE_OCI_LOCAL_ENGINE=docker
+export MEANWHILE_DEFAULT_PROVIDER=oci-local
+bun run dev
+
+# Gated provider and complete control-plane receipts on Docker/Colima:
+bun run test:live:local-oci
+```
+
+The same provider-neutral capability boundary can later host Apple Container.
+Host Codex.app or Claude Code credentials are never copied into a local sandbox;
+credential-bearing admission still requires the existing broker contract. A
+machine-local passing test is not a clean-revision portability or security
+certification.
+
+`cloudflare` is a real optional remote provider backed by the official
+Cloudflare Sandbox SDK through an independently deployable, authenticated
+bridge. The SDK, digest-pinned base image, standalone runner's Bun runtime, and
+bundled ACP toolchains are pinned as one compatibility unit; the root
+`packageManager` is the single Bun-version source and Cloudflare types remain
+inside the provider package. The image gate proves that the exact Codex, Claude
+Code, and Pi adapter/runtime executables are installed and bootable; only a
+successful credentialed live-agent receipt on the same clean revision proves
+an end-to-end agent path. Production operators can derive smaller agent-profile
+images from the same contract without changing the control plane. One bounded
+transport-retry boundary preserves operation identity; event replay preserves
+its durable cursor. The bridge durably reserves each process before spawn,
+records its immutable terminal result outside the sandbox, and appends an
+exit-code closure frame to both streams. If the SDK removes an exited process
+from `getProcess()`, the bridge recovers that same execution through retained
+`getProcessLogs()` evidence; it withholds the irreversible exit cursor until
+both matching frames are visible, so neither an admission retry nor an
+eventually consistent terminal read can duplicate work or discard a delayed
+tail.
 
 The pinned Sandbox SDK does not expose ongoing stdin after process creation. Meanwhile therefore does not claim generic interactive process I/O: the bridge durably binds each `(process, sequence)` to one secret-safe command fingerprint, then publishes a validated command to a provider-private mailbox. Exact retries are harmless; conflicting reuse fails closed. This is a capability-gated runner command transport, not remote ACP, a PTY, or a second control plane.
 
@@ -666,7 +818,7 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 Meanwhile `v0.1.3` is the current public release baseline. The complete credential-free local product path, durable sessions, the delegator's board, and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
-The current Board opens with GitHub/Google sign-in when configured, otherwise the explicit installation-access fallback, then connected onboarding, a truthful Project Lobby, and Live Deck. External registration is an installation choice: `closed` preserves pre-provisioned/invited Principals, while `open` lets a verified provider subject create one stable member Principal inside the configured Owner. Neither mode lets the subject choose a tenant. GitHub access is projected at request time from a current repository grant matching an active Project binding; it is never copied into durable membership or lifecycle authority. A repository administrator can add an authorized repository to the Lobby atomically, after which matching users enter as `watch`, `participate`, or `administer`. Opening `/join/<secret>` still provides the closed-mode invitation path and atomically links the selected identity; only its digest is stored. In team mode the resulting opaque, expiring browser session stays in an HttpOnly SameSite cookie. The session is deny-by-default and grants only capabilities justified by current Project access, while cancellation and other lifecycle commands remain restricted to the immutable original delegator. Private checkout revalidates and uses the delegator's own short-lived GitHub credential, never the room creator's token. A bound repository and personally authorized agent flow into delegation; the room composer returns to the authoritative Project work read model and opens the new Run's native live transcript. Conversation Detail implements foldable agent work, exact text selection, marginalia, and addressed Relay; the room rail reads the latest Project-visible Relays independently of the current person's pending inbox. The optional `MEANWHILE_API_KEY` mode remains available for private local single-user and operator workflows.
+The current Board opens with GitHub/Google sign-in when configured, otherwise the explicit installation-access fallback, then connected onboarding, a truthful Project Lobby, and Live Deck. External registration is an installation choice: `closed` preserves pre-provisioned/invited Principals, while `open` lets a verified provider subject create one stable member Principal inside the configured Owner. Neither mode lets the subject choose a tenant. Every collaboration Project is the Owner-unique room for one immutable GitHub repository ID. GitHub access is projected at request time from a current repository grant matching that binding; it is never copied into durable membership or lifecycle authority. Repository rename, URL refresh, or App reinstallation updates metadata and authority without forking the room. A repository administrator can add an authorized repository to the Lobby atomically, after which matching users enter as `watch`, `participate`, or `administer`; duplicate import and Project rebinding fail closed. Opening `/join/<secret>` still provides the closed-mode invitation path and atomically links the selected identity; only its digest is stored. In team mode the resulting opaque, expiring browser session stays in an HttpOnly SameSite cookie. The session is deny-by-default and grants only capabilities justified by current Project access, while cancellation and other lifecycle commands remain restricted to the immutable original delegator. Private checkout revalidates and uses the delegator's own short-lived GitHub credential, never the room creator's token. The room composer derives the repository from the Project binding and cannot accept a manual repository URL. Run/Session admission rejects a different repository. The supported Companion proves the selected local transcript's GitHub origin before publishing it as a Linked conversation. Conversation Detail implements foldable agent work, exact text selection, marginalia, and addressed Relay; the room rail reads the latest Project-visible Relays independently of the current person's pending inbox. The optional `MEANWHILE_API_KEY` mode remains available for private local single-user and operator workflows.
 
 When an invitation is opened over an existing Board session, the invitation
 becomes the explicit foreground intent until the viewer accepts it with a
@@ -701,8 +853,13 @@ Meanwhile's direction is to be the durable, trustworthy layer *under* agent work
 - **Published (`v0.1.3`).** The durable control plane, durable sessions and turns, credential-free local runtime, packaged Cloudflare runtime, and the earlier single-owner Board.
 - **Landed but paused.** Explicit Brief reuse spans one-shot Runs and turn-scoped Sessions with immutable provenance, workspace relevance, Project-member source authorization, idempotency, restart persistence, and dispatch-time byte revalidation. It is a supporting capability, not the active product milestone; Fact discovery and further intelligence expansion are frozen.
 - **Release candidate — Shared Project collaboration.** Connected Onboarding, Project Lobby, Live Deck, Conversation Detail, stable Principals, membership, immutable delegator attribution, Project-scoped reads, delegator-only control, container packaging, and current dirty-tree local and separate-HTTPS-origin automated collaboration receipts are complete.
-- **Now — clean connected-journey acceptance.** The connected journey, explicit open/closed registration, repository import, provider-derived Project access, participant projection, Live Deck, Conversation Detail, marginalia, Relay, Project/agent selection, PresenceLease, optional GitHub/Google sign-in, sealed identity credentials, per-delegator grant revalidation, and JIT private checkout authority are implemented. Re-run every required receipt from one clean deployed revision, exercise real provider credentials, and complete the two-person external acceptance.
-- **Next — live GitHub-backed Lobby acceptance.** Prove two independently authorized people see the same imported room, exercise provider revocation/relink and private checkout on a deployed clean revision, and confirm that GitHub remains optional rather than a hosted control-plane dependency.
+- **Now — accept the local-first connected journey.** ADR 0012's device
+  pairing, exact share grant, Codex/Claude adapters, SQLite-outbox Companion,
+  ConversationMirror ingestion, live Project projection, truthful source-owned
+  controls, offline migration, and opt-in OCI provider are implemented. Re-run
+  all receipts from one clean revision, exercise one real current local source,
+  and complete two-person acceptance before making a release claim.
+- **Next — live GitHub-backed Lobby acceptance.** Prove two independently authorized people see the same repository room, exercise rename, App reinstallation, provider revocation/relink, private checkout, and wrong-repository rejection on a deployed clean revision. Confirm that GitHub supplies repository identity and eligibility without becoming the hosted Meanwhile control plane.
 - **Then — Project-scoped execution intelligence.** Bind Brief discovery and reuse to the source Project before adding fact discovery, conflict/supersession, or explicit cross-Project sharing.
 - **Then — an open integration contract.** Let external boards, IDEs, and chat entry points consume the Project and durable execution APIs instead of rebuilding identity, credentials, audit, recovery, and evidence.
 
@@ -717,6 +874,7 @@ external acceptance, review, and publication complete. Later lines are intent.
 - [Shared Project experience](docs/project-collaboration-experience.md) — Alice/Bob storyboard, attention semantics, realistic mock data, and visual comparison contract
 - [Project Lobby and GitHub directory ADR](docs/decisions/0007-project-lobby-and-github-directory.md) — provider authority split, tenant boundary, permission mapping, and delivery slices
 - [Provider-derived Project access ADR](docs/decisions/0011-provider-derived-project-access.md) — owner-scoped registration, repository import, effective participant access, and per-delegator checkout authority
+- [Local Companion and Conversation Mirror ADR](docs/decisions/0012-local-companion-conversation-mirrors.md) — existing Codex/Claude observation, device consent, exact replay, truthful UI custody, and local-first sandboxing
 - [Product constitution](docs/product-constitution.md) — product soul, primary object, laws, and active decision gate
 - [External collaboration acceptance](docs/external-collaboration-acceptance.md) — real two-person journey, independent attestations, and exact release claim boundary
 - [Provider contract](docs/provider-contract.md) — implement and prove a runtime adapter

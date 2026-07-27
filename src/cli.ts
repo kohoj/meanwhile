@@ -3,16 +3,21 @@
 import { constants } from "node:fs"
 import { access, link, lstat, mkdir, unlink } from "node:fs/promises"
 import { delimiter, dirname, join, resolve } from "node:path"
+import { createInterface } from "node:readline/promises"
 import { AgentCatalog } from "./agents/catalog"
 import {
   apiKeyPrefix,
   hashApiKey,
   issueApiKey,
+  issueConnectorDeviceSecret,
   LOCAL_BOOTSTRAP_API_KEY_ID,
   LOCAL_BOOTSTRAP_OWNER_ID,
 } from "./auth"
 import { Meanwhile, MeanwhileError, type Wait } from "./client"
 import { loadConfig, prepareDataDirectories } from "./config"
+import type { CompanionProfile } from "./connectors/companion-service"
+import type { LocalRepositoryCommand } from "./connectors/local-repository"
+import type { LocalConversation } from "./connectors/transcript-discovery"
 import {
   backupDataRoot,
   garbageCollectDataRoot,
@@ -28,9 +33,11 @@ import { SERVICE_VERSION } from "./version"
 import { captureWorkspace, WorkspaceCaptureError } from "./workspace"
 
 const DEFAULT_URL = "http://127.0.0.1:7331"
+const DEFAULT_COMPANION_URL = "http://127.0.0.1:7333"
 
 interface Environment extends Readonly<Record<string, string | undefined>> {
   readonly MEANWHILE_API_KEY?: string
+  readonly MEANWHILE_CONNECTOR_TOKEN?: string
   readonly MEANWHILE_DEFAULT_PROVIDER?: string
   readonly MEANWHILE_URL?: string
 }
@@ -45,6 +52,11 @@ export interface CliOptions {
   readonly stderr?: Write
   readonly signal?: AbortSignal
   readonly wait?: Wait
+  readonly readSecret?: (prompt: string) => Promise<string>
+  /** Opens a browser for device-local connector approval. Injectable for tests and embedders. */
+  readonly openUrl?: (url: URL) => Promise<void>
+  /** Test/embedding seam for device-local git repository inspection. */
+  readonly repositoryCommand?: LocalRepositoryCommand
 }
 
 interface CliContext {
@@ -55,6 +67,9 @@ interface CliContext {
   readonly stderr: Write
   readonly signal: AbortSignal
   readonly wait: Wait
+  readonly readSecret: (prompt: string) => Promise<string>
+  readonly openUrl: (url: URL) => Promise<void>
+  readonly repositoryCommand: LocalRepositoryCommand | undefined
 }
 
 interface CliErrorInput {
@@ -99,6 +114,9 @@ export async function runCli(
     stderr: options.stderr ?? fileSinkWriter(Bun.stderr),
     signal,
     wait: options.wait ?? abortableCliDelay,
+    readSecret: options.readSecret ?? readHiddenTerminalSecret,
+    openUrl: options.openUrl ?? openSystemUrl,
+    repositoryCommand: options.repositoryCommand,
   }
 
   try {
@@ -151,6 +169,8 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
     case "sessions":
       await sessionsCommand(rest, context)
       return 0
+    case "companion":
+      return await companionCommand(rest, context)
     case "cancel":
       await cancelRun(rest, context)
       return 0
@@ -195,6 +215,700 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
     default:
       throw argumentError("Unknown command", { command })
   }
+}
+
+async function companionCommand(args: readonly string[], context: CliContext): Promise<number> {
+  const [subcommand, ...rest] = args
+  if (subcommand === "connect") return connectCompanion(rest, context)
+  if (subcommand === "discover") return discoverCompanionConversations(rest, context)
+  if (subcommand === "install") return installCompanion(rest, context)
+  if (subcommand === "status") return companionStatus(rest, context)
+  if (subcommand === "pause") return mutateCompanionService(rest, context, "pause")
+  if (subcommand === "resume") return mutateCompanionService(rest, context, "resume")
+  if (subcommand === "uninstall") return uninstallCompanion(rest, context)
+  if (subcommand === "daemon") return runCompanionDaemon(rest, context)
+  if (subcommand === "run") return runForegroundCompanion(rest, context)
+  return runForegroundCompanion(args, context)
+}
+
+async function connectCompanion(args: readonly string[], context: CliContext): Promise<number> {
+  const parsed = parseArguments(args, {
+    values: ["source", "transcript", "conversation", "title"],
+    flags: ["foreground", "once", "no-open"],
+  })
+  parsed.requireNoPositionals()
+  const source = parseCompanionSource(requiredOption(parsed, "source"))
+  const home = companionHome(context)
+  const selection = await resolveCompanionSelection(
+    source,
+    parsed.one("transcript"),
+    parsed.one("conversation"),
+    home,
+    context,
+  )
+  const baseUrl = parseBaseUrl(context.environment.MEANWHILE_URL ?? DEFAULT_COMPANION_URL)
+  const issued = await issueConnectorDeviceSecret()
+  const deviceId = crypto.randomUUID()
+  const displayName = `${source === "codex" ? "Codex app" : "Claude Code"} on this Mac`
+  const approvalUrl = connectorApprovalUrl(baseUrl, {
+    deviceId,
+    displayName,
+    source,
+    credentialPrefix: issued.prefix,
+    credentialHash: issued.hash,
+  })
+  const fingerprint = connectorFingerprint(issued.prefix, issued.hash)
+
+  await printJson(context, {
+    type: "companion.authorization_required",
+    url: approvalUrl.toString(),
+    fingerprint,
+    source,
+  })
+  if (!parsed.flag("no-open")) await context.openUrl(approvalUrl)
+
+  const setup = await waitForConnectorAdoption(baseUrl, issued.secret, deviceId, context)
+  const grant = setup.grants[0]
+  const repository = setup.repositories.find(
+    (candidate) => candidate.projectId === grant?.projectId,
+  )
+  if (
+    grant === undefined ||
+    setup.grants.length !== 1 ||
+    repository === undefined ||
+    setup.repositories.length !== 1
+  ) {
+    throw new CliError({
+      code: "CONNECTOR_SETUP_INVALID",
+      message: "Connector approval must authorize exactly one GitHub Project",
+    })
+  }
+  const { requireConversationRepository } = await import("./connectors/local-repository")
+  try {
+    await requireConversationRepository(
+      selection,
+      repository.repositoryFullName,
+      context.repositoryCommand,
+    )
+  } catch (error) {
+    throw new CliError(
+      {
+        code: "COMPANION_PROJECT_REPOSITORY_MISMATCH",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Selected conversation does not belong to the approved Project repository",
+      },
+      { cause: error },
+    )
+  }
+  await printJson(context, {
+    type: "companion.authorized",
+    deviceId,
+    projectId: grant.projectId,
+    fingerprint,
+  })
+
+  const title = parsed.one("title")
+  if (parsed.flag("foreground")) {
+    const { runTranscriptCompanion } = await import("./connectors/companion")
+    const statePath = join(
+      companionStateRoot(home),
+      `${new Bun.CryptoHasher("sha256")
+        .update(
+          `${source}\0${grant.projectId}\0${selection.sourceConversationId}\0${resolve(selection.transcriptPath)}`,
+        )
+        .digest("hex")}.sqlite`,
+    )
+    const progress = await runTranscriptCompanion({
+      baseUrl,
+      connectorSecret: issued.secret,
+      projectId: grant.projectId,
+      source,
+      transcriptPath: selection.transcriptPath,
+      sourceConversationId: selection.sourceConversationId,
+      statePath,
+      ...(title === undefined ? {} : { title }),
+      once: parsed.flag("once"),
+      signal: context.signal,
+      fetch: context.fetch,
+      wait: context.wait,
+      ...(context.repositoryCommand === undefined
+        ? {}
+        : { repositoryCommand: context.repositoryCommand }),
+      onProgress: (value) => printJson(context, { type: "companion.progress", ...value }),
+    })
+    return progress.issues.length === 0 ? 0 : 1
+  }
+
+  const { createCompanionProfile } = await import("./connectors/companion-service")
+  const service = await macOSCompanionService(context)
+  const profile = createCompanionProfile({
+    source,
+    projectId: grant.projectId,
+    transcriptPath: selection.transcriptPath,
+    sourceConversationId: selection.sourceConversationId,
+    stateRoot: companionStateRoot(home),
+    baseUrl,
+    ...(title === undefined ? {} : { title }),
+  })
+  const status = await service.install(profile, issued.secret)
+  await printJson(context, {
+    type: "companion.installed",
+    profileId: profile.id,
+    projectId: profile.projectId,
+    source: profile.source,
+    sourceConversationId: profile.sourceConversationId,
+    installed: status.installed,
+    loaded: status.loaded,
+    credential: "macOS Keychain",
+  })
+  return 0
+}
+
+function connectorApprovalUrl(
+  baseUrl: URL,
+  input: {
+    readonly deviceId: string
+    readonly displayName: string
+    readonly source: "codex" | "claude-code"
+    readonly credentialPrefix: string
+    readonly credentialHash: string
+  },
+): URL {
+  const url = new URL("connect", baseUrl)
+  url.searchParams.set("device", input.deviceId)
+  url.searchParams.set("name", input.displayName)
+  url.searchParams.set("source", input.source)
+  url.searchParams.set("prefix", input.credentialPrefix)
+  url.searchParams.set("verifier", input.credentialHash)
+  return url
+}
+
+function connectorFingerprint(prefix: string, hash: string): string {
+  const digest = hash.slice("sha256:".length)
+  return `${prefix.slice(-4).toUpperCase()}-${digest.slice(0, 4).toUpperCase()}`
+}
+
+async function waitForConnectorAdoption(
+  baseUrl: URL,
+  secret: string,
+  deviceId: string,
+  context: CliContext,
+): Promise<{
+  readonly device: { readonly id: string }
+  readonly grants: readonly { readonly projectId: string }[]
+  readonly repositories: readonly {
+    readonly projectId: string
+    readonly repositoryId: string
+    readonly repositoryFullName: string
+    readonly repositoryUrl: string
+  }[]
+}> {
+  const deadline = performance.now() + 5 * 60_000
+  for (;;) {
+    if (context.signal.aborted) {
+      throw context.signal.reason ?? new DOMException("Aborted", "AbortError")
+    }
+    const response = await context.fetch(new URL("connector/v1/setup", baseUrl), {
+      headers: { Authorization: `Connector ${secret}`, Accept: "application/json" },
+      signal: context.signal,
+    })
+    if (response.ok) {
+      const { ConnectorSetupResponseSchema } = await import("./api/contracts")
+      const setup = ConnectorSetupResponseSchema.parse(await response.json())
+      if (setup.device.id !== deviceId) {
+        throw new CliError({
+          code: "CONNECTOR_SETUP_INVALID",
+          message: "Connector approval resolved to a different device",
+        })
+      }
+      return setup
+    }
+    await response.body?.cancel().catch(() => undefined)
+    if (response.status !== 401 && response.status !== 404) {
+      throw new CliError({
+        code: "CONNECTOR_APPROVAL_FAILED",
+        message: "Connector approval could not be verified",
+        details: { status: response.status },
+      })
+    }
+    if (performance.now() >= deadline) {
+      throw new CliError({
+        code: "CONNECTOR_APPROVAL_EXPIRED",
+        message: "Connector approval expired; run the connect command again",
+      })
+    }
+    await context.wait(750, context.signal)
+  }
+}
+
+async function runForegroundCompanion(
+  args: readonly string[],
+  context: CliContext,
+): Promise<number> {
+  const parsed = parseArguments(args, {
+    values: ["source", "project", "transcript", "conversation", "state", "title"],
+    flags: ["once"],
+  })
+  parsed.requireNoPositionals()
+  const source = parseCompanionSource(requiredOption(parsed, "source"))
+  const projectId = requiredOption(parsed, "project")
+  const secret = await connectorSecret(context)
+  const home = companionHome(context)
+  const { runTranscriptCompanion } = await import("./connectors/companion")
+  const selection = await resolveCompanionSelection(
+    source,
+    parsed.one("transcript"),
+    parsed.one("conversation"),
+    home,
+    context,
+  )
+  const transcriptPath = selection.transcriptPath
+  const statePath =
+    parsed.one("state") ??
+    join(
+      home,
+      ".local",
+      "state",
+      "meanwhile",
+      "companions",
+      `${new Bun.CryptoHasher("sha256")
+        .update(
+          `${source}\0${projectId}\0${selection.sourceConversationId}\0${resolve(transcriptPath)}`,
+        )
+        .digest("hex")}.sqlite`,
+    )
+  const title = parsed.one("title")
+  const progress = await runTranscriptCompanion({
+    baseUrl: parseBaseUrl(context.environment.MEANWHILE_URL ?? DEFAULT_URL),
+    connectorSecret: secret,
+    projectId,
+    source,
+    transcriptPath,
+    statePath,
+    sourceConversationId: selection.sourceConversationId,
+    ...(title === undefined ? {} : { title }),
+    once: parsed.flag("once"),
+    signal: context.signal,
+    fetch: context.fetch,
+    wait: context.wait,
+    ...(context.repositoryCommand === undefined
+      ? {}
+      : { repositoryCommand: context.repositoryCommand }),
+    onProgress: (value) => printJson(context, { type: "companion.progress", ...value }),
+  })
+  return progress.issues.length === 0 ? 0 : 1
+}
+
+async function installCompanion(args: readonly string[], context: CliContext): Promise<number> {
+  const parsed = parseArguments(args, {
+    values: ["source", "project", "transcript", "conversation", "title"],
+  })
+  parsed.requireNoPositionals()
+  const source = parseCompanionSource(requiredOption(parsed, "source"))
+  const projectId = requiredOption(parsed, "project")
+  const secret = await connectorSecret(context)
+  const home = companionHome(context)
+  const { createCompanionProfile } = await import("./connectors/companion-service")
+  const selection = await resolveCompanionSelection(
+    source,
+    parsed.one("transcript"),
+    parsed.one("conversation"),
+    home,
+    context,
+  )
+  const service = await macOSCompanionService(context)
+  const title = parsed.one("title")
+  const profile = createCompanionProfile({
+    source,
+    projectId,
+    transcriptPath: selection.transcriptPath,
+    sourceConversationId: selection.sourceConversationId,
+    stateRoot: companionStateRoot(home),
+    baseUrl: parseBaseUrl(context.environment.MEANWHILE_URL ?? DEFAULT_URL),
+    ...(title === undefined ? {} : { title }),
+  })
+  const status = await service.install(profile, secret)
+  await printJson(context, {
+    profileId: profile.id,
+    source: profile.source,
+    projectId: profile.projectId,
+    transcriptPath: profile.transcriptPath,
+    sourceConversationId: profile.sourceConversationId,
+    installed: status.installed,
+    loaded: status.loaded,
+    credential: "macOS Keychain",
+    statePath: profile.statePath,
+  })
+  return 0
+}
+
+async function discoverCompanionConversations(
+  args: readonly string[],
+  context: CliContext,
+): Promise<number> {
+  const parsed = parseArguments(args, { values: ["source", "limit"] })
+  parsed.requireNoPositionals()
+  const source = parseCompanionSource(requiredOption(parsed, "source"))
+  const limitValue = parsed.one("limit")
+  const limit = limitValue === undefined ? 20 : parseInteger(limitValue, "--limit", 1, 100)
+  const home = companionHome(context)
+  const { defaultTranscriptRoot, localConversationDiscovery } = await import(
+    "./connectors/transcript-discovery"
+  )
+  const items = await localConversationDiscovery(source).discover(
+    defaultTranscriptRoot(source, home),
+    limit,
+  )
+  await printJson(context, { items })
+  return 0
+}
+
+async function companionStatus(args: readonly string[], context: CliContext): Promise<number> {
+  const parsed = parseArguments(args)
+  const service = await macOSCompanionService(context)
+  if (parsed.positionals.length === 0) {
+    await printJson(context, { items: await service.listStatus() })
+    return 0
+  }
+  await printJson(context, { companion: await service.status(parsed.onlyPositional()) })
+  return 0
+}
+
+async function mutateCompanionService(
+  args: readonly string[],
+  context: CliContext,
+  operation: "pause" | "resume",
+): Promise<number> {
+  const profileId = parseArguments(args).onlyPositional()
+  const service = await macOSCompanionService(context)
+  await printJson(context, {
+    companion:
+      operation === "pause" ? await service.pause(profileId) : await service.resume(profileId),
+  })
+  return 0
+}
+
+async function uninstallCompanion(args: readonly string[], context: CliContext): Promise<number> {
+  const parsed = parseArguments(args, { flags: ["purge-state"] })
+  const profileId = parsed.onlyPositional()
+  const service = await macOSCompanionService(context)
+  const purgeState = parsed.flag("purge-state")
+  const receipt = await service.uninstall(profileId, purgeState)
+  await printJson(context, {
+    profileId,
+    uninstalled: true,
+    state: purgeState ? "purged" : "preserved",
+    statePath: receipt.statePath,
+  })
+  return 0
+}
+
+async function runCompanionDaemon(args: readonly string[], context: CliContext): Promise<number> {
+  const parsed = parseArguments(args, { values: ["profile"] })
+  parsed.requireNoPositionals()
+  const service = await macOSCompanionService(context)
+  let profile: CompanionProfile
+  try {
+    profile = await service.profiles.readPath(requiredOption(parsed, "profile"))
+  } catch {
+    await context.stderr(
+      `${JSON.stringify({ error: { code: "COMPANION_PROFILE_REPAIR_REQUIRED", retryable: false } })}\n`,
+    )
+    return 0
+  }
+  const { runTranscriptCompanion } = await import("./connectors/companion")
+  const previous = await service.profiles.readStatus(profile.id)
+  await service.profiles.writeStatus({
+    ...companionRuntimeStatus(profile.id, "starting"),
+    mirrorId: previous?.mirrorId ?? null,
+    acceptedSequence: previous?.acceptedSequence ?? 0,
+    issueCodes: previous?.issueCodes ?? [],
+  })
+  try {
+    const secret = await service.credentials.get(profile.id)
+    await runTranscriptCompanion({
+      baseUrl: profile.baseUrl,
+      connectorSecret: secret,
+      projectId: profile.projectId,
+      source: profile.source,
+      transcriptPath: profile.transcriptPath,
+      sourceConversationId: profile.sourceConversationId,
+      statePath: profile.statePath,
+      ...(profile.title === null ? {} : { title: profile.title }),
+      signal: context.signal,
+      fetch: context.fetch,
+      wait: context.wait,
+      ...(context.repositoryCommand === undefined
+        ? {}
+        : { repositoryCommand: context.repositoryCommand }),
+      onProgress: (value) =>
+        service.profiles.writeStatus({
+          ...companionRuntimeStatus(
+            profile.id,
+            value.issues.length > 0 ? "blocked" : value.caughtUp ? "caught_up" : "following",
+          ),
+          mirrorId: value.mirrorId,
+          acceptedSequence: value.acceptedSequence,
+          issueCodes: value.issues.map((issue) => issue.kind),
+        }),
+    })
+    return 0
+  } catch (error) {
+    if (context.signal.aborted) return 0
+    const errorCode = companionFailureCode(error)
+    const retryable = companionFailureIsRetryable(errorCode)
+    const latest = await service.profiles.readStatus(profile.id)
+    await service.profiles.writeStatus({
+      ...companionRuntimeStatus(profile.id, retryable ? "retrying" : "blocked"),
+      mirrorId: latest?.mirrorId ?? null,
+      acceptedSequence: latest?.acceptedSequence ?? 0,
+      issueCodes: latest?.issueCodes ?? [],
+      errorCode,
+    })
+    await context.stderr(`${JSON.stringify({ error: { code: errorCode, retryable } })}\n`)
+    return retryable ? 75 : 0
+  }
+}
+
+async function macOSCompanionService(context: CliContext) {
+  if (process.platform !== "darwin") {
+    throw new CliError({
+      code: "COMPANION_SERVICE_UNAVAILABLE",
+      message: "Background Companion installation currently requires macOS; use companion run",
+      exitCode: 2,
+    })
+  }
+  const home = companionHome(context)
+  const { CompanionProfileStore, MacOSCompanionService, MacOSKeychainCompanionCredentials } =
+    await import("./connectors/companion-service")
+  const uid = process.getuid?.()
+  if (uid === undefined) throw new Error("The current macOS user identifier is unavailable")
+  return new MacOSCompanionService(
+    new CompanionProfileStore(companionStateRoot(home)),
+    new MacOSKeychainCompanionCredentials(),
+    [resolve(process.execPath), resolve(import.meta.path)],
+    join(home, "Library", "LaunchAgents"),
+    uid,
+  )
+}
+
+function companionRuntimeStatus(
+  profileId: string,
+  phase: "starting" | "following" | "caught_up" | "blocked" | "retrying" | "paused",
+) {
+  return {
+    version: 1 as const,
+    profileId,
+    phase,
+    updatedAt: new Date().toISOString(),
+    mirrorId: null,
+    acceptedSequence: 0,
+    issueCodes: [] as readonly string[],
+    errorCode: null,
+  }
+}
+
+function companionStateRoot(home: string): string {
+  return join(home, ".local", "state", "meanwhile", "companions")
+}
+
+function companionHome(context: CliContext): string {
+  const home = context.environment["HOME"]
+  if (home === undefined || home.length === 0) {
+    throw new CliError({
+      code: "HOME_REQUIRED",
+      message: "A home directory is required",
+      exitCode: 2,
+    })
+  }
+  return resolve(home)
+}
+
+async function connectorSecret(context: CliContext): Promise<string> {
+  const secret =
+    context.environment.MEANWHILE_CONNECTOR_TOKEN ??
+    (await context.readSecret("Connector pairing token: "))
+  if (secret === undefined || !/^mwd_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/.test(secret)) {
+    throw new CliError({
+      code: "CONNECTOR_AUTHENTICATION_REQUIRED",
+      message: "MEANWHILE_CONNECTOR_TOKEN must contain a valid ConnectorDevice secret",
+      exitCode: 2,
+    })
+  }
+  return secret
+}
+
+async function resolveCompanionSelection(
+  source: "codex" | "claude-code",
+  explicitPath: string | undefined,
+  explicitConversationId: string | undefined,
+  home: string,
+  context: CliContext,
+): Promise<LocalConversation> {
+  const { defaultTranscriptRoot, localConversationDiscovery } = await import(
+    "./connectors/transcript-discovery"
+  )
+  const discovery = localConversationDiscovery(source)
+  if (explicitPath !== undefined) {
+    let inspected: LocalConversation
+    try {
+      inspected = await discovery.inspect(explicitPath)
+    } catch (error) {
+      throw new CliError(
+        {
+          code: "TRANSCRIPT_INVALID",
+          message: `The selected file is not a supported ${source} conversation`,
+          exitCode: 2,
+        },
+        { cause: error },
+      )
+    }
+    if (
+      explicitConversationId !== undefined &&
+      inspected.sourceConversationId !== explicitConversationId
+    ) {
+      throw new CliError({
+        code: "TRANSCRIPT_IDENTITY_MISMATCH",
+        message: "The selected transcript does not match --conversation",
+        exitCode: 2,
+      })
+    }
+    return inspected
+  }
+
+  const root = defaultTranscriptRoot(source, home)
+  if (explicitConversationId !== undefined) {
+    const selected = await discovery.find(root, explicitConversationId)
+    if (selected !== null) return selected
+    throw new CliError({
+      code: "TRANSCRIPT_NOT_FOUND",
+      message: `No ${source} transcript matches --conversation`,
+      exitCode: 2,
+    })
+  }
+
+  const items = await discovery.discover(root)
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw companionSelectionRequired(source, items.length)
+  }
+  if (items.length === 0) throw companionSelectionRequired(source, 0)
+  return selectCompanionConversation(items, context)
+}
+
+function companionSelectionRequired(source: "codex" | "claude-code", discovered: number): CliError {
+  return new CliError({
+    code: "TRANSCRIPT_SELECTION_REQUIRED",
+    message:
+      discovered === 0
+        ? `No ${source} conversation is available; open one, then use companion discover`
+        : `${discovered} ${source} conversation${discovered === 1 ? " is" : "s are"} available; select one with --conversation or --transcript`,
+    exitCode: 2,
+    details: { discovered },
+  })
+}
+
+async function selectCompanionConversation(
+  items: readonly LocalConversation[],
+  context: CliContext,
+): Promise<LocalConversation> {
+  await context.stderr(
+    `Select a local conversation:\n${items
+      .map(
+        (item, index) =>
+          `  ${index + 1}. ${terminalText(item.title)}  ${item.modifiedAt}  ${terminalText(item.sourceConversationId)}`,
+      )
+      .join("\n")}\n`,
+  )
+  const terminal = createInterface({ input: process.stdin, output: process.stderr })
+  try {
+    const answer = await terminal.question(`Conversation [1-${items.length}]: `)
+    const index = Number.parseInt(answer.trim(), 10) - 1
+    const selected = items[index]
+    if (selected === undefined || String(index + 1) !== answer.trim()) {
+      throw new CliError({
+        code: "TRANSCRIPT_SELECTION_REQUIRED",
+        message: "A valid conversation selection is required",
+        exitCode: 2,
+      })
+    }
+    return selected
+  } finally {
+    terminal.close()
+  }
+}
+
+function terminalText(value: string): string {
+  return [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) as number
+      return codePoint < 32 || (codePoint >= 127 && codePoint <= 159) ? " " : character
+    })
+    .join("")
+}
+
+async function readHiddenTerminalSecret(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw new CliError({
+      code: "CONNECTOR_AUTHENTICATION_REQUIRED",
+      message: "Set MEANWHILE_CONNECTOR_TOKEN when no interactive terminal is available",
+      exitCode: 2,
+    })
+  }
+  const echoOff = Bun.spawn(["/bin/stty", "-echo"], {
+    stdin: "inherit",
+    stdout: "ignore",
+    stderr: "ignore",
+  })
+  if ((await echoOff.exited) !== 0) {
+    throw new CliError({
+      code: "CONNECTOR_AUTHENTICATION_REQUIRED",
+      message: "The terminal could not securely read the Connector token",
+      exitCode: 2,
+    })
+  }
+  const terminal = createInterface({ input: process.stdin, terminal: false })
+  try {
+    process.stderr.write(prompt)
+    for await (const line of terminal) return line.trim()
+    return ""
+  } finally {
+    terminal.close()
+    const echoOn = Bun.spawn(["/bin/stty", "echo"], {
+      stdin: "inherit",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    await echoOn.exited
+    process.stderr.write("\n")
+  }
+}
+
+function parseCompanionSource(value: string): "codex" | "claude-code" {
+  if (value !== "codex" && value !== "claude-code") {
+    throw argumentError("--source must be codex or claude-code")
+  }
+  return value
+}
+
+function companionFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : ""
+  const remote = /^Connector request failed: ([A-Z0-9_]+)$/.exec(message)?.[1]
+  if (remote !== undefined) return remote
+  if (message.startsWith("Transcript ")) return "TRANSCRIPT_REATTACHMENT_REQUIRED"
+  if (message.includes("outbox") || message.includes("checkpoint")) {
+    return "OUTBOX_REPAIR_REQUIRED"
+  }
+  if (message.includes("Keychain")) return "KEYCHAIN_CREDENTIAL_REQUIRED"
+  if (message.includes("identify exactly one")) return "TRANSCRIPT_IDENTITY_REQUIRED"
+  return "COMPANION_TRANSPORT_FAILED"
+}
+
+function companionFailureIsRetryable(code: string): boolean {
+  return (
+    code === "COMPANION_TRANSPORT_FAILED" || code === "PROVIDER_UNAVAILABLE" || /^HTTP_5/.test(code)
+  )
 }
 
 async function serve(args: readonly string[]): Promise<number> {
@@ -1308,6 +2022,16 @@ function abortableCliDelay(milliseconds: number, signal: AbortSignal): Promise<v
   })
 }
 
+async function openSystemUrl(url: URL): Promise<void> {
+  if (process.platform !== "darwin") return
+  const process_ = Bun.spawn(["/usr/bin/open", url.toString()], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  })
+  await process_.exited.catch(() => undefined)
+}
+
 class ParsedArguments {
   constructor(
     readonly positionals: readonly string[],
@@ -1570,6 +2294,14 @@ Usage:
   meanwhile sessions watch SESSION_ID --json [--after N] [--limit N]
   meanwhile sessions interrupt SESSION_ID
   meanwhile sessions close SESSION_ID
+  meanwhile companion connect --source codex|claude-code [--conversation ID | --transcript FILE]
+  meanwhile companion discover --source codex|claude-code [--limit N]
+  meanwhile companion install --source codex|claude-code --project PROJECT_ID (--conversation ID | --transcript FILE)
+  meanwhile companion status [PROFILE_ID]
+  meanwhile companion pause PROFILE_ID
+  meanwhile companion resume PROFILE_ID
+  meanwhile companion uninstall PROFILE_ID [--purge-state]
+  meanwhile companion run --source codex|claude-code --project PROJECT_ID (--conversation ID | --transcript FILE) [--once]
   meanwhile artifacts list RUN_ID
   meanwhile artifacts get ARTIFACT_ID
   meanwhile artifacts download ARTIFACT_ID [--path PATH] --output FILE
@@ -1621,6 +2353,24 @@ Session options:
   --brief BRIEF_ID            Curated prior evidence for this turn; repeatable
   --conflict POLICY           reject, enqueue, or interrupt_and_send
 
+Companion options:
+  connect                     Select a conversation, approve one Project in the browser, and install
+  discover                    List bounded, safe metadata for local source conversations
+  install                     Store the scoped token in Keychain and start a macOS LaunchAgent
+  status [PROFILE_ID]         Inspect installed, loaded, and durable sync state
+  pause|resume PROFILE_ID     Stop or restart local publication without changing Project grants
+  uninstall PROFILE_ID        Remove the service and Keychain item; preserve outbox by default
+  --purge-state               With uninstall, also remove the local outbox and diagnostic state
+  --source NAME               Existing local source: codex or claude-code
+  --project PROJECT_ID        Explicitly authorized Project share destination
+  --transcript FILE           Explicit JSONL transcript; its source identity is inspected locally
+  --conversation ID           Explicit source conversation ID returned by companion discover
+  --state FILE                Private durable SQLite cursor and outbox
+  --title TITLE               Project-visible linked conversation title
+  --once                      Catch up and exit instead of following continuously
+  --foreground                With connect, follow in this process instead of installing a service
+  --no-open                   Print the approval URL without opening the browser
+
 Deployment options:
   --config NAME=JSON          Target configuration; repeatable
   --secret NAME=env://VAR     Deployment secret reference; repeatable
@@ -1628,9 +2378,13 @@ Deployment options:
 
 The 'serve' command starts the control plane on this host, reading MEANWHILE_*
 configuration (MEANWHILE_API_KEY is required; generate one with 'meanwhile key
-generate'). Every other command is a client that reads MEANWHILE_URL (default
-${DEFAULT_URL}) and MEANWHILE_API_KEY to reach a running control plane.
-The local provider executes on this host and is not a security sandbox.
+generate'). Control commands read MEANWHILE_URL (default ${DEFAULT_URL}) and
+MEANWHILE_API_KEY. The companion uses a separately scoped
+MEANWHILE_CONNECTOR_TOKEN during legacy install or foreground run and never
+receives task lifecycle authority. Prefer companion connect: its credential is
+created locally, its browser approval contains only a verifier, and a macOS
+install moves the secret into Keychain. The LaunchAgent profile and plist
+contain no credential.
 `
 
 if (import.meta.main) process.exitCode = await runCli()

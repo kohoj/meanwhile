@@ -69,10 +69,18 @@ describe("provider-derived Project access", () => {
     ).toMatchObject({ access: "participate", source: "membership" })
   })
 
-  test("does not confuse a different installation or repository with Project access", async () => {
-    const active = await setup({ installationId: "different-installation" })
+  test("uses immutable repository identity and does not confuse another repository", async () => {
+    const active = await setup({ repositoryId: "different-repository" })
     expect(active.getProjectAccess(ownerId, projectId, bobId, now)).toBeNull()
     expect(active.listProjectsForPrincipal(ownerId, bobId, now)).toEqual([])
+  })
+
+  test("keeps access when the same GitHub repository moves to a new installation", async () => {
+    const active = await setup({ installationId: "replacement-installation" })
+    expect(active.getProjectAccess(ownerId, projectId, bobId, now)).toMatchObject({
+      access: "participate",
+      source: "github",
+    })
   })
 
   test("watch grants can observe a room but cannot delegate or write collaboration", async () => {

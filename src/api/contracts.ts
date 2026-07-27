@@ -1,5 +1,10 @@
 import { z } from "zod"
-import { isSafeRepositoryRevision, RUN_STATUSES } from "../domain"
+import {
+  CONNECTOR_SOURCES,
+  CONVERSATION_MIRROR_STATUSES,
+  isSafeRepositoryRevision,
+  RUN_STATUSES,
+} from "../domain"
 import { executionProvenanceSchema } from "../provenance"
 import { relativePath } from "../providers/runtime-provider"
 
@@ -199,6 +204,221 @@ export const ProjectSelectionSchema = z
   .strict()
   .meta({ id: "ProjectSelection" })
 
+export const ConnectorDeviceSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    principalId: IdentifierSchema,
+    displayName: z.string().min(1).max(120),
+    source: z.enum(CONNECTOR_SOURCES),
+    createdAt: timestamp,
+    lastSeenAt: timestamp.nullable(),
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "ConnectorDevice" })
+
+export const CreateConnectorDeviceRequestSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(120),
+    source: z.enum(CONNECTOR_SOURCES),
+  })
+  .strict()
+  .meta({ id: "CreateConnectorDeviceRequest" })
+
+/**
+ * A connector verifier generated on the user's machine. The corresponding
+ * plaintext credential never crosses the browser authorization boundary.
+ */
+export const AdoptConnectorDeviceRequestSchema = z
+  .object({
+    deviceId: IdentifierSchema,
+    displayName: z.string().trim().min(1).max(120),
+    source: z.enum(CONNECTOR_SOURCES),
+    credentialPrefix: z.string().regex(/^mwd_[A-Za-z0-9_-]{12}$/),
+    credentialHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    projectId: IdentifierSchema,
+  })
+  .strict()
+  .meta({ id: "AdoptConnectorDeviceRequest" })
+
+export const ConnectorDeviceResponseSchema = z.object({ device: ConnectorDeviceSchema }).strict()
+export const CreatedConnectorDeviceResponseSchema = z
+  .object({
+    device: ConnectorDeviceSchema,
+    secret: z.string().regex(/^mwd_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/),
+  })
+  .strict()
+export const ConnectorDevicePageSchema = z
+  .object({ items: z.array(ConnectorDeviceSchema).readonly() })
+  .strict()
+
+export const ConversationShareGrantSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    connectorDeviceId: IdentifierSchema,
+    source: z.enum(CONNECTOR_SOURCES),
+    authorizedByPrincipalId: IdentifierSchema,
+    createdAt: timestamp,
+    revokedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "ConversationShareGrant" })
+
+export const CreateConversationShareGrantRequestSchema = z
+  .object({ projectId: IdentifierSchema })
+  .strict()
+  .meta({ id: "CreateConversationShareGrantRequest" })
+
+export const ConversationShareGrantResponseSchema = z
+  .object({ grant: ConversationShareGrantSchema })
+  .strict()
+export const ConversationShareGrantPageSchema = z
+  .object({ items: z.array(ConversationShareGrantSchema).readonly() })
+  .strict()
+
+export const AdoptedConnectorDeviceResponseSchema = z
+  .object({
+    device: ConnectorDeviceSchema,
+    grant: ConversationShareGrantSchema,
+  })
+  .strict()
+  .meta({ id: "AdoptedConnectorDeviceResponse" })
+
+export const ConnectorSetupResponseSchema = z
+  .object({
+    device: ConnectorDeviceSchema,
+    grants: z.array(ConversationShareGrantSchema).readonly(),
+    repositories: z
+      .array(
+        z
+          .object({
+            projectId: IdentifierSchema,
+            repositoryId: z.string().min(1).max(255),
+            repositoryFullName: z.string().min(1).max(511),
+            repositoryUrl: externalUrl,
+          })
+          .strict(),
+      )
+      .readonly(),
+  })
+  .strict()
+  .meta({ id: "ConnectorSetupResponse" })
+
+export const ConversationMirrorSchema = z
+  .object({
+    id: IdentifierSchema,
+    ownerId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    connectorDeviceId: IdentifierSchema,
+    shareGrantId: IdentifierSchema,
+    sharedBy: PrincipalSummarySchema,
+    source: z.enum(CONNECTOR_SOURCES),
+    sourceConversationKey: ArtifactIdentifierSchema,
+    title: z.string().min(1).max(500),
+    status: z.enum(CONVERSATION_MIRROR_STATUSES),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    endedAt: timestamp.nullable(),
+  })
+  .strict()
+  .meta({ id: "ConversationMirror" })
+
+export const UpsertConversationMirrorRequestSchema = z
+  .object({
+    projectId: IdentifierSchema,
+    repositoryId: z.string().min(1).max(255),
+    sourceConversationKey: ArtifactIdentifierSchema,
+    title: z.string().trim().min(1).max(500),
+    status: z.enum(CONVERSATION_MIRROR_STATUSES).default("active"),
+  })
+  .strict()
+  .meta({ id: "UpsertConversationMirrorRequest" })
+
+const MirrorEventInputBaseSchema = z.object({
+  version: z.literal(1),
+  sequence: z.number().int().positive(),
+  source: z.enum(CONNECTOR_SOURCES),
+  sourceCursor: z.string().min(1).max(1024),
+  digest: ArtifactIdentifierSchema,
+  sourceTimestamp: timestamp.nullable(),
+})
+
+const MirrorMessageEventInputSchema = MirrorEventInputBaseSchema.extend({
+  type: z.literal("message"),
+  payload: z
+    .object({
+      role: z.enum(["user", "assistant"]),
+      markdown: z.string().max(256_000),
+      sourceMessageId: z.string().max(512).nullable(),
+      truncated: z.boolean(),
+    })
+    .strict(),
+}).strict()
+const MirrorWorkEventInputSchema = MirrorEventInputBaseSchema.extend({
+  type: z.literal("work"),
+  payload: z
+    .object({
+      kind: z.enum(["reasoning", "tool", "plan", "system"]),
+      title: z.string().max(500).nullable(),
+      body: z.string().max(256_000),
+      status: z.string().max(128).nullable(),
+      sourceItemId: z.string().max(512).nullable(),
+      truncated: z.boolean(),
+    })
+    .strict(),
+}).strict()
+const MirrorStatusEventInputSchema = MirrorEventInputBaseSchema.extend({
+  type: z.literal("source_status"),
+  payload: z
+    .object({
+      status: z.enum(CONVERSATION_MIRROR_STATUSES),
+      reason: z.string().max(2_000).nullable(),
+    })
+    .strict(),
+}).strict()
+
+export const MirrorEventInputSchema = z.discriminatedUnion("type", [
+  MirrorMessageEventInputSchema,
+  MirrorWorkEventInputSchema,
+  MirrorStatusEventInputSchema,
+])
+
+export const AppendMirrorEventsRequestSchema = z
+  .object({ events: z.array(MirrorEventInputSchema).min(1).max(100).readonly() })
+  .strict()
+  .meta({ id: "AppendMirrorEventsRequest" })
+
+const MirrorEventServerShape = {
+  mirrorId: IdentifierSchema,
+  ownerId: IdentifierSchema,
+  createdAt: timestamp,
+} as const
+export const MirrorEventSchema = z.discriminatedUnion("type", [
+  MirrorMessageEventInputSchema.extend(MirrorEventServerShape).strict(),
+  MirrorWorkEventInputSchema.extend(MirrorEventServerShape).strict(),
+  MirrorStatusEventInputSchema.extend(MirrorEventServerShape).strict(),
+])
+
+export const ConversationMirrorResponseSchema = z.object({ mirror: ConversationMirrorSchema })
+export const MirrorEventPageSchema = z
+  .object({
+    items: z.array(MirrorEventSchema).readonly(),
+    nextCursor: z.number().int().positive().nullable(),
+  })
+  .strict()
+export const AppendedMirrorEventsResponseSchema = z
+  .object({ items: z.array(MirrorEventSchema).readonly() })
+  .strict()
+export const MirrorCheckpointSchema = z
+  .object({
+    sequence: z.number().int().nonnegative(),
+    sourceCursor: z.string().min(1).max(1024).nullable(),
+  })
+  .strict()
+
 export const ConnectedOnboardingResponseSchema = z
   .object({
     principal: PrincipalSchema,
@@ -263,7 +483,7 @@ export const TaskRelaySchema = z
     id: IdentifierSchema,
     ownerId: IdentifierSchema,
     projectId: IdentifierSchema,
-    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    task: z.object({ kind: z.enum(["run", "session", "mirror"]), id: IdentifierSchema }).strict(),
     anchorSequence: z.number().int().nonnegative(),
     author: PrincipalSummarySchema,
     recipient: PrincipalSummarySchema,
@@ -276,7 +496,7 @@ export const TaskRelaySchema = z
 
 export const CreateTaskRelayRequestSchema = z
   .object({
-    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    task: z.object({ kind: z.enum(["run", "session", "mirror"]), id: IdentifierSchema }).strict(),
     anchorSequence: z.number().int().nonnegative(),
     recipientPrincipalId: IdentifierSchema,
     body: z.string().trim().min(1).max(2_000),
@@ -322,7 +542,7 @@ export const TaskAnnotationSchema = z
     id: IdentifierSchema,
     ownerId: IdentifierSchema,
     projectId: IdentifierSchema,
-    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    task: z.object({ kind: z.enum(["run", "session", "mirror"]), id: IdentifierSchema }).strict(),
     anchor: TranscriptAnchorSchema,
     author: PrincipalSummarySchema,
     body: z.string().min(1).max(2_000),
@@ -344,7 +564,7 @@ export const TaskAnnotationSchema = z
 
 export const CreateTaskAnnotationRequestSchema = z
   .object({
-    task: z.object({ kind: z.enum(["run", "session"]), id: IdentifierSchema }).strict(),
+    task: z.object({ kind: z.enum(["run", "session", "mirror"]), id: IdentifierSchema }).strict(),
     anchor: TranscriptAnchorSchema,
     body: z.string().trim().min(1).max(2_000),
   })
@@ -1134,15 +1354,27 @@ export const ArtifactPageSchema = z.object({ items: z.array(ArtifactSchema).read
 
 export const ProjectWorkItemSchema = z
   .object({
-    kind: z.enum(["run", "session"]),
+    kind: z.enum(["run", "session", "mirror"]),
     id: IdentifierSchema,
     projectId: IdentifierSchema,
     delegatedBy: PrincipalSummarySchema,
     title: z.string(),
     agentType: z.string(),
-    status: z.union([z.enum(RUN_STATUSES), AgentSessionStatusSchema]),
+    status: z.union([
+      z.enum(RUN_STATUSES),
+      AgentSessionStatusSchema,
+      z.enum(CONVERSATION_MIRROR_STATUSES),
+    ]),
     createdAt: timestamp,
     updatedAt: timestamp,
+    sourceObservation: z
+      .object({
+        source: z.enum(CONNECTOR_SOURCES),
+        syncStatus: z.enum(["waiting", "connected", "stale", "revoked"]),
+        lastSeenAt: timestamp.nullable(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .meta({ id: "ProjectWorkItem" })
@@ -1290,6 +1522,9 @@ export const AuditRecordSchema = z
       "principal_invitation",
       "task_relay",
       "task_annotation",
+      "connector_device",
+      "conversation_share_grant",
+      "conversation_mirror",
       "browser_session",
       "api_key",
       "run",
@@ -1454,6 +1689,19 @@ export type ProjectRepositoryBinding = z.output<typeof ProjectRepositoryBindingS
 export type AgentConnection = z.output<typeof AgentConnectionSchema>
 export type AvailableAgentConnection = z.output<typeof AvailableAgentConnectionSchema>
 export type ProjectSelection = z.output<typeof ProjectSelectionSchema>
+export type ConnectorDevice = z.output<typeof ConnectorDeviceSchema>
+export type CreateConnectorDeviceRequest = z.input<typeof CreateConnectorDeviceRequestSchema>
+export type AdoptConnectorDeviceRequest = z.input<typeof AdoptConnectorDeviceRequestSchema>
+export type ConversationShareGrant = z.output<typeof ConversationShareGrantSchema>
+export type CreateConversationShareGrantRequest = z.input<
+  typeof CreateConversationShareGrantRequestSchema
+>
+export type ConversationMirror = z.output<typeof ConversationMirrorSchema>
+export type UpsertConversationMirrorRequest = z.input<typeof UpsertConversationMirrorRequestSchema>
+export type ConnectorSetupResponse = z.output<typeof ConnectorSetupResponseSchema>
+export type MirrorEventInput = z.input<typeof MirrorEventInputSchema>
+export type MirrorEvent = z.output<typeof MirrorEventSchema>
+export type MirrorEventPage = z.output<typeof MirrorEventPageSchema>
 export type ConnectedOnboarding = z.output<typeof ConnectedOnboardingResponseSchema>
 export type ImportedProjectRepository = z.output<typeof ImportedProjectRepositoryResponseSchema>
 export type ProjectWorkItem = z.output<typeof ProjectWorkItemSchema>

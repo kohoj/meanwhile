@@ -11,6 +11,10 @@ import {
   type AuditRecord,
   type Brief,
   type BrowserSession,
+  type ConnectorDevice,
+  type ConnectorSource,
+  type ConversationMirror,
+  type ConversationShareGrant,
   canTransitionRun,
   type Deployment,
   type DeploymentLogChunk,
@@ -23,6 +27,9 @@ import {
   type IdentityCredential,
   isTerminalRunStatus,
   type JsonObject,
+  MIRROR_EVENT_VERSION,
+  type MirrorEvent,
+  type MirrorEventInput,
   type OwnerRole,
   type PresenceLease,
   type Principal,
@@ -387,7 +394,7 @@ interface WorkBindingRow extends Record<string, Bind> {
 }
 
 interface ProjectWorkRow extends Record<string, Bind> {
-  kind: "run" | "session"
+  kind: "run" | "session" | "mirror"
   id: string
   project_id: string
   delegated_by_principal_id: string
@@ -398,6 +405,79 @@ interface ProjectWorkRow extends Record<string, Bind> {
   status: ProjectWorkItem["status"]
   created_at: string
   updated_at: string
+  source: ConnectorSource | null
+  device_last_seen_at: string | null
+  device_revoked_at: string | null
+  grant_revoked_at: string | null
+}
+
+const CONNECTOR_STALE_AFTER_MS = 45_000
+
+function connectorSyncStatus(
+  row: Pick<ProjectWorkRow, "device_last_seen_at" | "device_revoked_at" | "grant_revoked_at">,
+  at: string,
+): "waiting" | "connected" | "stale" | "revoked" {
+  if (row.device_revoked_at !== null || row.grant_revoked_at !== null) return "revoked"
+  if (row.device_last_seen_at === null) return "waiting"
+  return Date.parse(at) - Date.parse(row.device_last_seen_at) <= CONNECTOR_STALE_AFTER_MS
+    ? "connected"
+    : "stale"
+}
+
+interface ConnectorDeviceRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  principal_id: string
+  display_name: string
+  source: ConnectorSource
+  prefix: string
+  hash: string
+  created_at: string
+  last_seen_at: string | null
+  revoked_at: string | null
+}
+
+interface ConversationMirrorRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  project_id: string
+  connector_device_id: string
+  share_grant_id: string
+  shared_by_principal_id: string
+  shared_by_name: string
+  shared_by_kind: PrincipalKind
+  source: ConnectorSource
+  source_conversation_key: string
+  title: string
+  status: ConversationMirror["status"]
+  created_at: string
+  updated_at: string
+  ended_at: string | null
+}
+
+interface ConversationShareGrantRow extends Record<string, Bind> {
+  id: string
+  owner_id: string
+  project_id: string
+  connector_device_id: string
+  source: ConnectorSource
+  authorized_by_principal_id: string
+  created_at: string
+  revoked_at: string | null
+}
+
+interface MirrorEventRow extends Record<string, Bind> {
+  owner_id: string
+  mirror_id: string
+  sequence: number
+  version: typeof MIRROR_EVENT_VERSION
+  source: ConnectorSource
+  source_cursor: string
+  digest: string
+  type: MirrorEvent["type"]
+  payload_json: string
+  source_timestamp: string | null
+  created_at: string
 }
 
 interface BrowserSessionRow extends Record<string, Bind> {
@@ -519,6 +599,7 @@ interface TaskRelayRow extends Record<string, Bind> {
   project_id: string
   run_id: string | null
   session_id: string | null
+  mirror_id: string | null
   anchor_sequence: number
   author_principal_id: string
   author_name: string
@@ -537,6 +618,7 @@ interface TaskAnnotationRow extends Record<string, Bind> {
   project_id: string
   run_id: string | null
   session_id: string | null
+  mirror_id: string | null
   anchor_sequence: number
   anchor_block_id: string
   anchor_start_offset: number
@@ -904,14 +986,73 @@ const projectSelectionFromRow = (row: ProjectSelectionRow): ProjectSelection => 
   hiddenAt: row.hidden_at,
 })
 
+const connectorDeviceFromRow = (row: ConnectorDeviceRow): ConnectorDevice => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  principalId: row.principal_id,
+  displayName: row.display_name,
+  source: row.source,
+  createdAt: row.created_at,
+  lastSeenAt: row.last_seen_at,
+  revokedAt: row.revoked_at,
+})
+
+const conversationMirrorFromRow = (row: ConversationMirrorRow): ConversationMirror => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  projectId: row.project_id,
+  connectorDeviceId: row.connector_device_id,
+  shareGrantId: row.share_grant_id,
+  sharedBy: {
+    id: row.shared_by_principal_id,
+    displayName: row.shared_by_name,
+    kind: row.shared_by_kind,
+  },
+  source: row.source,
+  sourceConversationKey: row.source_conversation_key,
+  title: row.title,
+  status: row.status,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  endedAt: row.ended_at,
+})
+
+const conversationShareGrantFromRow = (row: ConversationShareGrantRow): ConversationShareGrant => ({
+  id: row.id,
+  ownerId: row.owner_id,
+  projectId: row.project_id,
+  connectorDeviceId: row.connector_device_id,
+  source: row.source,
+  authorizedByPrincipalId: row.authorized_by_principal_id,
+  createdAt: row.created_at,
+  revokedAt: row.revoked_at,
+})
+
+const mirrorEventFromRow = (row: MirrorEventRow): MirrorEvent =>
+  ({
+    version: row.version,
+    mirrorId: row.mirror_id,
+    ownerId: row.owner_id,
+    sequence: row.sequence,
+    source: row.source,
+    sourceCursor: row.source_cursor,
+    digest: row.digest,
+    sourceTimestamp: row.source_timestamp,
+    createdAt: row.created_at,
+    type: row.type,
+    payload: parse(row.payload_json),
+  }) as MirrorEvent
+
 const taskRelayFromRow = (row: TaskRelayRow): TaskRelay => ({
   id: row.id,
   ownerId: row.owner_id,
   projectId: row.project_id,
   task:
-    row.run_id === null
-      ? { kind: "session", id: row.session_id as string }
-      : { kind: "run", id: row.run_id },
+    row.run_id !== null
+      ? { kind: "run", id: row.run_id }
+      : row.session_id !== null
+        ? { kind: "session", id: row.session_id }
+        : { kind: "mirror", id: row.mirror_id as string },
   anchorSequence: row.anchor_sequence,
   author: {
     id: row.author_principal_id,
@@ -933,9 +1074,11 @@ const taskAnnotationFromRow = (row: TaskAnnotationRow): TaskAnnotation => ({
   ownerId: row.owner_id,
   projectId: row.project_id,
   task:
-    row.run_id === null
-      ? { kind: "session", id: row.session_id as string }
-      : { kind: "run", id: row.run_id },
+    row.run_id !== null
+      ? { kind: "run", id: row.run_id }
+      : row.session_id !== null
+        ? { kind: "session", id: row.session_id }
+        : { kind: "mirror", id: row.mirror_id as string },
   anchor: {
     sequence: row.anchor_sequence,
     blockId: row.anchor_block_id,
@@ -1925,6 +2068,19 @@ export class Store {
     return row === null ? null : projectFromRow(row)
   }
 
+  getActiveProjectRepositoryBinding(
+    ownerId: string,
+    projectId: string,
+  ): ProjectRepositoryBinding | null {
+    const row = this.database
+      .query<ProjectRepositoryBindingRow, [string, string]>(`
+        SELECT * FROM project_repository_bindings
+        WHERE owner_id=? AND project_id=? AND revoked_at IS NULL
+      `)
+      .get(ownerId, projectId)
+    return row === null ? null : projectRepositoryBindingFromRow(row)
+  }
+
   listProjectAccessesForPrincipal(
     ownerId: string,
     principalId: string,
@@ -1960,7 +2116,6 @@ export class Store {
           JOIN project_repository_bindings binding
             ON binding.owner_id=grant.owner_id
             AND binding.provider=grant.provider
-            AND binding.installation_id=grant.installation_id
             AND binding.repository_id=grant.repository_id
           WHERE grant.owner_id=? AND grant.principal_id=?
             AND grant.revoked_at IS NULL AND grant.expires_at>?
@@ -2157,7 +2312,6 @@ export class Store {
           JOIN external_project_grants grant
             ON grant.owner_id=binding.owner_id
             AND grant.provider=binding.provider
-            AND grant.installation_id=binding.installation_id
             AND grant.repository_id=binding.repository_id
           JOIN external_identities identity
             ON identity.owner_id=grant.owner_id
@@ -2410,12 +2564,14 @@ export class Store {
   ): readonly ProjectWorkItem[] {
     this.requireProjectAccess(ownerId, projectId, principalId, at)
     return this.database
-      .query<ProjectWorkRow, [string, string, string, string]>(`
+      .query<ProjectWorkRow, [string, string, string, string, string, string]>(`
         SELECT * FROM (
           SELECT 'run' AS kind,run.id,binding.project_id,
             binding.delegated_by_principal_id,binding.delegated_by_name,
             binding.delegated_by_kind,run.prompt AS title,run.agent_type,
-            run.status,run.created_at,run.updated_at
+            run.status,run.created_at,run.updated_at,
+            NULL AS source,NULL AS device_last_seen_at,
+            NULL AS device_revoked_at,NULL AS grant_revoked_at
           FROM runs run
           JOIN run_project_bindings binding
             ON binding.owner_id=run.owner_id AND binding.run_id=run.id
@@ -2430,15 +2586,31 @@ export class Store {
                 ORDER BY turn.sequence LIMIT 1),
               'An open ' || session.agent_type || ' session'
             ) AS title,
-            session.agent_type,session.status,session.created_at,session.updated_at
+            session.agent_type,session.status,session.created_at,session.updated_at,
+            NULL AS source,NULL AS device_last_seen_at,
+            NULL AS device_revoked_at,NULL AS grant_revoked_at
           FROM agent_sessions session
           JOIN session_project_bindings binding
             ON binding.owner_id=session.owner_id AND binding.session_id=session.id
           WHERE session.owner_id=? AND binding.project_id=?
+          UNION ALL
+          SELECT 'mirror' AS kind,mirror.id,mirror.project_id,
+            mirror.shared_by_principal_id,mirror.shared_by_name,mirror.shared_by_kind,
+            mirror.title,mirror.source AS agent_type,mirror.status,
+            mirror.created_at,mirror.updated_at,mirror.source,
+            device.last_seen_at AS device_last_seen_at,
+            device.revoked_at AS device_revoked_at,
+            grant.revoked_at AS grant_revoked_at
+          FROM conversation_mirrors mirror
+          JOIN connector_devices device
+            ON device.owner_id=mirror.owner_id AND device.id=mirror.connector_device_id
+          JOIN conversation_share_grants grant
+            ON grant.owner_id=mirror.owner_id AND grant.id=mirror.share_grant_id
+          WHERE mirror.owner_id=? AND mirror.project_id=?
         )
         ORDER BY updated_at DESC,kind DESC,id DESC LIMIT 100
       `)
-      .all(ownerId, projectId, ownerId, projectId)
+      .all(ownerId, projectId, ownerId, projectId, ownerId, projectId)
       .map((row) => ({
         kind: row.kind,
         id: row.id,
@@ -2453,12 +2625,657 @@ export class Store {
         status: row.status,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        ...(row.kind !== "mirror" || row.source === null
+          ? {}
+          : {
+              sourceObservation: {
+                source: row.source,
+                syncStatus: connectorSyncStatus(row, at),
+                lastSeenAt: row.device_last_seen_at,
+              },
+            }),
       }))
   }
 
+  createConnectorDeviceWithAudit(input: {
+    readonly device: ConnectorDevice & { readonly prefix: string; readonly hash: string }
+    readonly audit: AuditRecord
+  }): ConnectorDevice {
+    return this.database
+      .transaction(() => {
+        this.database
+          .query(`
+            INSERT INTO connector_devices(
+              id,owner_id,principal_id,display_name,source,prefix,hash,
+              created_at,last_seen_at,revoked_at
+            ) VALUES (?,?,?,?,?,?,?,?,NULL,NULL)
+          `)
+          .run(
+            input.device.id,
+            input.device.ownerId,
+            input.device.principalId,
+            input.device.displayName,
+            input.device.source,
+            input.device.prefix,
+            input.device.hash,
+            input.device.createdAt,
+          )
+        this.insertAudit(input.audit)
+        return this.getConnectorDevice(input.device.ownerId, input.device.id) as ConnectorDevice
+      })
+      .immediate()
+  }
+
+  /**
+   * Atomically adopts a device-local credential verifier and its first Project
+   * grant. Exact retries return the original pair without duplicating audits;
+   * a reused device identity or verifier with different custody fails closed.
+   */
+  adoptConnectorDeviceWithGrantAndAudits(input: {
+    readonly device: ConnectorDevice & { readonly prefix: string; readonly hash: string }
+    readonly grant: ConversationShareGrant
+    readonly deviceAudit: AuditRecord
+    readonly grantAudit: AuditRecord
+  }): { readonly device: ConnectorDevice; readonly grant: ConversationShareGrant } {
+    return this.database
+      .transaction(() => {
+        const existing = this.database
+          .query<ConnectorDeviceRow, [string]>("SELECT * FROM connector_devices WHERE id=?")
+          .get(input.device.id)
+        if (existing !== null) {
+          const sameDevice =
+            existing.owner_id === input.device.ownerId &&
+            existing.principal_id === input.device.principalId &&
+            existing.display_name === input.device.displayName &&
+            existing.source === input.device.source &&
+            existing.prefix === input.device.prefix &&
+            existing.hash === input.device.hash &&
+            existing.revoked_at === null
+          const grants = this.database
+            .query<ConversationShareGrantRow, [string, string]>(`
+              SELECT * FROM conversation_share_grants
+              WHERE owner_id=? AND connector_device_id=?
+              ORDER BY created_at,id
+            `)
+            .all(input.device.ownerId, input.device.id)
+          const matching = grants.find(
+            (grant) =>
+              grant.project_id === input.grant.projectId &&
+              grant.source === input.grant.source &&
+              grant.authorized_by_principal_id === input.grant.authorizedByPrincipalId &&
+              grant.revoked_at === null,
+          )
+          const onlyRequestedProject = grants.every(
+            (grant) =>
+              grant.project_id === input.grant.projectId && grant.source === input.grant.source,
+          )
+          if (!sameDevice || matching === undefined || !onlyRequestedProject) {
+            throw new AppError({
+              code: "CONNECTOR_ADOPTION_CONFLICT",
+              status: 409,
+              message: "Connector device adoption conflicts with an existing registration",
+            })
+          }
+          return {
+            device: connectorDeviceFromRow(existing),
+            grant: conversationShareGrantFromRow(matching),
+          }
+        }
+
+        const verifierOwner = this.database
+          .query<{ id: string }, [string, string]>(
+            "SELECT id FROM connector_devices WHERE prefix=? OR hash=? LIMIT 1",
+          )
+          .get(input.device.prefix, input.device.hash)
+        if (verifierOwner !== null) {
+          throw new AppError({
+            code: "CONNECTOR_ADOPTION_CONFLICT",
+            status: 409,
+            message: "Connector verifier is already registered",
+          })
+        }
+
+        this.database
+          .query(`
+            INSERT INTO connector_devices(
+              id,owner_id,principal_id,display_name,source,prefix,hash,
+              created_at,last_seen_at,revoked_at
+            ) VALUES (?,?,?,?,?,?,?,?,NULL,NULL)
+          `)
+          .run(
+            input.device.id,
+            input.device.ownerId,
+            input.device.principalId,
+            input.device.displayName,
+            input.device.source,
+            input.device.prefix,
+            input.device.hash,
+            input.device.createdAt,
+          )
+        this.database
+          .query(`
+            INSERT INTO conversation_share_grants(
+              id,owner_id,project_id,connector_device_id,source,
+              authorized_by_principal_id,created_at,revoked_at
+            ) VALUES (?,?,?,?,?,?,?,NULL)
+          `)
+          .run(
+            input.grant.id,
+            input.grant.ownerId,
+            input.grant.projectId,
+            input.grant.connectorDeviceId,
+            input.grant.source,
+            input.grant.authorizedByPrincipalId,
+            input.grant.createdAt,
+          )
+        this.insertAudit(input.deviceAudit)
+        this.insertAudit(input.grantAudit)
+        return {
+          device: connectorDeviceFromRow({
+            id: input.device.id,
+            owner_id: input.device.ownerId,
+            principal_id: input.device.principalId,
+            display_name: input.device.displayName,
+            source: input.device.source,
+            prefix: input.device.prefix,
+            hash: input.device.hash,
+            created_at: input.device.createdAt,
+            last_seen_at: null,
+            revoked_at: null,
+          }),
+          grant: input.grant,
+        }
+      })
+      .immediate()
+  }
+
+  getConnectorDevice(ownerId: string, id: string): ConnectorDevice | null {
+    const row = this.database
+      .query<ConnectorDeviceRow, [string, string]>(
+        "SELECT * FROM connector_devices WHERE owner_id=? AND id=?",
+      )
+      .get(ownerId, id)
+    return row === null ? null : connectorDeviceFromRow(row)
+  }
+
+  listConnectorDevicesForPrincipal(
+    ownerId: string,
+    principalId: string,
+  ): readonly ConnectorDevice[] {
+    return this.database
+      .query<ConnectorDeviceRow, [string, string]>(`
+        SELECT * FROM connector_devices WHERE owner_id=? AND principal_id=?
+        ORDER BY created_at DESC,id
+      `)
+      .all(ownerId, principalId)
+      .map(connectorDeviceFromRow)
+  }
+
+  revokeConnectorDeviceWithAudit(input: {
+    readonly ownerId: string
+    readonly id: string
+    readonly principalId: string
+    readonly at: string
+    readonly audit: AuditRecord
+  }): ConnectorDevice | null {
+    return this.database
+      .transaction(() => {
+        const existing = this.database
+          .query<ConnectorDeviceRow, [string, string, string]>(`
+            SELECT * FROM connector_devices WHERE owner_id=? AND id=? AND principal_id=?
+          `)
+          .get(input.ownerId, input.id, input.principalId)
+        if (existing === null) return null
+        if (existing.revoked_at !== null) return connectorDeviceFromRow(existing)
+        this.database
+          .query("UPDATE connector_devices SET revoked_at=? WHERE owner_id=? AND id=?")
+          .run(input.at, input.ownerId, input.id)
+        this.database
+          .query(`
+            UPDATE conversation_mirrors SET status='disconnected',updated_at=?
+            WHERE owner_id=? AND connector_device_id=? AND status IN ('active','idle')
+          `)
+          .run(input.at, input.ownerId, input.id)
+        this.insertAudit(input.audit)
+        return { ...connectorDeviceFromRow(existing), revokedAt: input.at }
+      })
+      .immediate()
+  }
+
+  async findConnectorDevicesByPrefix(prefix: string): Promise<
+    readonly {
+      id: string
+      ownerId: string
+      principalId: string
+      ownerRole: OwnerRole
+      prefix: string
+      hash: string
+      revokedAt: Date | null
+      principalDisabledAt: Date | null
+    }[]
+  > {
+    return this.database
+      .query<
+        ConnectorDeviceRow & { owner_role: OwnerRole; principal_disabled_at: string | null },
+        [string]
+      >(`
+        SELECT device.*,principal.owner_role,principal.disabled_at AS principal_disabled_at
+        FROM connector_devices device
+        JOIN principals principal
+          ON principal.owner_id=device.owner_id AND principal.id=device.principal_id
+        WHERE device.prefix=?
+      `)
+      .all(prefix)
+      .map((row) => ({
+        id: row.id,
+        ownerId: row.owner_id,
+        principalId: row.principal_id,
+        ownerRole: row.owner_role,
+        prefix: row.prefix,
+        hash: row.hash,
+        revokedAt: row.revoked_at === null ? null : new Date(row.revoked_at),
+        principalDisabledAt:
+          row.principal_disabled_at === null ? null : new Date(row.principal_disabled_at),
+      }))
+  }
+
+  touchConnectorDevice(id: string, at: string): void {
+    this.database
+      .query("UPDATE connector_devices SET last_seen_at=? WHERE id=? AND revoked_at IS NULL")
+      .run(at, id)
+  }
+
+  createConversationShareGrantWithAudit(input: {
+    readonly grant: ConversationShareGrant
+    readonly audit: AuditRecord
+  }): ConversationShareGrant {
+    return this.database
+      .transaction(() => {
+        const existing = this.database
+          .query<ConversationShareGrantRow, [string, string, string, string]>(`
+            SELECT * FROM conversation_share_grants
+            WHERE owner_id=? AND connector_device_id=? AND project_id=? AND source=?
+              AND revoked_at IS NULL
+          `)
+          .get(
+            input.grant.ownerId,
+            input.grant.connectorDeviceId,
+            input.grant.projectId,
+            input.grant.source,
+          )
+        if (existing !== null) return conversationShareGrantFromRow(existing)
+        this.database
+          .query(`
+            INSERT INTO conversation_share_grants(
+              id,owner_id,project_id,connector_device_id,source,
+              authorized_by_principal_id,created_at,revoked_at
+            ) VALUES (?,?,?,?,?,?,?,NULL)
+          `)
+          .run(
+            input.grant.id,
+            input.grant.ownerId,
+            input.grant.projectId,
+            input.grant.connectorDeviceId,
+            input.grant.source,
+            input.grant.authorizedByPrincipalId,
+            input.grant.createdAt,
+          )
+        this.insertAudit(input.audit)
+        return input.grant
+      })
+      .immediate()
+  }
+
+  getActiveConversationShareGrant(
+    ownerId: string,
+    connectorDeviceId: string,
+    projectId: string,
+    source: ConnectorSource,
+  ): ConversationShareGrant | null {
+    const row = this.database
+      .query<ConversationShareGrantRow, [string, string, string, string]>(`
+        SELECT * FROM conversation_share_grants
+        WHERE owner_id=? AND connector_device_id=? AND project_id=? AND source=?
+          AND revoked_at IS NULL
+      `)
+      .get(ownerId, connectorDeviceId, projectId, source)
+    return row === null ? null : conversationShareGrantFromRow(row)
+  }
+
+  listConversationShareGrantsForPrincipal(
+    ownerId: string,
+    principalId: string,
+  ): readonly ConversationShareGrant[] {
+    return this.database
+      .query<ConversationShareGrantRow, [string, string]>(`
+        SELECT grant.* FROM conversation_share_grants grant
+        JOIN connector_devices device
+          ON device.owner_id=grant.owner_id AND device.id=grant.connector_device_id
+        WHERE grant.owner_id=? AND device.principal_id=?
+        ORDER BY grant.created_at DESC,grant.id
+      `)
+      .all(ownerId, principalId)
+      .map(conversationShareGrantFromRow)
+  }
+
+  listActiveConversationShareGrantsForDevice(
+    ownerId: string,
+    connectorDeviceId: string,
+  ): readonly ConversationShareGrant[] {
+    return this.database
+      .query<ConversationShareGrantRow, [string, string]>(`
+        SELECT * FROM conversation_share_grants
+        WHERE owner_id=? AND connector_device_id=? AND revoked_at IS NULL
+        ORDER BY created_at,id
+      `)
+      .all(ownerId, connectorDeviceId)
+      .map(conversationShareGrantFromRow)
+  }
+
+  revokeConversationShareGrantWithAudit(input: {
+    readonly ownerId: string
+    readonly grantId: string
+    readonly principalId: string
+    readonly at: string
+    readonly audit: AuditRecord
+  }): ConversationShareGrant | null {
+    return this.database
+      .transaction(() => {
+        const existing = this.database
+          .query<ConversationShareGrantRow, [string, string, string]>(`
+            SELECT grant.* FROM conversation_share_grants grant
+            JOIN connector_devices device
+              ON device.owner_id=grant.owner_id AND device.id=grant.connector_device_id
+            WHERE grant.owner_id=? AND grant.id=? AND device.principal_id=?
+          `)
+          .get(input.ownerId, input.grantId, input.principalId)
+        if (existing === null) return null
+        if (existing.revoked_at !== null) return conversationShareGrantFromRow(existing)
+        this.database
+          .query("UPDATE conversation_share_grants SET revoked_at=? WHERE owner_id=? AND id=?")
+          .run(input.at, input.ownerId, input.grantId)
+        this.database
+          .query(`
+            UPDATE conversation_mirrors SET status='disconnected',updated_at=?
+            WHERE owner_id=? AND share_grant_id=? AND status IN ('active','idle')
+          `)
+          .run(input.at, input.ownerId, input.grantId)
+        this.insertAudit(input.audit)
+        return { ...conversationShareGrantFromRow(existing), revokedAt: input.at }
+      })
+      .immediate()
+  }
+
+  upsertConversationMirrorWithAudit(input: {
+    readonly mirror: ConversationMirror
+    readonly audit: AuditRecord
+  }): ConversationMirror {
+    return this.database
+      .transaction(() => {
+        const existing = this.database
+          .query<ConversationMirrorRow, [string, string, string, string]>(`
+            SELECT * FROM conversation_mirrors
+            WHERE owner_id=? AND connector_device_id=? AND source=? AND source_conversation_key=?
+          `)
+          .get(
+            input.mirror.ownerId,
+            input.mirror.connectorDeviceId,
+            input.mirror.source,
+            input.mirror.sourceConversationKey,
+          )
+        if (existing !== null) {
+          if (
+            existing.project_id !== input.mirror.projectId ||
+            existing.shared_by_principal_id !== input.mirror.sharedBy.id
+          ) {
+            throw new AppError({
+              code: "IDEMPOTENCY_CONFLICT",
+              status: 409,
+              message: "Source conversation is already linked to a different Project",
+            })
+          }
+          if (existing.share_grant_id !== input.mirror.shareGrantId) {
+            this.database
+              .query(`
+                UPDATE conversation_mirrors
+                SET share_grant_id=?,title=?,status=?,updated_at=?,ended_at=?
+                WHERE owner_id=? AND id=?
+              `)
+              .run(
+                input.mirror.shareGrantId,
+                input.mirror.title,
+                input.mirror.status,
+                input.mirror.updatedAt,
+                input.mirror.endedAt,
+                input.mirror.ownerId,
+                existing.id,
+              )
+            this.insertAudit(input.audit)
+            return this.getConversationMirror(
+              input.mirror.ownerId,
+              existing.id,
+            ) as ConversationMirror
+          }
+          return conversationMirrorFromRow(existing)
+        }
+        this.database
+          .query(`
+            INSERT INTO conversation_mirrors(
+              id,owner_id,project_id,connector_device_id,share_grant_id,
+              shared_by_principal_id,shared_by_name,shared_by_kind,
+              source,source_conversation_key,title,status,created_at,updated_at,ended_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          `)
+          .run(
+            input.mirror.id,
+            input.mirror.ownerId,
+            input.mirror.projectId,
+            input.mirror.connectorDeviceId,
+            input.mirror.shareGrantId,
+            input.mirror.sharedBy.id,
+            input.mirror.sharedBy.displayName,
+            input.mirror.sharedBy.kind,
+            input.mirror.source,
+            input.mirror.sourceConversationKey,
+            input.mirror.title,
+            input.mirror.status,
+            input.mirror.createdAt,
+            input.mirror.updatedAt,
+            input.mirror.endedAt,
+          )
+        this.insertAudit(input.audit)
+        return input.mirror
+      })
+      .immediate()
+  }
+
+  getConversationMirror(ownerId: string, id: string): ConversationMirror | null {
+    const row = this.database
+      .query<ConversationMirrorRow, [string, string]>(
+        "SELECT * FROM conversation_mirrors WHERE owner_id=? AND id=?",
+      )
+      .get(ownerId, id)
+    return row === null ? null : conversationMirrorFromRow(row)
+  }
+
+  getConversationMirrorForPrincipal(
+    ownerId: string,
+    principalId: string,
+    id: string,
+    at: string = new Date().toISOString(),
+  ): ConversationMirror | null {
+    const mirror = this.getConversationMirror(ownerId, id)
+    if (
+      mirror === null ||
+      this.getProjectAccess(ownerId, mirror.projectId, principalId, at) === null
+    ) {
+      return null
+    }
+    return mirror
+  }
+
+  appendMirrorEvents(input: {
+    readonly ownerId: string
+    readonly mirrorId: string
+    readonly connectorDeviceId: string
+    readonly events: readonly MirrorEventInput[]
+    readonly acceptedAt: string
+  }): readonly MirrorEvent[] {
+    return this.database
+      .transaction(() => {
+        const mirror = this.database
+          .query<ConversationMirrorRow, [string, string, string]>(`
+            SELECT mirror.* FROM conversation_mirrors mirror
+            JOIN connector_devices device
+              ON device.owner_id=mirror.owner_id AND device.id=mirror.connector_device_id
+            JOIN conversation_share_grants grant
+              ON grant.owner_id=mirror.owner_id AND grant.id=mirror.share_grant_id
+            WHERE mirror.owner_id=? AND mirror.id=? AND mirror.connector_device_id=?
+              AND device.revoked_at IS NULL AND grant.revoked_at IS NULL
+          `)
+          .get(input.ownerId, input.mirrorId, input.connectorDeviceId)
+        if (mirror === null) throw new AppError({ code: "NOT_FOUND", message: "Mirror not found" })
+        let sequence =
+          this.database
+            .query<{ sequence: number }, [string]>(`
+              SELECT sequence FROM mirror_events WHERE mirror_id=? ORDER BY sequence DESC LIMIT 1
+            `)
+            .get(input.mirrorId)?.sequence ?? 0
+        const accepted: MirrorEvent[] = []
+        let inserted = false
+        for (const event of input.events) {
+          if (event.source !== mirror.source) {
+            throw new AppError({ code: "INVALID_REQUEST", message: "Mirror source does not match" })
+          }
+          const payloadJson = stringify(event.payload)
+          const existing = this.database
+            .query<MirrorEventRow, [string, number]>(`
+              SELECT * FROM mirror_events WHERE mirror_id=? AND sequence=?
+            `)
+            .get(input.mirrorId, event.sequence)
+          if (existing !== null) {
+            if (
+              existing.source_cursor !== event.sourceCursor ||
+              existing.digest !== event.digest ||
+              existing.type !== event.type ||
+              existing.payload_json !== payloadJson ||
+              existing.source_timestamp !== event.sourceTimestamp
+            ) {
+              throw new AppError({
+                code: "IDEMPOTENCY_CONFLICT",
+                status: 409,
+                message: "Source cursor was replayed with different transcript content",
+              })
+            }
+            accepted.push(mirrorEventFromRow(existing))
+            continue
+          }
+          if (event.sequence !== sequence + 1) {
+            throw new AppError({
+              code: "EVENT_SEQUENCE_GAP",
+              status: 409,
+              message: "Mirror event sequence is not contiguous",
+              details: { expected: sequence + 1, received: event.sequence },
+            })
+          }
+          const cursorOwner = this.database
+            .query<{ sequence: number }, [string, string]>(`
+              SELECT sequence FROM mirror_events WHERE mirror_id=? AND source_cursor=?
+            `)
+            .get(input.mirrorId, event.sourceCursor)
+          if (cursorOwner !== null) {
+            throw new AppError({
+              code: "IDEMPOTENCY_CONFLICT",
+              status: 409,
+              message: "Source cursor is already bound to another event sequence",
+            })
+          }
+          sequence = event.sequence
+          this.database
+            .query(`
+              INSERT INTO mirror_events(
+                owner_id,mirror_id,sequence,version,source,source_cursor,digest,
+                type,payload_json,source_timestamp,created_at
+              ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            `)
+            .run(
+              input.ownerId,
+              input.mirrorId,
+              event.sequence,
+              MIRROR_EVENT_VERSION,
+              event.source,
+              event.sourceCursor,
+              event.digest,
+              event.type,
+              payloadJson,
+              event.sourceTimestamp,
+              input.acceptedAt,
+            )
+          if (event.type === "source_status") {
+            this.database
+              .query(`
+                UPDATE conversation_mirrors SET status=?,updated_at=?,ended_at=?
+                WHERE owner_id=? AND id=?
+              `)
+              .run(
+                event.payload.status,
+                input.acceptedAt,
+                event.payload.status === "ended" ? input.acceptedAt : null,
+                input.ownerId,
+                input.mirrorId,
+              )
+          }
+          inserted = true
+          accepted.push({
+            ...event,
+            ownerId: input.ownerId,
+            mirrorId: input.mirrorId,
+            createdAt: input.acceptedAt,
+          } as MirrorEvent)
+        }
+        if (inserted) {
+          this.database
+            .query("UPDATE conversation_mirrors SET updated_at=? WHERE owner_id=? AND id=?")
+            .run(input.acceptedAt, input.ownerId, input.mirrorId)
+        }
+        return accepted
+      })
+      .immediate()
+  }
+
+  listMirrorEvents(
+    ownerId: string,
+    mirrorId: string,
+    after: number,
+    limit: number,
+  ): readonly MirrorEvent[] {
+    return this.database
+      .query<MirrorEventRow, [string, string, number, number]>(`
+        SELECT * FROM mirror_events WHERE owner_id=? AND mirror_id=? AND sequence>?
+        ORDER BY sequence LIMIT ?
+      `)
+      .all(ownerId, mirrorId, after, limit)
+      .map(mirrorEventFromRow)
+  }
+
+  latestMirrorEvent(ownerId: string, mirrorId: string): MirrorEvent | null {
+    const row = this.database
+      .query<MirrorEventRow, [string, string]>(`
+        SELECT * FROM mirror_events WHERE owner_id=? AND mirror_id=?
+        ORDER BY sequence DESC LIMIT 1
+      `)
+      .get(ownerId, mirrorId)
+    return row === null ? null : mirrorEventFromRow(row)
+  }
+
   taskBelongsToProject(ownerId: string, projectId: string, task: TaskRelay["task"]): boolean {
-    const table = task.kind === "run" ? "run_project_bindings" : "session_project_bindings"
-    const column = task.kind === "run" ? "run_id" : "session_id"
+    const table =
+      task.kind === "run"
+        ? "run_project_bindings"
+        : task.kind === "session"
+          ? "session_project_bindings"
+          : "conversation_mirrors"
+    const column = task.kind === "run" ? "run_id" : task.kind === "session" ? "session_id" : "id"
     return (
       this.database
         .query<{ found: number }, [string, string, string]>(
@@ -2469,9 +3286,15 @@ export class Store {
   }
 
   taskEventExists(ownerId: string, task: TaskRelay["task"], sequence: number): boolean {
-    if (sequence === 0) return true
-    const table = task.kind === "run" ? "run_events" : "session_events"
-    const column = task.kind === "run" ? "run_id" : "session_id"
+    if (sequence === 0) return task.kind !== "mirror"
+    const table =
+      task.kind === "run"
+        ? "run_events"
+        : task.kind === "session"
+          ? "session_events"
+          : "mirror_events"
+    const column =
+      task.kind === "run" ? "run_id" : task.kind === "session" ? "session_id" : "mirror_id"
     return (
       this.database
         .query<{ found: number }, [string, string, number]>(
@@ -2490,10 +3313,10 @@ export class Store {
         this.database
           .query(`
             INSERT INTO task_relays(
-              id,owner_id,project_id,run_id,session_id,anchor_sequence,
+              id,owner_id,project_id,run_id,session_id,mirror_id,anchor_sequence,
               author_principal_id,author_name,author_kind,
               recipient_principal_id,recipient_name,recipient_kind,body,created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           `)
           .run(
             input.relay.id,
@@ -2501,6 +3324,7 @@ export class Store {
             input.relay.projectId,
             input.relay.task.kind === "run" ? input.relay.task.id : null,
             input.relay.task.kind === "session" ? input.relay.task.id : null,
+            input.relay.task.kind === "mirror" ? input.relay.task.id : null,
             input.relay.anchorSequence,
             input.relay.author.id,
             input.relay.author.displayName,
@@ -2539,7 +3363,12 @@ export class Store {
     projectId: string,
     task: TaskRelay["task"],
   ): readonly TaskRelay[] {
-    const taskColumn = task.kind === "run" ? "relay.run_id" : "relay.session_id"
+    const taskColumn =
+      task.kind === "run"
+        ? "relay.run_id"
+        : task.kind === "session"
+          ? "relay.session_id"
+          : "relay.mirror_id"
     return this.database
       .query<TaskRelayRow, [string, string, string]>(`
         SELECT relay.*,ack.acknowledged_at
@@ -2626,11 +3455,11 @@ export class Store {
         this.database
           .query(`
             INSERT INTO task_annotations(
-              id,owner_id,project_id,run_id,session_id,
+              id,owner_id,project_id,run_id,session_id,mirror_id,
               anchor_sequence,anchor_block_id,anchor_start_offset,anchor_end_offset,
               anchor_quote,anchor_prefix,anchor_suffix,anchor_content_digest,
               author_principal_id,author_name,author_kind,body,created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           `)
           .run(
             input.annotation.id,
@@ -2638,6 +3467,7 @@ export class Store {
             input.annotation.projectId,
             input.annotation.task.kind === "run" ? input.annotation.task.id : null,
             input.annotation.task.kind === "session" ? input.annotation.task.id : null,
+            input.annotation.task.kind === "mirror" ? input.annotation.task.id : null,
             input.annotation.anchor.sequence,
             input.annotation.anchor.blockId,
             input.annotation.anchor.startOffset,
@@ -2686,7 +3516,12 @@ export class Store {
     projectId: string,
     task: TaskAnnotation["task"],
   ): readonly TaskAnnotation[] {
-    const taskColumn = task.kind === "run" ? "annotation.run_id" : "annotation.session_id"
+    const taskColumn =
+      task.kind === "run"
+        ? "annotation.run_id"
+        : task.kind === "session"
+          ? "annotation.session_id"
+          : "annotation.mirror_id"
     return this.database
       .query<TaskAnnotationRow, [string, string, string]>(`
         SELECT annotation.*,resolution.resolver_principal_id AS resolved_by_principal_id,
@@ -3406,21 +4241,21 @@ export class Store {
       .get(ownerId, projectId, repositoryUrl)
     if (bindingRow === null) return null
     const grantRow = this.database
-      .query<ExternalProjectGrantRow, [string, string, string, string, string]>(`
+      .query<ExternalProjectGrantRow, [string, string, string, string]>(`
         SELECT grant.* FROM external_project_grants grant
         JOIN external_identities identity
           ON identity.owner_id=grant.owner_id AND identity.id=grant.external_identity_id
         JOIN principals principal
           ON principal.owner_id=grant.owner_id AND principal.id=grant.principal_id
         WHERE grant.owner_id=? AND grant.principal_id=? AND grant.provider='github'
-          AND grant.installation_id=? AND grant.repository_id=?
+          AND grant.repository_id=?
           AND grant.access IN ('participate','administer')
           AND grant.revoked_at IS NULL AND grant.expires_at>?
           AND identity.revoked_at IS NULL AND principal.disabled_at IS NULL
         ORDER BY CASE grant.access WHEN 'administer' THEN 2 ELSE 1 END DESC,
           grant.observed_at DESC,grant.id LIMIT 1
       `)
-      .get(ownerId, principalId, bindingRow.installation_id, bindingRow.repository_id, at)
+      .get(ownerId, principalId, bindingRow.repository_id, at)
     if (grantRow === null) return null
     const identityRow = this.database
       .query<ExternalIdentityRow, [string, string]>(`
@@ -3751,15 +4586,7 @@ export class Store {
             if (grantRow === null) throw new Error("External Project grant was not persisted")
             grants.push(externalProjectGrantFromRow(grantRow))
           }
-          this.database
-            .query(`
-              UPDATE project_repository_bindings SET revoked_at=?
-              WHERE owner_id=? AND revoked_at IS NULL AND grant_id IN (
-                SELECT id FROM external_project_grants
-                WHERE owner_id=? AND external_identity_id=? AND revoked_at IS NOT NULL
-              )
-            `)
-            .run(input.at, identity.ownerId, identity.ownerId, identity.id)
+          for (const grant of grants) this.#syncProjectRepositoryMetadata(grant)
         }
 
         this.database
@@ -3875,6 +4702,7 @@ export class Store {
             input.grant.repositoryId,
           )
         if (row === null) throw new Error("External Project grant was not persisted")
+        this.#syncProjectRepositoryMetadata(externalProjectGrantFromRow(row))
         this.insertAudit({ ...input.audit, resourceId: row.id })
         return externalProjectGrantFromRow(row)
       })
@@ -3918,12 +4746,42 @@ export class Store {
   }): ProjectRepositoryBinding {
     return this.database
       .transaction(() => {
-        this.database
-          .query(`
-            UPDATE project_repository_bindings SET revoked_at=?
-            WHERE owner_id=? AND project_id=? AND revoked_at IS NULL
+        const projectBinding = this.database
+          .query<ProjectRepositoryBindingRow, [string, string]>(`
+            SELECT * FROM project_repository_bindings
+            WHERE owner_id=? AND project_id=?
+            ORDER BY created_at,id LIMIT 1
           `)
-          .run(input.binding.createdAt, input.binding.ownerId, input.binding.projectId)
+          .get(input.binding.ownerId, input.binding.projectId)
+        if (projectBinding !== null) {
+          const existing = projectRepositoryBindingFromRow(projectBinding)
+          if (
+            existing.provider === input.binding.provider &&
+            existing.repositoryId === input.binding.repositoryId &&
+            existing.revokedAt === null
+          ) {
+            return existing
+          }
+          throw new AppError({
+            code: "PROJECT_REPOSITORY_IMMUTABLE",
+            status: 409,
+            message: "Project is already bound to a different GitHub repository",
+          })
+        }
+        const repositoryBinding = this.database
+          .query<ProjectRepositoryBindingRow, [string, string, string]>(`
+            SELECT * FROM project_repository_bindings
+            WHERE owner_id=? AND provider=? AND repository_id=?
+            ORDER BY created_at,id LIMIT 1
+          `)
+          .get(input.binding.ownerId, input.binding.provider, input.binding.repositoryId)
+        if (repositoryBinding !== null) {
+          throw new AppError({
+            code: "GITHUB_REPOSITORY_ALREADY_IMPORTED",
+            status: 409,
+            message: "GitHub repository already belongs to another Project",
+          })
+        }
         this.database
           .query(`
             INSERT INTO project_repository_bindings(
@@ -3951,6 +4809,7 @@ export class Store {
             input.binding.revokedAt,
           )
         this.insertAudit(input.audit)
+        this.#syncProjectRepositoryMetadata(input.binding)
         return input.binding
       })
       .immediate()
@@ -3988,16 +4847,16 @@ export class Store {
         }
         const grant = externalProjectGrantFromRow(grantRow)
         const existing = this.database
-          .query<ProjectRepositoryBindingRow, [string, string, string, string]>(`
+          .query<ProjectRepositoryBindingRow, [string, string, string]>(`
             SELECT binding.* FROM project_repository_bindings binding
             JOIN projects project
               ON project.owner_id=binding.owner_id AND project.id=binding.project_id
             WHERE binding.owner_id=? AND binding.provider=?
-              AND binding.installation_id=? AND binding.repository_id=?
+              AND binding.repository_id=?
               AND binding.revoked_at IS NULL AND project.archived_at IS NULL
             ORDER BY binding.created_at,binding.id LIMIT 1
           `)
-          .get(input.ownerId, grant.provider, grant.installationId, grant.repositoryId)
+          .get(input.ownerId, grant.provider, grant.repositoryId)
 
         let project: Project
         let binding: ProjectRepositoryBinding
@@ -4058,6 +4917,7 @@ export class Store {
             )
           this.insertAudit({ ...input.audits.project, resourceId: project.id })
           this.insertAudit({ ...input.audits.binding, resourceId: binding.id })
+          this.#syncProjectRepositoryMetadata(binding)
           created = true
         } else {
           binding = projectRepositoryBindingFromRow(existing)
@@ -4091,6 +4951,57 @@ export class Store {
         return { project, binding, selection, created }
       })
       .immediate()
+  }
+
+  #syncProjectRepositoryMetadata(
+    source: Pick<
+      ProjectRepositoryBinding,
+      | "ownerId"
+      | "provider"
+      | "repositoryId"
+      | "accountId"
+      | "accountName"
+      | "installationId"
+      | "repositoryName"
+      | "repositoryFullName"
+      | "repositoryUrl"
+      | "private"
+    >,
+  ): void {
+    this.database
+      .query(`
+        UPDATE project_repository_bindings SET
+          account_id=?,account_name=?,installation_id=?,repository_name=?,
+          repository_full_name=?,repository_url=?,private=?
+        WHERE owner_id=? AND provider=? AND repository_id=? AND revoked_at IS NULL
+      `)
+      .run(
+        source.accountId,
+        source.accountName,
+        source.installationId,
+        source.repositoryName,
+        source.repositoryFullName,
+        source.repositoryUrl,
+        source.private ? 1 : 0,
+        source.ownerId,
+        source.provider,
+        source.repositoryId,
+      )
+    this.database
+      .query(`
+        UPDATE projects SET name=?
+        WHERE owner_id=? AND id IN (
+          SELECT project_id FROM project_repository_bindings
+          WHERE owner_id=? AND provider=? AND repository_id=? AND revoked_at IS NULL
+        )
+      `)
+      .run(
+        source.repositoryName.trim().slice(0, 120),
+        source.ownerId,
+        source.ownerId,
+        source.provider,
+        source.repositoryId,
+      )
   }
 
   listProjectRepositoryBindingsForPrincipal(

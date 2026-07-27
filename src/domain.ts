@@ -84,16 +84,132 @@ export interface WorkAttribution {
 }
 
 export interface ProjectWorkItem {
-  readonly kind: "run" | "session"
+  readonly kind: "run" | "session" | "mirror"
   readonly id: string
   readonly projectId: string
   readonly delegatedBy: PrincipalSummary
   readonly title: string
   readonly agentType: string
-  readonly status: RunStatus | AgentSessionStatus
+  readonly status: RunStatus | AgentSessionStatus | ConversationMirrorStatus
   readonly createdAt: Timestamp
   readonly updatedAt: Timestamp
+  /** Present only for source-owned linked conversations. Derived from device/grant health. */
+  readonly sourceObservation?: {
+    readonly source: ConnectorSource
+    readonly syncStatus: "waiting" | "connected" | "stale" | "revoked"
+    readonly lastSeenAt: Timestamp | null
+  }
 }
+
+export const CONNECTOR_SOURCES = ["codex", "claude-code"] as const
+export type ConnectorSource = (typeof CONNECTOR_SOURCES)[number]
+
+export const CONVERSATION_MIRROR_STATUSES = ["active", "idle", "ended", "disconnected"] as const
+export type ConversationMirrorStatus = (typeof CONVERSATION_MIRROR_STATUSES)[number]
+
+/**
+ * One revocable local companion registration. It may observe its named source,
+ * but never gains lifecycle control over the source-owned agent session.
+ */
+export interface ConnectorDevice {
+  readonly id: string
+  readonly ownerId: string
+  readonly principalId: string
+  readonly displayName: string
+  readonly source: ConnectorSource
+  readonly createdAt: Timestamp
+  readonly lastSeenAt: Timestamp | null
+  readonly revokedAt: Timestamp | null
+}
+
+/** Explicit permission for one device/source pair to publish into one Project. */
+export interface ConversationShareGrant {
+  readonly id: string
+  readonly ownerId: string
+  readonly projectId: string
+  readonly connectorDeviceId: string
+  readonly source: ConnectorSource
+  readonly authorizedByPrincipalId: string
+  readonly createdAt: Timestamp
+  readonly revokedAt: Timestamp | null
+}
+
+/**
+ * A Project-visible projection of a conversation whose lifecycle remains owned
+ * by an external agent product. Meanwhile can observe and broadcast it, never
+ * start, stop, resume, or otherwise impersonate the source session.
+ */
+export interface ConversationMirror {
+  readonly id: string
+  readonly ownerId: string
+  readonly projectId: string
+  readonly connectorDeviceId: string
+  readonly shareGrantId: string
+  readonly sharedBy: PrincipalSummary
+  readonly source: ConnectorSource
+  /** Device-derived pseudonymous key; the source product's local ID never leaves the device. */
+  readonly sourceConversationKey: string
+  readonly title: string
+  readonly status: ConversationMirrorStatus
+  readonly createdAt: Timestamp
+  readonly updatedAt: Timestamp
+  readonly endedAt: Timestamp | null
+}
+
+export const MIRROR_EVENT_VERSION = 1 as const
+export type MirrorWorkKind = "reasoning" | "tool" | "plan" | "system"
+
+interface MirrorEventBase {
+  readonly version: typeof MIRROR_EVENT_VERSION
+  readonly mirrorId: string
+  readonly ownerId: string
+  readonly sequence: number
+  readonly source: ConnectorSource
+  /** Opaque source position. It must not disclose a local filesystem path. */
+  readonly sourceCursor: string
+  /** SHA-256 of the normalized source event, used for exact replay checks. */
+  readonly digest: string
+  /** Source wall-clock time is diagnostic only; ordering uses sequence. */
+  readonly sourceTimestamp: Timestamp | null
+  /** Control-plane acceptance time. */
+  readonly createdAt: Timestamp
+}
+
+/** Append-only normalized transcript evidence accepted from a ConnectorDevice. */
+export type MirrorEvent =
+  | (MirrorEventBase & {
+      readonly type: "message"
+      readonly payload: {
+        readonly role: "user" | "assistant"
+        readonly markdown: string
+        readonly sourceMessageId: string | null
+        readonly truncated: boolean
+      }
+    })
+  | (MirrorEventBase & {
+      readonly type: "work"
+      readonly payload: {
+        readonly kind: MirrorWorkKind
+        readonly title: string | null
+        readonly body: string
+        readonly status: string | null
+        readonly sourceItemId: string | null
+        readonly truncated: boolean
+      }
+    })
+  | (MirrorEventBase & {
+      readonly type: "source_status"
+      readonly payload: {
+        readonly status: ConversationMirrorStatus
+        readonly reason: string | null
+      }
+    })
+
+export type MirrorEventInput = MirrorEvent extends infer Event
+  ? Event extends MirrorEvent
+    ? Omit<Event, "mirrorId" | "ownerId" | "createdAt">
+    : never
+  : never
 
 /**
  * An immutable, addressed human handoff anchored to one durable task event.
@@ -104,7 +220,7 @@ export interface TaskRelay {
   readonly ownerId: string
   readonly projectId: string
   readonly task: {
-    readonly kind: "run" | "session"
+    readonly kind: "run" | "session" | "mirror"
     readonly id: string
   }
   /** Sequence 0 anchors the relay to the original delegation. */
@@ -139,7 +255,7 @@ export interface TaskAnnotation {
   readonly ownerId: string
   readonly projectId: string
   readonly task: {
-    readonly kind: "run" | "session"
+    readonly kind: "run" | "session" | "mirror"
     readonly id: string
   }
   readonly anchor: TranscriptAnchor
@@ -879,6 +995,9 @@ export interface AuditRecord {
     | "principal_invitation"
     | "task_relay"
     | "task_annotation"
+    | "connector_device"
+    | "conversation_share_grant"
+    | "conversation_mirror"
     | "browser_session"
     | "api_key"
     | "run"
@@ -904,6 +1023,7 @@ export interface RequestContext {
   readonly ownerRole: OwnerRole
   readonly apiKeyId: string | null
   readonly browserSessionId?: string
+  readonly connectorDeviceId?: string
 }
 
 export const isTerminalRunStatus = (status: RunStatus): status is TerminalRunStatus =>

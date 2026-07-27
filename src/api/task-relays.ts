@@ -17,7 +17,7 @@ const RelayParamSchema = z
   .object({ projectId: IdentifierSchema, relayId: IdentifierSchema })
   .strict()
 const TaskRelayQuerySchema = z
-  .object({ taskKind: z.enum(["run", "session"]), taskId: IdentifierSchema })
+  .object({ taskKind: z.enum(["run", "session", "mirror"]), taskId: IdentifierSchema })
   .strict()
 const RecentRelayQuerySchema = z
   .object({ limit: z.coerce.number().int().min(1).max(20).default(3) })

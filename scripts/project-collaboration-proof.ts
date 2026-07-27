@@ -908,7 +908,7 @@ function boardHasEvents(value: unknown): boolean {
 }
 
 function hasWork(
-  items: readonly { readonly kind: "run" | "session"; readonly id: string }[],
+  items: readonly { readonly kind: "run" | "session" | "mirror"; readonly id: string }[],
   kind: "run" | "session",
   id: string,
 ): boolean {

@@ -1,4 +1,4 @@
-import type { RunEvent, SessionEvent } from "./api/contracts"
+import type { MirrorEvent, RunEvent, SessionEvent } from "./api/contracts"
 
 export type TimelineRole = "agent" | "thought" | "user"
 
@@ -49,6 +49,16 @@ export interface AgentTimeline {
   readonly usage: unknown
 }
 
+export interface MirrorTimeline {
+  readonly mirrorId: string | null
+  readonly cursor: number
+  readonly status: string | null
+  readonly messages: readonly TimelineMessage[]
+  readonly toolCalls: readonly TimelineToolCall[]
+  readonly plan: unknown
+  readonly usage: null
+}
+
 export const emptyTimeline = (): AgentTimeline => ({
   runId: null,
   cursor: 0,
@@ -85,6 +95,86 @@ export const reduceTimeline = (timeline: AgentTimeline, event: RunEvent): AgentT
 export const timelineFromEvents = (events: Iterable<RunEvent>): AgentTimeline => {
   let timeline = emptyTimeline()
   for (const event of events) timeline = reduceTimeline(timeline, event)
+  return timeline
+}
+
+export const emptyMirrorTimeline = (): MirrorTimeline => ({
+  mirrorId: null,
+  cursor: 0,
+  status: null,
+  messages: [],
+  toolCalls: [],
+  plan: null,
+  usage: null,
+})
+
+export const reduceMirrorTimeline = (
+  timeline: MirrorTimeline,
+  event: MirrorEvent,
+): MirrorTimeline => {
+  if (timeline.mirrorId !== null && timeline.mirrorId !== event.mirrorId) {
+    throw new TypeError("A timeline cannot contain events from different mirrors")
+  }
+  if (event.sequence <= timeline.cursor) return timeline
+  if (event.sequence !== timeline.cursor + 1) {
+    throw new TypeError(
+      `Mirror event sequence is not contiguous: expected ${timeline.cursor + 1}, received ${event.sequence}`,
+    )
+  }
+  const base: MirrorTimeline = { ...timeline, mirrorId: event.mirrorId, cursor: event.sequence }
+  if (event.type === "source_status") return { ...base, status: event.payload.status }
+  const occurredAt = event.sourceTimestamp ?? event.createdAt
+  if (event.type === "message") {
+    const role = event.payload.role === "user" ? "user" : "agent"
+    return {
+      ...base,
+      messages: appendMessage(
+        base.messages,
+        `mirror:${event.payload.sourceMessageId ?? event.sourceCursor}`,
+        role,
+        event.payload.markdown,
+        event.sequence,
+        occurredAt,
+        null,
+      ),
+    }
+  }
+  if (event.payload.kind === "plan") return { ...base, plan: event.payload.body }
+  if (event.payload.kind === "tool") {
+    return {
+      ...base,
+      toolCalls: upsertToolCall(
+        base.toolCalls,
+        `mirror:${event.payload.sourceItemId ?? event.sourceCursor}`,
+        {
+          title: event.payload.title,
+          kind: "other",
+          status: event.payload.status,
+          rawOutput: event.payload.body,
+        },
+        event.sequence,
+        occurredAt,
+        null,
+      ),
+    }
+  }
+  return {
+    ...base,
+    messages: appendMessage(
+      base.messages,
+      `mirror:${event.payload.kind}:${event.payload.sourceItemId ?? event.sourceCursor}`,
+      "thought",
+      event.payload.body,
+      event.sequence,
+      occurredAt,
+      null,
+    ),
+  }
+}
+
+export const mirrorTimelineFromEvents = (events: Iterable<MirrorEvent>): MirrorTimeline => {
+  let timeline = emptyMirrorTimeline()
+  for (const event of events) timeline = reduceMirrorTimeline(timeline, event)
   return timeline
 }
 

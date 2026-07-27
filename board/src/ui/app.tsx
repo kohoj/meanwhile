@@ -1,6 +1,8 @@
 import type {
   AgentConnection,
   AvailableAgentConnection,
+  ConnectorDevice,
+  ConversationShareGrant,
   ExternalIdentity,
   ExternalProjectGrant,
   Principal,
@@ -20,6 +22,8 @@ import "@fontsource/ibm-plex-mono/600.css";
 import {
   ArrowRight,
   Check,
+  Copy,
+  Desktop,
   GithubLogo,
   GoogleLogo,
   Key,
@@ -30,6 +34,7 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   Component,
   StrictMode,
+  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -50,7 +55,15 @@ import seatPriya from "./assets/seat-priya.png";
 import { ConversationDetail } from "./conversation-detail";
 import { LiveDeckRoom } from "./live-deck";
 import {
+  boardRoutePath,
+  type BoardRoute,
+  type ConversationRef,
+  parseBoardRoute,
+  resolveConversationRef,
+} from "./navigation";
+import {
   displayStatus,
+  displayWorkStatus,
   humanAgent,
   plainInlineMarkdown,
   type PresentedBoardRow,
@@ -93,6 +106,28 @@ const SIGNAL_FIELD_TONES = [
   [0, 0, 1, 2, 4, 5, 7, 7, 7, 6, 5, 2, 2, 1, 1, 1],
   [1, 1, 1, 1, 2, 2, 4, 5, 5, 4, 2, 1, 1, 1, 1, 1],
 ].flat();
+
+const copyToClipboard = async (value: string): Promise<boolean> => {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    const fallback = document.createElement("textarea");
+    fallback.value = value;
+    fallback.setAttribute("aria-hidden", "true");
+    fallback.style.position = "fixed";
+    fallback.style.top = "-1000px";
+    fallback.style.opacity = "0";
+    document.body.append(fallback);
+    fallback.focus();
+    fallback.select();
+    try {
+      return document.execCommand("copy");
+    } finally {
+      fallback.remove();
+    }
+  }
+};
 
 const SignalField: React.FC = () => (
   <div className="signal-field" aria-hidden="true">
@@ -466,6 +501,8 @@ interface OnboardingResponse {
   repositoryBindings: readonly ProjectRepositoryBinding[];
   agentConnections: readonly AgentConnection[];
   availableAgents: readonly AvailableAgentConnection[];
+  connectorDevices: readonly ConnectorDevice[];
+  conversationShareGrants: readonly ConversationShareGrant[];
   projects: readonly {
     project: Project;
     access: "watch" | "participate" | "administer";
@@ -473,6 +510,73 @@ interface OnboardingResponse {
     selected: boolean;
   }[];
 }
+
+interface ConnectorAdoptionRequest {
+  readonly deviceId: string;
+  readonly displayName: string;
+  readonly source: "codex" | "claude-code";
+  readonly credentialPrefix: string;
+  readonly credentialHash: string;
+}
+
+const CONNECTOR_ADOPTION_STORAGE_KEY = "meanwhile.connector-adoption.v1";
+
+const parseConnectorAdoption = (value: unknown): ConnectorAdoptionRequest | null => {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.deviceId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(record.deviceId) ||
+    typeof record.displayName !== "string" ||
+    record.displayName.trim().length < 1 ||
+    record.displayName.trim().length > 120 ||
+    (record.source !== "codex" && record.source !== "claude-code") ||
+    typeof record.credentialPrefix !== "string" ||
+    !/^mwd_[A-Za-z0-9_-]{12}$/.test(record.credentialPrefix) ||
+    typeof record.credentialHash !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(record.credentialHash)
+  ) return null;
+  return {
+    deviceId: record.deviceId,
+    displayName: record.displayName.trim(),
+    source: record.source,
+    credentialPrefix: record.credentialPrefix,
+    credentialHash: record.credentialHash,
+  };
+};
+
+const initialConnectorAdoption = (): ConnectorAdoptionRequest | null => {
+  if (window.location.pathname === "/connect") {
+    const query = new URLSearchParams(window.location.search);
+    const request = parseConnectorAdoption({
+      deviceId: query.get("device"),
+      displayName: query.get("name"),
+      source: query.get("source"),
+      credentialPrefix: query.get("prefix"),
+      credentialHash: query.get("verifier"),
+    });
+    if (request !== null) {
+      sessionStorage.setItem(CONNECTOR_ADOPTION_STORAGE_KEY, JSON.stringify(request));
+      return request;
+    }
+  }
+  try {
+    return parseConnectorAdoption(
+      JSON.parse(sessionStorage.getItem(CONNECTOR_ADOPTION_STORAGE_KEY) ?? "null"),
+    );
+  } catch {
+    return null;
+  }
+};
+
+const clearConnectorAdoption = (): void => {
+  sessionStorage.removeItem(CONNECTOR_ADOPTION_STORAGE_KEY);
+};
+
+const connectorFingerprint = (request: ConnectorAdoptionRequest): string => {
+  const digest = request.credentialHash.slice("sha256:".length);
+  return `${request.credentialPrefix.slice(-4).toUpperCase()}-${digest.slice(0, 4).toUpperCase()}`;
+};
 
 interface LobbyTable {
   project: Project;
@@ -512,9 +616,15 @@ interface CreatedRunResponse {
   };
 }
 
+class FetchJsonError extends Error {
+  constructor(readonly status: number) {
+    super(status === 401 ? "UNAUTHENTICATED" : "REQUEST_FAILED");
+  }
+}
+
 const fetchJson = async <T,>(url: string): Promise<T> => {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(response.status === 401 ? "UNAUTHENTICATED" : "REQUEST_FAILED");
+  if (!response.ok) throw new FetchJsonError(response.status);
   return (await response.json()) as T;
 };
 
@@ -779,6 +889,112 @@ const Login: React.FC<{
   );
 };
 
+const ConnectorAdoption: React.FC<{
+  request: ConnectorAdoptionRequest;
+  data: OnboardingResponse;
+  onChanged: () => Promise<unknown>;
+  onApproved: (projectId: string) => void;
+  onCancel: () => void;
+  onLogout: () => void;
+}> = ({ request, data, onChanged, onApproved, onCancel, onLogout }) => {
+  const projects = data.projects.filter(
+    (entry) => entry.selected && entry.access !== "watch",
+  );
+  const [projectId, setProjectId] = useState(projects[0]?.project.id ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const sourceName = request.source === "codex" ? "Codex app" : "Claude Code";
+  const approve = async () => {
+    if (!projectId || busy) return;
+    setBusy(true);
+    setError(null);
+    const response = await fetch("/onboarding/connector-devices/adopt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deviceId: request.deviceId,
+        displayName: request.displayName,
+        source: request.source,
+        credentialPrefix: request.credentialPrefix,
+        credentialHash: request.credentialHash,
+        projectId,
+      }),
+    }).catch(() => null);
+    if (!response?.ok) {
+      const failure = (await response?.json().catch(() => null)) as {
+        error?: string | { message?: unknown };
+      } | null;
+      setError(
+        typeof failure?.error === "string"
+          ? failure.error
+          : typeof failure?.error?.message === "string"
+            ? failure.error.message
+            : "This local source could not be authorized.",
+      );
+      setBusy(false);
+      return;
+    }
+    await onChanged();
+    onApproved(projectId);
+  };
+  return (
+    <main className="connector-adoption-shell">
+      <GridSystem />
+      <header className="connector-adoption-topbar grid-band">
+        <div className="brand" data-grid-item><span data-grid-optical>meanwhile</span></div>
+        <div className="connector-adoption-location" data-grid-item>Local source connection</div>
+        <button type="button" data-grid-item onClick={onLogout}>Sign out</button>
+      </header>
+      <section className="connector-adoption-card" aria-labelledby="connector-adoption-title">
+        <span className="connector-adoption-eyebrow">Approve on this signed-in account</span>
+        <div className="connector-adoption-mark"><Desktop size={28} weight="light" /></div>
+        <h1 id="connector-adoption-title">Let {sourceName} share one conversation?</h1>
+        <p>
+          The local Companion will observe only the conversation you selected in Terminal.
+          Choose the Project room where its live transcript may appear.
+        </p>
+        <dl className="connector-adoption-facts">
+          <div><dt>Source</dt><dd>{request.displayName}</dd></div>
+          <div><dt>Device fingerprint</dt><dd>{connectorFingerprint(request)}</dd></div>
+          <div><dt>Control</dt><dd>Observe only · no agent lifecycle authority</dd></div>
+        </dl>
+        {projects.length > 0 ? (
+          <fieldset className="connector-adoption-projects">
+            <legend>Share into one Project</legend>
+            {projects.map((entry) => (
+              <label key={entry.project.id}>
+                <input
+                  type="radio"
+                  name="connector-project"
+                  value={entry.project.id}
+                  checked={projectId === entry.project.id}
+                  onChange={() => setProjectId(entry.project.id)}
+                />
+                <span><strong>{entry.project.name}</strong><small>{entry.access}</small></span>
+                {projectId === entry.project.id ? <Check size={15} weight="bold" /> : null}
+              </label>
+            ))}
+          </fieldset>
+        ) : (
+          <div className="connector-adoption-empty">
+            Select a Project you can participate in before authorizing a local source.
+          </div>
+        )}
+        {error ? <p className="connector-adoption-error" role="alert">{error}</p> : null}
+        <div className="connector-adoption-actions">
+          <button type="button" className="quiet" disabled={busy} onClick={onCancel}>Cancel</button>
+          <button type="button" disabled={busy || !projectId} onClick={() => void approve()}>
+            {busy ? "Authorizing…" : `Share with ${projects.find((entry) => entry.project.id === projectId)?.project.name ?? "Project"}`}
+          </button>
+        </div>
+        <small className="connector-adoption-privacy">
+          The device secret stays on your Mac. This page receives only a one-way verifier.
+        </small>
+      </section>
+    </main>
+  );
+};
+
 const ConnectedOnboarding: React.FC<{
   data: OnboardingResponse;
   onChanged: () => Promise<unknown>;
@@ -792,22 +1008,23 @@ const ConnectedOnboarding: React.FC<{
   );
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copiedConnector, setCopiedConnector] = useState<"codex" | "claude-code" | null>(null);
   const selectedProjects = data.projects.filter((entry) => entry.selected);
   const connectedAgentTypes = new Set(data.agentConnections.map((item) => item.agentType));
   const bindings = new Map(data.repositoryBindings.map((item) => [item.projectId, item]));
-  const administeringGrants = data.repositoryGrants.filter(
-    (grant) => grant.access === "administer",
-  );
   const grantIsMapped = (grant: OnboardingResponse["repositoryGrants"][number]) =>
     data.repositoryBindings.some(
       (binding) =>
         binding.provider === grant.provider &&
-        binding.installationId === grant.installationId &&
         binding.repositoryId === grant.repositoryId,
     );
   const githubConfigured =
     providerData?.providers.some((provider) => provider.provider === "github") ?? false;
-  const complete = data.agentConnections.length > 0 && selectedProjects.length > 0;
+  const activeConnectorDevices = data.connectorDevices.filter((device) => device.revokedAt === null);
+  const activeConversationGrants = data.conversationShareGrants.filter(
+    (grant) => grant.revokedAt === null,
+  );
+  const complete = selectedProjects.length > 0;
   const mutate = async (
     key: string,
     url: string,
@@ -839,6 +1056,15 @@ const ConnectedOnboarding: React.FC<{
     data.identities.length === 0
       ? "Installation identity"
       : data.identities.map((identity) => identity.provider).join(" + ");
+  const copyConnectorCommand = async (source: "codex" | "claude-code") => {
+    const command = `MEANWHILE_URL=${window.location.origin} meanwhile companion connect --source ${source}`;
+    if (await copyToClipboard(command)) {
+      setCopiedConnector(source);
+      setError(null);
+      return;
+    }
+    setError("Clipboard access is unavailable. Copy the connect command manually.");
+  };
   return (
     <main
       className="onboarding-shell"
@@ -854,15 +1080,15 @@ const ConnectedOnboarding: React.FC<{
         <span data-grid-item>First entry</span>
         <h1 data-grid-item data-grid-optical>Prepare the rooms<br />you want to share.</h1>
         <p data-grid-item>
-          Four independent setup steps. Nothing is bundled into sign-in, and each connection can be
-          revoked without changing who owns the work.
+          Choose the rooms you may enter. Agent execution and local conversation sharing stay
+          separate, revocable capabilities; neither is required merely to watch your team.
         </p>
         <div className="onboarding-progress" data-grid-item aria-label="Onboarding progress">
           {[
             ["01", "Identity", true],
             ["02", "Repositories", data.repositoryGrants.length > 0 || !githubConfigured],
-            ["03", "Agents", data.agentConnections.length > 0],
-            ["04", "Projects", selectedProjects.length > 0],
+            ["03", "Projects", selectedProjects.length > 0],
+            ["04", "Agents", data.agentConnections.length > 0],
           ].map(([index, label, done]) => (
             <span className={done ? "done" : ""} key={String(index)}>
               <i>{index}</i><strong>{label}</strong>{done ? <Check size={13} weight="bold" /> : null}
@@ -892,7 +1118,7 @@ const ConnectedOnboarding: React.FC<{
           {data.repositoryGrants.length === 0 ? (
             <div className="local-repository-mode">
               <GithubLogo size={22} weight="light" aria-hidden="true" />
-              <div><strong>No GitHub grant attached</strong><span>{githubConfigured ? "Link GitHub to reveal App-authorized repositories." : "Public HTTPS repositories remain available per task."}</span></div>
+              <div><strong>No GitHub grant attached</strong><span>{githubConfigured ? "Link GitHub to reveal App-authorized Project rooms." : "This deployment must configure GitHub before Project rooms are available."}</span></div>
               {githubConfigured ? (
                 <button
                   type="button"
@@ -987,17 +1213,7 @@ const ConnectedOnboarding: React.FC<{
             {data.projects.map((entry) => {
               const key = `project:${entry.project.id}`;
               const binding = bindings.get(entry.project.id);
-              const boundGrant = binding
-                ? administeringGrants.find(
-                    (grant) =>
-                      grant.provider === binding.provider &&
-                      grant.installationId === binding.installationId &&
-                      grant.repositoryId === binding.repositoryId,
-                  )
-                : undefined;
-              const canBindRepository =
-                entry.access === "administer" &&
-                administeringGrants.length > 0;
+              if (binding === undefined) return null;
               return (
                 <div className={entry.selected ? "selected" : ""} key={entry.project.id}>
                   <button
@@ -1014,33 +1230,10 @@ const ConnectedOnboarding: React.FC<{
                     }
                   >
                     <Stack size={18} weight="light" aria-hidden="true" />
-                    <span><strong>{entry.project.name}</strong><small>{binding?.repositoryFullName ?? "Local Project"}</small></span>
+                    <span><strong>{entry.project.name}</strong><small>{binding.repositoryFullName}</small></span>
                     <i>{busy === key ? "…" : entry.selected ? <Check size={14} weight="bold" /> : "+"}</i>
                   </button>
-                  {entry.selected && canBindRepository ? (
-                    <label>
-                      <span>Repository · optional</span>
-                      <select
-                        value={boundGrant?.id ?? ""}
-                        disabled={busy !== null}
-                        onChange={(event) => {
-                          if (event.target.value) {
-                            void mutate(
-                              `repository:${entry.project.id}`,
-                              `/onboarding/projects/${entry.project.id}/repository`,
-                              "PUT",
-                              { grantId: event.target.value },
-                            );
-                          }
-                        }}
-                      >
-                        <option value="">Choose repository</option>
-                        {administeringGrants.map((grant) => (
-                          <option key={grant.id} value={grant.id}>{grant.repositoryFullName}</option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : entry.selected && binding ? (
+                  {entry.selected ? (
                     <div className="project-binding-readonly">
                       <span>Repository</span>
                       <strong>{binding.repositoryFullName}</strong>
@@ -1052,13 +1245,91 @@ const ConnectedOnboarding: React.FC<{
           </div>
           <p>Selection changes only what appears in your Lobby. It cannot create membership or widen repository access.</p>
         </article>
+
+        <article className="onboarding-step connector-step" data-grid-item>
+          <header><span>05</span><h2>Local continuity</h2><strong>Optional · {activeConnectorDevices.length} paired</strong></header>
+          <div className="connector-setup">
+            <p>Link a conversation already open in Codex app or Claude Code. Meanwhile observes its selected transcript; the source app keeps lifecycle control.</p>
+            <div className="connector-source-options">
+              {(["codex", "claude-code"] as const).map((source) => (
+                <button
+                  type="button"
+                  key={source}
+                  disabled={busy !== null}
+                  onClick={() => void copyConnectorCommand(source)}
+                >
+                  <Desktop size={17} weight="light" aria-hidden="true" />
+                  <span>{copiedConnector === source ? "Command copied" : `Connect ${source === "codex" ? "Codex app" : "Claude Code"}`}</span>
+                  <i>{copiedConnector === source ? <Check size={12} weight="bold" /> : <Copy size={12} />}</i>
+                </button>
+              ))}
+            </div>
+            {activeConnectorDevices.map((device) => {
+              const grants = activeConversationGrants.filter(
+                (grant) => grant.connectorDeviceId === device.id,
+              );
+              return (
+                <section className="connector-device" key={device.id}>
+                  <header>
+                    <span><strong>{device.displayName}</strong><small>{device.lastSeenAt === null ? "Waiting for companion" : `Seen ${relativeTime(device.lastSeenAt)}`}</small></span>
+                    <button
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => void mutate(
+                        `revoke-device:${device.id}`,
+                        `/onboarding/connector-devices/${device.id}`,
+                        "DELETE",
+                      )}
+                    >Revoke</button>
+                  </header>
+                  <div className="connector-projects" aria-label="Projects allowed to receive this source">
+                    {selectedProjects.length === 0 ? <small>Select a Project before sharing.</small> : selectedProjects.map((entry) => {
+                      const grant = grants.find((item) => item.projectId === entry.project.id);
+                      const key = `connector-grant:${device.id}:${entry.project.id}`;
+                      return (
+                        <button
+                          type="button"
+                          className={grant ? "selected" : ""}
+                          aria-pressed={grant !== undefined}
+                          disabled={busy !== null}
+                          key={entry.project.id}
+                          onClick={() => void mutate(
+                            key,
+                            grant
+                              ? `/onboarding/conversation-share-grants/${grant.id}`
+                              : `/onboarding/connector-devices/${device.id}/grants`,
+                            grant ? "DELETE" : "POST",
+                            grant ? undefined : { projectId: entry.project.id },
+                          )}
+                        >
+                          {grant ? <Check size={11} weight="bold" /> : null}
+                          {entry.project.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              );
+            })}
+            <div className="connector-receipt">
+              <strong>One command, one explicit approval</strong>
+              <span>
+                Run the copied command in Terminal. Choose the exact local conversation there;
+                Meanwhile will reopen this page to confirm one Project and matching device fingerprint.
+              </span>
+            </div>
+          </div>
+          <p>Local pairing only broadcasts normalized conversation events into Projects you explicitly allow. It never grants Meanwhile control of the source session.</p>
+        </article>
       </section>
       <footer className="onboarding-footer grid-band">
         <div data-grid-item>
           <span>{complete ? "Ready" : "Still needed"}</span>
           <strong>
             {data.agentConnections.length === 0
-              ? "Authorize at least one agent."
+              ? selectedProjects.length === 0
+                ? "Choose at least one Project."
+                : "Your Lobby is ready to watch; connect an agent when you want to delegate."
               : selectedProjects.length === 0
                 ? "Choose at least one Project."
                 : "Your Lobby is ready."}
@@ -1352,7 +1623,7 @@ const TaskList: React.FC<{
               <span className="pulse-meta">
                 <span>{humanAgent(row.agentType)}</span>
                 <span className="pulse-state">
-                  {relayCount > 0 ? `${relayCount} relayed` : displayStatus(row.status)}
+                  {relayCount > 0 ? `${relayCount} relayed` : displayWorkStatus(row)}
                   <b>·</b>
                   {compactElapsedTime(row.updatedAt)}
                 </span>
@@ -1663,11 +1934,18 @@ const TaskDetail: React.FC<{
   const sessionTimeline = useBoard((state) =>
     row?.kind === "session" ? state.sessionTimelines[row.id] : undefined,
   );
+  const mirrorTimeline = useBoard((state) =>
+    row?.kind === "mirror" ? state.mirrorTimelines[row.id] : undefined,
+  );
   const relays = useBoard((state) =>
     row ? state.taskRelays[`${row.kind}:${row.id}`] ?? NO_RELAYS : NO_RELAYS,
   );
   const loading = useBoard((state) => (row ? state.loading[`${row.kind}:${row.id}`] : false));
-  const timeline = row?.kind === "run" ? runTimeline : sessionTimeline;
+  const timeline = row?.kind === "run"
+    ? runTimeline
+    : row?.kind === "session"
+      ? sessionTimeline
+      : mirrorTimeline;
   const threadScrollRef = useRef<HTMLDivElement>(null);
   const [relayAnchor, setRelayAnchor] = useState<number | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -1687,7 +1965,9 @@ const TaskDetail: React.FC<{
       const cursor =
         row.kind === "run"
           ? (state.runTimelines[row.id]?.cursor ?? 0)
-          : (state.sessionTimelines[row.id]?.cursor ?? 0);
+          : row.kind === "session"
+            ? (state.sessionTimelines[row.id]?.cursor ?? 0)
+            : (state.mirrorTimelines[row.id]?.cursor ?? 0);
       source = new EventSource(
         `/task/${row.kind}/${row.id}/follow?after=${encodeURIComponent(String(cursor))}`,
       );
@@ -1734,7 +2014,7 @@ const TaskDetail: React.FC<{
     .find((message) => message.role === "agent")?.id;
   const firstAgentMessage = (timeline?.messages ?? []).find((message) => message.role === "agent");
   const attention = taskAttention(row, current.id);
-  const live = ["queued", "provisioning", "running", "closing"].includes(row.status);
+  const live = ["queued", "provisioning", "running", "closing", "active"].includes(row.status);
   const canRelay = members.some(
     (member) => member.principal.id !== current.id && member.principal.kind === "person",
   );
@@ -1823,12 +2103,12 @@ const TaskDetail: React.FC<{
                 if (isNearLatest !== following) setFollowing(isNearLatest);
               }}
             >
-            <section className={`opening-ask ${activeAnchor === 0 ? "selected-moment" : ""}`}>
+            {row.kind === "mirror" ? null : <section className={`opening-ask ${activeAnchor === 0 ? "selected-moment" : ""}`}>
               <Markdown text={taskPromptBody(row.title)} className="thread-message-copy" />
               {canRelay ? (
                 <button type="button" onClick={() => setRelayAnchor(0)}>Pass this ask</button>
               ) : null}
-            </section>
+            </section>}
             {loading && timeline === undefined ? (
               <div className="loading-line">Opening the agent thread…</div>
             ) : null}
@@ -1977,7 +2257,6 @@ const TaskComposer: React.FC<{
 }> = ({ project, principal, agents, repository, onCancel, onCreated }) => {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const [prompt, setPrompt] = useState("");
-  const [repositoryUrl, setRepositoryUrl] = useState("");
   const [revision, setRevision] = useState("");
   const [agentType, setAgentType] = useState(agents[0]?.agentType ?? "");
   const [idempotencyKey] = useState(() => crypto.randomUUID());
@@ -1995,7 +2274,7 @@ const TaskComposer: React.FC<{
   }, [busy, onCancel]);
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!prompt.trim() || (!repository && !repositoryUrl.trim()) || !agentType || busy) return;
+    if (!prompt.trim() || !repository || !agentType || busy) return;
     setBusy(true);
     setError(null);
     const response = await fetch(`/projects/${project.id}/runs`, {
@@ -2003,7 +2282,6 @@ const TaskComposer: React.FC<{
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         prompt: prompt.trim(),
-        repositoryUrl: repository?.repositoryUrl ?? repositoryUrl.trim(),
         revision: revision.trim(),
         agentType,
         idempotencyKey,
@@ -2053,18 +2331,7 @@ const TaskComposer: React.FC<{
                 <strong><GithubLogo size={16} weight="fill" aria-hidden="true" />{repository.repositoryFullName}</strong>
                 <small>{repository.accountName} · checkout uses your current GitHub grant</small>
               </div>
-            ) : (
-              <label className="composer-field">
-                <span>Repository</span>
-                <input
-                  type="url"
-                  required
-                  value={repositoryUrl}
-                  onChange={(event) => setRepositoryUrl(event.target.value)}
-                  placeholder="https://github.com/owner/repository"
-                />
-              </label>
-            )}
+            ) : <div className="composer-error" role="alert">This room is not linked to GitHub.</div>}
             <label className="composer-field revision-field">
               <span>Branch, tag, or commit <i>optional</i></span>
               <input
@@ -2076,8 +2343,8 @@ const TaskComposer: React.FC<{
           </div>
           <p className="source-note">
             {repository
-              ? "Meanwhile will resolve short-lived checkout authority at execution time; the browser never receives a repository credential."
-              : "This local installation has no repository binding. Use a public HTTPS repository; no credential is embedded in the task."}
+              ? "This room is locked to this GitHub repository. Meanwhile resolves checkout authority at execution time; the browser never receives a credential."
+              : "Return to onboarding and import the GitHub repository before delegating work."}
           </p>
           {agents.length > 1 ? (
             <label className="composer-field composer-agent">
@@ -2108,7 +2375,7 @@ const TaskComposer: React.FC<{
           <button
             type="submit"
             className="composer-submit"
-            disabled={busy || !prompt.trim() || (!repository && !repositoryUrl.trim()) || !agentType}
+            disabled={busy || !prompt.trim() || !repository || !agentType}
           >
             {busy ? "Delegating…" : `Delegate to ${humanAgent(agentType)}`}
           </button>
@@ -2118,21 +2385,20 @@ const TaskComposer: React.FC<{
   );
 };
 
-const ProjectWatch: React.FC<{
+export const ProjectWatch: React.FC<{
   initialProjectId: string;
-  onLobby: () => void;
-}> = ({ initialProjectId, onLobby }) => {
+  initialTaskRef: ConversationRef | null;
+  onLobby: (replace?: boolean) => void;
+  onTaskChange: (task: ConversationRef | null, replace?: boolean) => void;
+}> = ({ initialProjectId, initialTaskRef, onLobby, onTaskChange }) => {
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0 });
   }, []);
-  const [projectId, setProjectId] = useState<string | null>(initialProjectId);
   const { data, error, mutate, isLoading } = useSWR<BoardResponse>(
-    `/board${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+    `/board?projectId=${encodeURIComponent(initialProjectId)}`,
     fetchJson,
     { refreshInterval: 5_000, keepPreviousData: true },
   );
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [taskOpen, setTaskOpen] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerOrigin, setComposerOrigin] = useState<"room" | "detail">("room");
   const composerContextRef = useRef<HTMLDivElement>(null);
@@ -2178,34 +2444,27 @@ const ProjectWatch: React.FC<{
   };
   const openTask = (row: PresentedBoardRow) => {
     roomScrollYRef.current = window.scrollY;
-    setSelectedId(`${row.kind}:${row.id}`);
-    transitionSurface(() => setTaskOpen(true));
+    onTaskChange({ kind: row.kind, id: row.id });
     window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
   };
   const closeTask = () => {
-    transitionSurface(() => setTaskOpen(false));
+    onTaskChange(null);
     window.requestAnimationFrame(() =>
       window.scrollTo({ top: roomScrollYRef.current, left: 0 }));
   };
   const replaceRelay = useBoard((state) => state.replaceRelay);
-  const selected = useMemo(() => {
-    const exact = data?.rows.find((row) => `${row.kind}:${row.id}` === selectedId);
-    const pendingRelay = data?.pendingRelays[0];
-    const relayed = pendingRelay
-      ? data?.rows.find(
-          (row) => row.kind === pendingRelay.task.kind && row.id === pendingRelay.task.id,
-        )
-      : undefined;
-    return exact ?? relayed ?? data?.rows.find((row) => row.section === "attention") ?? data?.rows[0] ?? null;
-  }, [data, selectedId]);
+  const selected = useMemo(
+    () => resolveConversationRef(data?.rows ?? [], initialTaskRef),
+    [data?.rows, initialTaskRef],
+  );
   useEffect(() => {
-    if (selectedId === null && selected !== null) {
-      setSelectedId(`${selected.kind}:${selected.id}`);
+    if (data !== undefined && initialTaskRef !== null && selected === null) {
+      onTaskChange(null, true);
     }
-  }, [selected, selectedId]);
+  }, [data, initialTaskRef, onTaskChange, selected]);
   useEffect(() => {
-    if (data && projectId === null) setProjectId(data.project.id);
-  }, [data, projectId]);
+    if (error instanceof FetchJsonError && [403, 404].includes(error.status)) onLobby(true);
+  }, [error, onLobby]);
   useEffect(() => {
     if (!data) return;
     const path = `/projects/${data.project.id}/presence/${presenceClientId}`;
@@ -2232,6 +2491,9 @@ const ProjectWatch: React.FC<{
     return () => { context.inert = false; };
   }, [composerOpen]);
   if (isLoading && data === undefined) return <ProductStatus message="Opening the Project room…" />;
+  if (error instanceof FetchJsonError && [403, 404].includes(error.status)) {
+    return <ProductStatus message="Returning to your Project Lobby…" />;
+  }
   if (!data) {
     return <ProductStatus alert message="Project Watch is unavailable." retry={() => void mutate()} />;
   }
@@ -2245,7 +2507,7 @@ const ProjectWatch: React.FC<{
       pendingRelays={data.pendingRelays}
       recentRelays={data.recentRelays}
       connectionState={error === undefined ? "healthy" : "reconnecting"}
-      onBack={onLobby}
+      onBack={() => onLobby()}
       onDelegate={() => openComposer("room")}
       onOpenTask={openTask}
     />
@@ -2268,7 +2530,7 @@ const ProjectWatch: React.FC<{
   return (
     <>
       <div ref={composerContextRef} className={composerOpen ? "task-composer-context is-obscured" : "task-composer-context"} aria-hidden={composerOpen || undefined}>
-        {taskOpen ? detailSurface : roomSurface}
+        {initialTaskRef !== null && selected !== null ? detailSurface : roomSurface}
       </div>
       <AnimatePresence>
         {composerOpen ? (
@@ -2303,9 +2565,8 @@ const ProjectWatch: React.FC<{
                 onCancel={closeComposer}
                 onCreated={async (runId) => {
                   await mutate();
-                  setSelectedId(`run:${runId}`);
                   setComposerOpen(false);
-                  setTaskOpen(true);
+                  onTaskChange({ kind: "run", id: runId });
                 }}
               />
             </motion.div>
@@ -2316,20 +2577,70 @@ const ProjectWatch: React.FC<{
   );
 };
 
-const AuthenticatedFlow: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
+const AuthenticatedFlow: React.FC<{
+  onLogout: () => void;
+  connectorAdoption: ConnectorAdoptionRequest | null;
+  onConnectorAdoptionClosed: () => void;
+}> = ({ onLogout, connectorAdoption, onConnectorAdoptionClosed }) => {
   const { data, isLoading, mutate } = useSWR<OnboardingResponse>("/onboarding", fetchJson, {
     shouldRetryOnError: false,
   });
-  const [openedProjectId, setOpenedProjectId] = useState<string | null>(null);
+  const [route, setRoute] = useState<BoardRoute>(() => parseBoardRoute(window.location.pathname));
   const [entered, setEntered] = useState(false);
   const initialReady = useRef<boolean | null>(null);
+  const navigate = useCallback((next: BoardRoute, replace = false) => {
+    const path = boardRoutePath(next);
+    if (window.location.pathname !== path) {
+      window.history[replace ? "replaceState" : "pushState"](null, "", path);
+    }
+    transitionSurface(() => setRoute(next));
+  }, []);
+  useEffect(() => {
+    const normalized = boardRoutePath(route);
+    if (window.location.pathname !== normalized) {
+      window.history.replaceState(null, "", normalized);
+    }
+    const restoreLocation = () => transitionSurface(() => {
+      setRoute(parseBoardRoute(window.location.pathname));
+    });
+    window.addEventListener("popstate", restoreLocation);
+    return () => window.removeEventListener("popstate", restoreLocation);
+  }, [route]);
+  useEffect(() => {
+    if (data === undefined || route.surface !== "project") return;
+    const accessible = data.projects.some(
+      (entry) => entry.selected && entry.project.id === route.projectId,
+    );
+    if (!accessible) navigate({ surface: "lobby" }, true);
+  }, [data, navigate, route]);
   if (isLoading && data === undefined) return <ProductStatus message="Preparing your Projects…" />;
   if (data === undefined) {
     return <ProductStatus alert message="Connected onboarding is unavailable." retry={() => void mutate()} />;
   }
   const selectedProjects = data.projects.filter((entry) => entry.selected);
-  const ready = data.agentConnections.length > 0 && selectedProjects.length > 0;
+  const ready = selectedProjects.length > 0;
   if (initialReady.current === null) initialReady.current = ready;
+  if (connectorAdoption !== null) {
+    return (
+      <ConnectorAdoption
+        request={connectorAdoption}
+        data={data}
+        onChanged={() => mutate()}
+        onApproved={(projectId) => {
+          clearConnectorAdoption();
+          setEntered(true);
+          onConnectorAdoptionClosed();
+          navigate({ surface: "project", projectId, conversation: null }, true);
+        }}
+        onCancel={() => {
+          clearConnectorAdoption();
+          onConnectorAdoptionClosed();
+          navigate({ surface: "lobby" }, true);
+        }}
+        onLogout={onLogout}
+      />
+    );
+  }
   if (!ready || (initialReady.current === false && !entered)) {
     return (
       <ConnectedOnboarding
@@ -2340,20 +2651,33 @@ const AuthenticatedFlow: React.FC<{ onLogout: () => void }> = ({ onLogout }) => 
       />
     );
   }
-  return openedProjectId === null ? (
+  const accessibleRoute = route.surface === "project" && selectedProjects.some(
+    (entry) => entry.project.id === route.projectId,
+  ) ? route : ({ surface: "lobby" } as const);
+  return accessibleRoute.surface === "lobby" ? (
     <ProjectLobby
-      onOpen={(projectId) => transitionSurface(() => setOpenedProjectId(projectId))}
+      onOpen={(projectId) => navigate({ surface: "project", projectId, conversation: null })}
       onLogout={onLogout}
     />
   ) : (
     <ProjectWatch
-      initialProjectId={openedProjectId}
-      onLobby={() => transitionSurface(() => setOpenedProjectId(null))}
+      key={accessibleRoute.projectId}
+      initialProjectId={accessibleRoute.projectId}
+      initialTaskRef={accessibleRoute.conversation}
+      onLobby={(replace = false) => navigate({ surface: "lobby" }, replace)}
+      onTaskChange={(conversation, replace = false) => navigate({
+        surface: "project",
+        projectId: accessibleRoute.projectId,
+        conversation,
+      }, replace)}
     />
   );
 };
 
 const App: React.FC = () => {
+  const [connectorAdoption, setConnectorAdoption] = useState<ConnectorAdoptionRequest | null>(
+    initialConnectorAdoption,
+  );
   const { data, error, isLoading, mutate } = useSWR<SessionResponse>("/session", fetchJson, {
     shouldRetryOnError: false,
   });
@@ -2400,7 +2724,13 @@ const App: React.FC = () => {
         await fetch("/logout", { method: "POST" });
         await mutate({ authenticated: false }, { revalidate: false });
   };
-  return <AuthenticatedFlow onLogout={logout} />;
+  return (
+    <AuthenticatedFlow
+      onLogout={logout}
+      connectorAdoption={connectorAdoption}
+      onConnectorAdoptionClosed={() => setConnectorAdoption(null)}
+    />
+  );
 };
 
 class WatchErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {

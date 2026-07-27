@@ -8,14 +8,16 @@ authorization without turning GitHub into the work control plane. The
 implementation status and remaining proof boundary are recorded here rather
 than hidden behind UI claims.
 
-## Current ADR 0009 and 0011 override
+## Current ADR 0009, 0011, and 0012 override
 
-The Live Deck is now the Project-room reference surface. One acrylic sheet equals
-one authoritative Run or AgentSession and shows its human delegator, agent,
-explicit state, bounded conversation preview, and foldable-work summaries.
-Opening the sheet enters the complete native conversation. The former Project
+The Live Deck is now the Project-room reference surface. One acrylic sheet
+equals one authoritative Run or AgentSession or one explicitly source-owned
+ConversationMirror and shows its human delegator, agent/source, truthful
+condition, bounded conversation preview, and foldable-work summaries. Opening
+the sheet enters the corresponding complete conversation. The former Project
 Watch master-detail and Room Pulse sections below are retained as implementation
-and decision history; where they conflict with this section, ADR 0009 controls.
+and decision history; where they conflict with this section, ADRs 0009 and 0012
+control.
 
 The product contracts are explicit rather than simulated:
 
@@ -26,6 +28,14 @@ The product contracts are explicit rather than simulated:
 - TaskRelay retained as addressed acknowledgement-bearing handoff;
 - no second task lifecycle, copied transcript, Project activity journal, or
   user-facing `evidence` mode.
+- an outbound-only Local Companion, Principal-bound ConnectorDevice, explicit
+  Project share grant, and append-only ConversationMirror for selected existing
+  Codex.app, Codex CLI, or Claude Code work;
+- a tagged `run | session | mirror` Project work projection whose Linked
+  conversation cards never imply agent lifecycle control;
+- a true local sandbox provider as the preferred owned-execution topology,
+  while the existing local process adapter remains explicitly non-isolated and
+  Cloudflare remains optional.
 
 ## Why the route is now fixed
 
@@ -44,10 +54,18 @@ polling plus native task events, and exact additive migrations.
 > detail and conversation without gaining control over somebody else's
 > agent.
 
-Before entering one Project, the Lobby must show only the Projects the current
-identity is qualified to enter and make live work or personal Relay attention
-legible without fabricating presence. GitHub may optionally supply repository
-eligibility, while Meanwhile retains delegation and lifecycle authority.
+That work may be a Meanwhile-owned Run/AgentSession or an explicitly shared
+source-owned ConversationMirror. The room must make custody legible: native
+work carries only controls Meanwhile can enforce, while a Linked conversation
+carries observation, Annotation, and Relay without false cancel, send,
+artifact, deployment, or recovery affordances.
+
+Before entering one Project, the Lobby must show only the GitHub repositories
+the current identity is qualified to enter and make live work or personal Relay
+attention legible without fabricating presence. Each visible Project is the one
+durable room for one immutable GitHub repository ID inside its Owner. GitHub
+supplies repository identity and current eligibility; Meanwhile retains
+delegation, collaboration, and lifecycle authority.
 
 The smallest proof is:
 
@@ -62,6 +80,13 @@ Bob Relays one exact transcript moment to Alice; Alice acknowledges it
         ↓
 Bob cannot issue lifecycle commands against Alice's work
 ```
+
+ADR 0012 adds an equally important local-first proof: Alice uses Codex.app,
+Codex CLI, or Claude Code normally; her paired Companion shares one explicitly
+authorized conversation into Project P; Bob follows that same live source
+detail; neither Bob nor Meanwhile receives source-agent controls. A separate
+local sandbox receipt is required before a Meanwhile-owned local task may be
+called isolated.
 
 Generic social comments, mentions, reactions, task assignment, workflow
 columns, agent orchestration, and editing remain outside this acceptance floor.
@@ -109,10 +134,14 @@ The source now implements:
   grant/binding, agent connection, and Project selection records; optional
   GitHub App and Google OIDC login/link/invite use PKCE, sealed provider-bound
   state, sealed server-side credentials, and opaque browser sessions;
-- personal Lobby selection remains independent of optional Project repository
-  governance, so GitHub-backed and unbound local Projects can be selected
-  together; an `administer` grant may atomically import one repository as a
-  provider-governed Project without fabricating membership;
+- personal Lobby selection stores only GitHub-bound Projects. An `administer`
+  grant may atomically import one repository as its unique room without
+  fabricating membership; unbound operator/bootstrap Projects never appear as
+  collaboration rooms;
+- Project repository identity is immutable and Owner-unique by GitHub
+  repository ID. GitHub rename/URL/installation metadata may refresh in place,
+  while duplicate import, Project rebinding, cross-repository Run or Session
+  creation, and cross-repository Linked conversation publication fail closed;
 - high-entropy, digest-only, expiring and revocable Principal invitations whose
   redemption is atomic with identity binding and browser-session issuance;
 - exact per-delegator private GitHub checkout authority, revalidated immediately
@@ -162,6 +191,23 @@ acknowledgement. The temporary ingress
 was removed after verification. This closes the automated topology path but
 does not satisfy the clean-revision gate, credentialed live-agent gate, or
 two-person acceptance.
+
+## Selected local-first vertical slice
+
+ADR 0012 changes the next gate without rewriting the implemented collaboration
+journey. The selected slice is one complete path from Companion pairing through
+an exact Project share grant, deterministic Codex and Claude source parsing,
+durable local outbox, idempotent mirror ingestion, `kind: mirror` Project work,
+live Conversation Detail, Annotation, Relay, revocation, restart, and replay.
+It must ship as the existing Bun CLI plus small `src/connectors/` adapters, not
+a second application framework or source-specific control plane.
+
+The same phase adds a real local sandbox behind `RuntimeProvider`. The current
+host-process `local` adapter remains available for deterministic development and
+continues to report no isolation. The sandbox receipt, real local-source
+receipt, clean collaboration receipt, and two-human acceptance are independent
+claims. This section is selected contract, not evidence that an unfinished
+piece has passed.
 
 ## Current Board experience
 
@@ -247,6 +293,8 @@ control-plane architecture:
 | Marginalia | exact source-anchored Project Annotation; addressed Relay remains distinct | ADR 0009 |
 | External authorization | linked Principal identity; sealed OAuth/OIDC state and credentials; JIT checkout only | ADR 0010 |
 | Provider-derived Project access | explicit open/closed registration; repository import; request-time effective access; per-delegator checkout | ADR 0011 |
+| Existing local-agent integration | ConnectorDevice + explicit share grant + ConversationMirror; source-owned and observation-only | ADR 0012 |
+| Local-first owned execution | real local sandbox behind RuntimeProvider; existing host process remains non-isolated; Cloudflare optional | ADR 0012 |
 
 Browser sessions remain deny-by-default; ADR 0008 adds exact one-shot Run
 creation and delegator-authorized cancellation to the Relay writes from ADR
@@ -327,6 +375,8 @@ This is the selected product contract implemented by the current vertical slice.
   than “me”;
 - one acrylic card per native task showing the conversation, delegator, agent,
   explicit condition, foldable-work summaries, and source entry;
+- one clearly marked Linked conversation card per authorized mirror, with source
+  app, sync condition, bounded preview, and no fabricated lifecycle controls;
 - a bounded recent-handoff rail projected from Project Relays independently of
   the current viewer's pending inbox;
 - one unambiguous path into detail;
@@ -335,7 +385,8 @@ This is the selected product contract implemented by the current vertical slice.
 ### Work detail
 
 - immutable original ask and delegator;
-- current authoritative Run or AgentSession state;
+- current authoritative Run or AgentSession state, or the explicitly distinct
+  source-observed condition of a ConversationMirror;
 - durable conversation in human reading order;
 - live incremental Markdown for readable agent text, with working and tool
   details folded without discarding them and a reader-controlled follow state;
@@ -347,6 +398,8 @@ This is the selected product contract implemented by the current vertical slice.
 - workspace/revision basis when known;
 - timestamps and recovery/cleanup facts when they affect trust;
 - an explicit distinction between observation and available control.
+- for a mirror, no artifact, deployment, recovery, cancel, interrupt, or send
+  affordance unless a future separate owned capability actually supplies it.
 
 ### Terminology
 
@@ -356,15 +409,17 @@ Product language should use `Project`, `member`, `delegated by`, `agent`,
 
 ## Architecture decision frame
 
-The implemented architecture is:
+The selected collaboration architecture is:
 
 ```text
 Owner or installation tenant
         └── Project
               ├── ProjectMembership ── stable human/service identity
               ├── TaskRelay ────────── human author → recipient + task event anchor
-              └── Run / AgentSession ── immutable project + delegator binding
-                       └── events / artifacts / deployments inherit access
+              ├── Run / AgentSession ── immutable project + delegator binding
+              │        └── events / artifacts / deployments inherit access
+              └── ConversationMirror ─ immutable project + delegator + source
+                       └── MirrorEvents; observation and human collaboration only
 ```
 
 This shape preserves a hard tenant boundary and avoids copying mutable Project
@@ -414,6 +469,8 @@ topology impossible.
 - **Hono + Zod/OpenAPI** for authenticated Project resources;
 - **SQLite WAL** for identity, membership, attribution, and any durable replay
   contract selected later;
+- **the same Bun CLI** for the outbound Local Companion, with source parsers in
+  `src/connectors/` and a small device-local SQLite outbox;
 - **React in the isolated `board/` workspace** for the reference experience;
 - **SWR** for authoritative list/detail snapshots;
 - **Zustand or a smaller local reducer** only for live presentation state;
@@ -475,6 +532,13 @@ The core visibility release will be complete only when one clean revision proves
 9. Credential rotation, member removal, control-plane restart, backup, and
    restore preserve attribution and enforce current membership.
 
+The local-first extension additionally proves one real external Codex or Claude
+conversation through pairing, explicit Project consent, outbox restart,
+idempotent replay, live follow, revocation, Annotation, and Relay. That receipt
+must state that the source tool retains lifecycle authority. Local-sandbox
+acceptance is separate and must exercise the actual isolation backend rather
+than the non-isolated host process adapter.
+
 `bun run proof:project-collaboration` executes the technical matrix through the
 public SDK, raw HTTP authorization boundary, production server entry point, and
 Board BFF. It writes a self-verifying receipt whose digest covers the
@@ -518,6 +582,11 @@ claim the shared visibility outcome the user actually asked for.
   easier.
 - Do not treat a Project field, multiple API keys, mock data, or two browser
   windows as multi-person proof.
+- Do not treat a fixture transcript, file tail, hook callback, or synced card as
+  proof that Meanwhile controls or can recover the external agent.
+- Do not copy source-app credentials into a Companion event or local sandbox.
+- Do not let Cloudflare, Colima, Docker, Apple Container, or any managed service
+  become Project or conversation semantics.
 - Keep “implemented,” “locally proved,” “remote proved,” and “released” as
   separate claims.
 - Keep automated system proof, participant-attested human acceptance, and

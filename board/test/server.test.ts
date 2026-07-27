@@ -46,6 +46,20 @@ describe("Project Watch boundary", () => {
     expect(shell.headers.get("content-type")).toContain("text/html");
   });
 
+  test("serves the SPA shell for stable Project and Conversation deep links", async () => {
+    for (const path of [
+      "/connect?device=local",
+      `/projects/${API_PROJECT_ID}`,
+      `/projects/${API_PROJECT_ID}/conversations/run/${API_RUN_ID}`,
+      `/projects/${API_PROJECT_ID}/conversations/mirror/linked-conversation-1`,
+    ]) {
+      const response = await fetch(`${base}${path}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(await response.text()).toContain('<div id=root>');
+    }
+  });
+
   test("ships defensive headers and never traverses assets", async () => {
     const shell = await fetch(`${base}/`);
     expect(shell.headers.get("x-frame-options")).toBe("DENY");
@@ -300,6 +314,9 @@ describe("team browser session", () => {
     const onboardingWrites: Array<{ method: string; path: string; body: unknown }> = [];
     const connectionId = "00000000-0000-4000-8000-000000000071";
     const grantId = "00000000-0000-4000-8000-000000000072";
+    const connectorDeviceId = "00000000-0000-4000-8000-000000000075";
+    const conversationGrantId = "00000000-0000-4000-8000-000000000076";
+    const connectorSecret = `mwd_${"e".repeat(12)}_${"f".repeat(43)}`;
     const presenceClientId = "00000000-0000-4000-8000-000000000074";
     const presenceLease = {
       ownerId: API_OWNER_ID,
@@ -412,6 +429,67 @@ describe("team browser session", () => {
               },
             ],
           });
+        }
+        const connectorDevice = {
+          id: connectorDeviceId,
+          ownerId: API_OWNER_ID,
+          principalId: API_PRINCIPAL_ID,
+          displayName: "Codex app on this Mac",
+          source: "codex" as const,
+          createdAt: API_TIMESTAMP,
+          lastSeenAt: null,
+          revokedAt: null,
+        };
+        const conversationGrant = {
+          id: conversationGrantId,
+          ownerId: API_OWNER_ID,
+          projectId: API_PROJECT_ID,
+          connectorDeviceId,
+          source: "codex" as const,
+          authorizedByPrincipalId: API_PRINCIPAL_ID,
+          createdAt: API_TIMESTAMP,
+          revokedAt: null,
+        };
+        if (request.method === "GET" && url.pathname === "/connector-devices") {
+          return Response.json({ items: [] });
+        }
+        if (request.method === "GET" && url.pathname === "/conversation-share-grants") {
+          return Response.json({ items: [] });
+        }
+        if (request.method === "POST" && url.pathname === "/connector-devices/adopt") {
+          const body = await request.json();
+          onboardingWrites.push({ method: request.method, path: url.pathname, body });
+          return Response.json({ device: connectorDevice, grant: conversationGrant }, { status: 201 });
+        }
+        if (request.method === "POST" && url.pathname === "/connector-devices") {
+          const body = await request.json();
+          onboardingWrites.push({ method: request.method, path: url.pathname, body });
+          return Response.json({ device: connectorDevice, secret: connectorSecret }, { status: 201 });
+        }
+        if (
+          request.method === "POST" &&
+          url.pathname === `/connector-devices/${connectorDeviceId}/grants`
+        ) {
+          const body = await request.json();
+          onboardingWrites.push({ method: request.method, path: url.pathname, body });
+          return Response.json({ grant: conversationGrant }, { status: 201 });
+        }
+        if (
+          request.method === "DELETE" &&
+          url.pathname === `/conversation-share-grants/${conversationGrantId}`
+        ) {
+          onboardingWrites.push({ method: request.method, path: url.pathname, body: null });
+          return Response.json({ grant: { ...conversationGrant, revokedAt: API_TIMESTAMP } });
+        }
+        if (
+          request.method === "DELETE" &&
+          url.pathname === `/connector-devices/${connectorDeviceId}`
+        ) {
+          onboardingWrites.push({ method: request.method, path: url.pathname, body: null });
+          return Response.json({ device: { ...connectorDevice, revokedAt: API_TIMESTAMP } });
+        }
+        if (request.method === "POST" && url.pathname === "/connector/v1/heartbeat") {
+          return Response.json({ device: { ...connectorDevice, lastSeenAt: API_TIMESTAMP } });
         }
         if (
           request.method === "POST" &&
@@ -732,6 +810,8 @@ describe("team browser session", () => {
       expect(await onboarding.json()).toMatchObject({
         repositoryBindings: [{ repositoryFullName: "kohoz/meanwhile", private: true }],
         agentConnections: [{ agentType: "demo" }],
+        connectorDevices: [],
+        conversationShareGrants: [],
       });
       expect(
         (
@@ -747,6 +827,66 @@ describe("team browser session", () => {
         "Content-Type": "application/json",
         Origin: teamBase,
       };
+      const adopted = await fetch(`${teamBase}/onboarding/connector-devices/adopt`, {
+        method: "POST",
+        headers: onboardingHeaders,
+        body: JSON.stringify({
+          deviceId: connectorDeviceId,
+          displayName: "Codex app on this Mac",
+          source: "codex",
+          credentialPrefix: `mwd_${"e".repeat(12)}`,
+          credentialHash: `sha256:${"a".repeat(64)}`,
+          projectId: API_PROJECT_ID,
+        }),
+      });
+      expect(adopted.status).toBe(201);
+      expect(await adopted.json()).toMatchObject({
+        device: { id: connectorDeviceId },
+        grant: { projectId: API_PROJECT_ID },
+      });
+      const paired = await fetch(`${teamBase}/onboarding/connector-devices`, {
+        method: "POST",
+        headers: onboardingHeaders,
+        body: JSON.stringify({ source: "codex", displayName: "Codex app on this Mac" }),
+      });
+      expect(paired.status).toBe(201);
+      expect(await paired.json()).toMatchObject({
+        device: { id: connectorDeviceId, source: "codex" },
+        secret: connectorSecret,
+      });
+      expect(
+        (
+          await fetch(`${teamBase}/onboarding/connector-devices/${connectorDeviceId}/grants`, {
+            method: "POST",
+            headers: onboardingHeaders,
+            body: JSON.stringify({ projectId: API_PROJECT_ID }),
+          })
+        ).status,
+      ).toBe(201);
+      expect(
+        (
+          await fetch(`${teamBase}/connector/v1/heartbeat`, {
+            method: "POST",
+            headers: { Authorization: `Connector ${connectorSecret}` },
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await fetch(
+            `${teamBase}/onboarding/conversation-share-grants/${conversationGrantId}`,
+            { method: "DELETE", headers: { Cookie: sessionCookie, Origin: teamBase } },
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await fetch(`${teamBase}/onboarding/connector-devices/${connectorDeviceId}`, {
+            method: "DELETE",
+            headers: { Cookie: sessionCookie, Origin: teamBase },
+          })
+        ).status,
+      ).toBe(200);
       expect(
         (
           await fetch(`${teamBase}/onboarding/agent-connections`, {
@@ -792,6 +932,38 @@ describe("team browser session", () => {
         ).status,
       ).toBe(200);
       expect(onboardingWrites).toEqual([
+        {
+          method: "POST",
+          path: "/connector-devices/adopt",
+          body: {
+            deviceId: connectorDeviceId,
+            displayName: "Codex app on this Mac",
+            source: "codex",
+            credentialPrefix: `mwd_${"e".repeat(12)}`,
+            credentialHash: `sha256:${"a".repeat(64)}`,
+            projectId: API_PROJECT_ID,
+          },
+        },
+        {
+          method: "POST",
+          path: "/connector-devices",
+          body: { source: "codex", displayName: "Codex app on this Mac" },
+        },
+        {
+          method: "POST",
+          path: `/connector-devices/${connectorDeviceId}/grants`,
+          body: { projectId: API_PROJECT_ID },
+        },
+        {
+          method: "DELETE",
+          path: `/conversation-share-grants/${conversationGrantId}`,
+          body: null,
+        },
+        {
+          method: "DELETE",
+          path: `/connector-devices/${connectorDeviceId}`,
+          body: null,
+        },
         { method: "POST", path: "/onboarding/agent-connections", body: { agentType: "demo" } },
         { method: "POST", path: "/onboarding/projects", body: { grantId } },
         {
@@ -946,9 +1118,11 @@ describe("team browser session", () => {
       ).toBe(204);
       expect(authorizations[0]).toStartWith("Bearer mwk_");
       expect(authorizations.slice(1).length).toBeGreaterThanOrEqual(15);
+      expect(authorizations.filter((value) => value === `Connector ${connectorSecret}`)).toHaveLength(1);
       expect(
         authorizations
           .slice(1)
+          .filter((authorization) => !authorization.startsWith("Connector "))
           .every((authorization) => authorization === `Session mws_${"a".repeat(12)}_${"b".repeat(43)}`),
       ).toBe(true);
     } finally {

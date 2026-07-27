@@ -1,6 +1,9 @@
 import type { z } from "zod"
 import {
   AddProjectMemberRequestSchema,
+  type AdoptConnectorDeviceRequest,
+  AdoptConnectorDeviceRequestSchema,
+  AdoptedConnectorDeviceResponseSchema,
   type AgentConnection,
   AgentConnectionResponseSchema,
   type AgentSession,
@@ -25,12 +28,26 @@ import {
   ConnectAgentRequestSchema,
   type ConnectedOnboarding,
   ConnectedOnboardingResponseSchema,
+  type ConnectorDevice,
+  ConnectorDevicePageSchema,
+  ConnectorDeviceResponseSchema,
+  type ConnectorSetupResponse,
+  ConnectorSetupResponseSchema,
+  type ConversationMirror,
+  ConversationMirrorResponseSchema,
+  type ConversationShareGrant,
+  ConversationShareGrantPageSchema,
+  ConversationShareGrantResponseSchema,
   CreateApiKeyRequestSchema,
   type CreateBriefRequest,
   CreateBriefRequestSchema,
+  type CreateConnectorDeviceRequest,
+  CreateConnectorDeviceRequestSchema,
+  CreateConversationShareGrantRequestSchema,
   type CreateDeploymentRequest,
   CreateDeploymentRequestSchema,
   CreatedApiKeyResponseSchema,
+  CreatedConnectorDeviceResponseSchema,
   CreatedPrincipalInvitationResponseSchema,
   type CreatePrincipalRequest,
   CreatePrincipalRequestSchema,
@@ -58,6 +75,10 @@ import {
   ImportedProjectRepositoryResponseSchema,
   ImportProjectRepositoryRequestSchema,
   MeResponseSchema,
+  type MirrorEvent,
+  type MirrorEventPage,
+  MirrorEventPageSchema,
+  MirrorEventSchema,
   type PresenceLease,
   PresenceLeasePageSchema,
   PresenceLeaseResponseSchema,
@@ -223,6 +244,33 @@ export interface SessionsClient {
   close(id: string, options?: RequestOptions): Promise<AgentSession>
 }
 
+export interface ConversationMirrorsClient {
+  get(id: string, options?: RequestOptions): Promise<ConversationMirror>
+  events(id: string, options?: ListSequenceOptions): Promise<MirrorEventPage>
+  followEvents(id: string, options?: FollowEventsOptions): AsyncIterable<MirrorEvent>
+}
+
+export interface ConnectorDevicesClient {
+  create(
+    input: CreateConnectorDeviceRequest,
+    options?: RequestOptions,
+  ): Promise<{ readonly device: ConnectorDevice; readonly secret: string }>
+  adopt(
+    input: AdoptConnectorDeviceRequest,
+    options?: RequestOptions,
+  ): Promise<{ readonly device: ConnectorDevice; readonly grant: ConversationShareGrant }>
+  setup(connectorSecret: string, options?: RequestOptions): Promise<ConnectorSetupResponse>
+  list(options?: RequestOptions): Promise<readonly ConnectorDevice[]>
+  revoke(id: string, options?: RequestOptions): Promise<ConnectorDevice>
+  grantProject(
+    id: string,
+    projectId: string,
+    options?: RequestOptions,
+  ): Promise<ConversationShareGrant>
+  grants(options?: RequestOptions): Promise<readonly ConversationShareGrant[]>
+  revokeGrant(id: string, options?: RequestOptions): Promise<ConversationShareGrant>
+}
+
 export interface ArtifactDownload {
   readonly body: ReadableStream<Uint8Array>
   readonly digest: string
@@ -264,6 +312,8 @@ export interface AuditClient {
         | "principal_invitation"
         | "task_relay"
         | "task_annotation"
+        | "connector_device"
+        | "conversation_mirror"
         | "api_key"
         | "browser_session"
         | "run"
@@ -351,7 +401,7 @@ export interface TaskRelaysClient {
   ): Promise<TaskRelay>
   list(
     projectId: string,
-    task: { readonly kind: "run" | "session"; readonly id: string },
+    task: { readonly kind: "run" | "session" | "mirror"; readonly id: string },
     options?: RequestOptions,
   ): Promise<readonly TaskRelay[]>
   inbox(projectId: string, options?: RequestOptions): Promise<readonly TaskRelay[]>
@@ -367,7 +417,7 @@ export interface TaskAnnotationsClient {
   ): Promise<TaskAnnotation>
   list(
     projectId: string,
-    task: { readonly kind: "run" | "session"; readonly id: string },
+    task: { readonly kind: "run" | "session" | "mirror"; readonly id: string },
     options?: RequestOptions,
   ): Promise<readonly TaskAnnotation[]>
   resolve(
@@ -406,6 +456,8 @@ export class MeanwhileError extends Error {
 export class Meanwhile {
   readonly runs: RunsClient
   readonly sessions: SessionsClient
+  readonly mirrors: ConversationMirrorsClient
+  readonly connectorDevices: ConnectorDevicesClient
   readonly artifacts: ArtifactsClient
   readonly briefs: BriefsClient
   readonly deployments: DeploymentsClient
@@ -422,6 +474,8 @@ export class Meanwhile {
     const transport = new Transport(options)
     this.runs = new Runs(transport)
     this.sessions = new Sessions(transport)
+    this.mirrors = new ConversationMirrors(transport)
+    this.connectorDevices = new ConnectorDevices(transport)
     this.artifacts = new Artifacts(transport)
     this.briefs = new Briefs(transport)
     this.deployments = new Deployments(transport)
@@ -691,10 +745,133 @@ class Sessions implements SessionsClient {
   }
 }
 
+class ConversationMirrors implements ConversationMirrorsClient {
+  constructor(private readonly transport: Transport) {}
+
+  async get(id: string, options: RequestOptions = {}): Promise<ConversationMirror> {
+    const result = await this.transport.json(
+      `${mirrorPath(id)}`,
+      ConversationMirrorResponseSchema,
+      signalInput(options.signal),
+    )
+    return result.mirror
+  }
+
+  events(id: string, options: ListSequenceOptions = {}): Promise<MirrorEventPage> {
+    return this.transport.json(
+      `${mirrorPath(id)}/events?${cursorQuery(options)}`,
+      MirrorEventPageSchema,
+      signalInput(options.signal),
+    )
+  }
+
+  async *followEvents(id: string, options: FollowEventsOptions = {}): AsyncIterable<MirrorEvent> {
+    yield* followEventStream(
+      this.transport,
+      id,
+      "mirror-events",
+      "event",
+      MirrorEventSchema,
+      "Invalid mirror event",
+      options,
+    )
+  }
+}
+
+class ConnectorDevices implements ConnectorDevicesClient {
+  constructor(private readonly transport: Transport) {}
+
+  create(
+    input: CreateConnectorDeviceRequest,
+    options: RequestOptions = {},
+  ): Promise<{ readonly device: ConnectorDevice; readonly secret: string }> {
+    return this.transport.json("connector-devices", CreatedConnectorDeviceResponseSchema, {
+      method: "POST",
+      body: parseInput(CreateConnectorDeviceRequestSchema, input),
+      ...signalInput(options.signal),
+    })
+  }
+
+  adopt(
+    input: AdoptConnectorDeviceRequest,
+    options: RequestOptions = {},
+  ): Promise<{ readonly device: ConnectorDevice; readonly grant: ConversationShareGrant }> {
+    return this.transport.json("connector-devices/adopt", AdoptedConnectorDeviceResponseSchema, {
+      method: "POST",
+      body: parseInput(AdoptConnectorDeviceRequestSchema, input),
+      ...signalInput(options.signal),
+    })
+  }
+
+  setup(connectorSecret: string, options: RequestOptions = {}): Promise<ConnectorSetupResponse> {
+    if (!/^mwd_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/.test(connectorSecret)) {
+      throw invalidArgument("Connector credential is invalid")
+    }
+    return this.transport.json("connector/v1/setup", ConnectorSetupResponseSchema, {
+      headers: new Headers({ Authorization: `Connector ${connectorSecret}` }),
+      authorizationOverride: true,
+      ...signalInput(options.signal),
+    })
+  }
+
+  async list(options: RequestOptions = {}): Promise<readonly ConnectorDevice[]> {
+    const result = await this.transport.json(
+      "connector-devices",
+      ConnectorDevicePageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async revoke(id: string, options: RequestOptions = {}): Promise<ConnectorDevice> {
+    const result = await this.transport.json(
+      `connector-devices/${encodeURIComponent(validId(id))}`,
+      ConnectorDeviceResponseSchema,
+      { method: "DELETE", ...signalInput(options.signal) },
+    )
+    return result.device
+  }
+
+  async grantProject(
+    id: string,
+    projectId: string,
+    options: RequestOptions = {},
+  ): Promise<ConversationShareGrant> {
+    const result = await this.transport.json(
+      `connector-devices/${encodeURIComponent(validId(id))}/grants`,
+      ConversationShareGrantResponseSchema,
+      {
+        method: "POST",
+        body: parseInput(CreateConversationShareGrantRequestSchema, { projectId }),
+        ...signalInput(options.signal),
+      },
+    )
+    return result.grant
+  }
+
+  async grants(options: RequestOptions = {}): Promise<readonly ConversationShareGrant[]> {
+    const result = await this.transport.json(
+      "conversation-share-grants",
+      ConversationShareGrantPageSchema,
+      signalInput(options.signal),
+    )
+    return result.items
+  }
+
+  async revokeGrant(id: string, options: RequestOptions = {}): Promise<ConversationShareGrant> {
+    const result = await this.transport.json(
+      `conversation-share-grants/${encodeURIComponent(validId(id))}`,
+      ConversationShareGrantResponseSchema,
+      { method: "DELETE", ...signalInput(options.signal) },
+    )
+    return result.grant
+  }
+}
+
 async function* followEventStream<Value extends { readonly sequence: number }>(
   transport: Transport,
   id: string,
-  resource: "logs" | "events" | "session-events",
+  resource: "logs" | "events" | "session-events" | "mirror-events",
   eventType: "log" | "event",
   schema: z.ZodType<Value>,
   invalidEventMessage: string,
@@ -707,7 +884,9 @@ async function* followEventStream<Value extends { readonly sequence: number }>(
   const path =
     resource === "session-events"
       ? `${sessionPath(id)}/events?${query}`
-      : `${runPath(id)}/${resource}?${query}`
+      : resource === "mirror-events"
+        ? `${mirrorPath(id)}/events?${query}`
+        : `${runPath(id)}/${resource}?${query}`
   let cursor = after
   let retryMilliseconds = DEFAULT_SSE_RETRY_MS
   let consecutiveEmptyConnections = 0
@@ -1358,6 +1537,7 @@ interface TransportRequest {
   readonly body?: unknown
   readonly signal?: AbortSignal
   readonly timeout?: boolean
+  readonly authorizationOverride?: boolean
 }
 
 class Transport {
@@ -1439,7 +1619,7 @@ class Transport {
     const method = options.method ?? "GET"
     const requestId = crypto.randomUUID()
     const headers = new Headers(options.headers)
-    headers.set("Authorization", this.authorization)
+    if (options.authorizationOverride !== true) headers.set("Authorization", this.authorization)
     headers.set("X-Request-ID", requestId)
     if (!headers.has("Accept")) headers.set("Accept", "application/json")
     if (options.body !== undefined) headers.set("Content-Type", "application/json")
@@ -1616,6 +1796,10 @@ function runPath(id: string): string {
 
 function sessionPath(id: string): string {
   return `sessions/${encodeURIComponent(validId(id))}`
+}
+
+function mirrorPath(id: string): string {
+  return `mirrors/${encodeURIComponent(validId(id))}`
 }
 
 function idempotencyHeaders(key: string | undefined): Headers {

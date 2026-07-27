@@ -4,7 +4,12 @@
 !.env.example
 compose.env
 node_modules
+**/node_modules
 dist
 coverage
 data
+.proof
+board/dist
+providers/cloudflare-sandbox/.runner
+providers/cloudflare-sandbox/image
 providers/cloudflare-sandbox/.wrangler

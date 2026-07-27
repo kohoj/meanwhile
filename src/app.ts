@@ -1,4 +1,4 @@
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 import { OpenAPIHono } from "@hono/zod-openapi"
 import type { MiddlewareHandler } from "hono"
 import { AgentCatalog } from "./agents/catalog"
@@ -11,6 +11,14 @@ import { controlRequestBodyLimit } from "./api/body"
 import { createBriefRoutes } from "./api/briefs"
 import { createBrowserSessionRoutes } from "./api/browser-sessions"
 import { createConnectedOnboardingRoutes } from "./api/connected-onboarding"
+import {
+  createConnectorDeviceRoutes,
+  createConnectorHeartbeatRoutes,
+} from "./api/connector-devices"
+import {
+  createConnectorMirrorRoutes,
+  createConversationMirrorRoutes,
+} from "./api/conversation-mirrors"
 import { createDeploymentRoutes } from "./api/deployments"
 import {
   createProtectedExternalAuthRoutes,
@@ -32,6 +40,7 @@ import {
   apiKeyPrefix,
   authenticateBearer,
   authenticateBrowserSession,
+  authenticateConnectorDevice,
   hashApiKey,
   LOCAL_BOOTSTRAP_API_KEY_ID,
   LOCAL_BOOTSTRAP_OWNER_ID,
@@ -54,6 +63,7 @@ import { Store } from "./persistence/store"
 import { ExecutionProvenanceCatalog, sha256File } from "./provenance"
 import { CloudflareRuntimeProvider } from "./providers/cloudflare-provider"
 import { LocalRuntimeProvider } from "./providers/local-provider"
+import { OciLocalRuntimeProvider } from "./providers/oci-local-provider"
 import { RuntimeProviderRegistry } from "./providers/registry"
 import { ensureDefaultRunnerBuilt } from "./runner-bootstrap"
 import { EnvironmentSecretResolver } from "./secrets"
@@ -63,6 +73,8 @@ import { AuditService } from "./services/audit-service"
 import { BriefService } from "./services/brief-service"
 import { BrowserSessionService } from "./services/browser-session-service"
 import { ConnectedOnboardingService } from "./services/connected-onboarding-service"
+import { ConnectorDeviceService } from "./services/connector-device-service"
+import { ConversationMirrorService } from "./services/conversation-mirror-service"
 import { CredentialLeaseReaper } from "./services/credential-lease-reaper"
 import {
   DeploymentDispatcher,
@@ -119,6 +131,18 @@ export const createApplication = async (
       },
       runnerDigest: localRunnerDigest,
     }),
+    ...(config.ociLocal === undefined
+      ? []
+      : [
+          new OciLocalRuntimeProvider({
+            rootDirectory: join(config.runtimeDir, "oci-local"),
+            imageReference: config.ociLocal.imageReference,
+            ...(config.ociLocal.imageDigest === undefined
+              ? {}
+              : { imageDigest: config.ociLocal.imageDigest }),
+            engineExecutable: config.ociLocal.engineExecutable,
+          }),
+        ]),
     ...(config.cloudflare === undefined
       ? []
       : [
@@ -191,6 +215,8 @@ export const createApplication = async (
       }))
     })
     const projectService = new ProjectService(store)
+    const connectorDeviceService = new ConnectorDeviceService(store)
+    const conversationMirrorService = new ConversationMirrorService(store)
     const presenceService = new PresenceService(store)
     const taskAnnotationService = new TaskAnnotationService(store)
     const taskRelayService = new TaskRelayService(store)
@@ -347,6 +373,12 @@ export const createApplication = async (
       scheme: "bearer",
       bearerFormat: "Meanwhile API key",
     })
+    app.openAPIRegistry.registerComponent("securitySchemes", "ConnectorAuth", {
+      type: "apiKey",
+      in: "header",
+      name: "Authorization",
+      description: "Connector <device credential>",
+    })
     app.use("*", async (context, next) => {
       const requestId = safeRequestId(context.req.header("X-Request-ID"))
       context.set("requestId", requestId)
@@ -387,6 +419,36 @@ export const createApplication = async (
       app.route("/", createPublicExternalAuthRoutes(externalAuthService))
     }
 
+    const authenticateConnector: MiddlewareHandler<ApiEnv> = async (context, next) => {
+      context.header("Cache-Control", "private, no-store")
+      const identity = await authenticateConnectorDevice(context.req.header("Authorization"), store)
+      if (identity === null) {
+        const error = new AppError({
+          code: "UNAUTHENTICATED",
+          message: "Connector authentication required",
+        })
+        return context.json(errorEnvelope(error, context.get("requestId")), 401)
+      }
+      const now = new Date().toISOString()
+      store.touchConnectorDevice(identity.connectorDeviceId, now)
+      context.get("requestSpan").setAttributes({ "owner.id": identity.ownerId })
+      context.set("requestContext", {
+        requestId: context.get("requestId"),
+        traceId: context.get("traceId"),
+        ownerId: identity.ownerId,
+        principalId: identity.principalId,
+        ownerRole: identity.ownerRole,
+        apiKeyId: null,
+        connectorDeviceId: identity.connectorDeviceId,
+      })
+      await next()
+    }
+    const connectorApi = new OpenAPIHono<ApiEnv>()
+    connectorApi.use("/connector/v1/*", authenticateConnector)
+    connectorApi.route("/", createConnectorHeartbeatRoutes(connectorDeviceService))
+    connectorApi.route("/", createConnectorMirrorRoutes(conversationMirrorService))
+    app.route("/", connectorApi)
+
     const authenticate: MiddlewareHandler<ApiEnv> = async (context, next) => {
       // Protected control-plane representations may contain prompts, metadata,
       // or one-time key material. Routes can opt into a stricter explicit
@@ -407,6 +469,7 @@ export const createApplication = async (
         !isBrowserSessionRunWrite(context.req.method, context.req.path) &&
         !isBrowserSessionPresenceWrite(context.req.method, context.req.path) &&
         !isBrowserSessionOnboardingWrite(context.req.method, context.req.path) &&
+        !isBrowserSessionConnectorDeviceWrite(context.req.method, context.req.path) &&
         !isBrowserSessionAnnotationWrite(context.req.method, context.req.path) &&
         !isBrowserSessionRelayWrite(context.req.method, context.req.path)
       ) {
@@ -444,6 +507,8 @@ export const createApplication = async (
     controlApi.route("/", createProjectRoutes(projectService))
     controlApi.route("/", createPresenceRoutes(presenceService))
     controlApi.route("/", createConnectedOnboardingRoutes(connectedOnboardingService))
+    controlApi.route("/", createConnectorDeviceRoutes(connectorDeviceService))
+    controlApi.route("/", createConversationMirrorRoutes(conversationMirrorService))
     controlApi.route("/", createTaskAnnotationRoutes(taskAnnotationService))
     controlApi.route("/", createTaskRelayRoutes(taskRelayService))
     controlApi.route("/", createBrowserSessionRoutes(browserSessionService))
@@ -678,6 +743,12 @@ const isBrowserSessionAnnotationWrite = (method: string, path: string): boolean 
   method === "POST" &&
   (new RegExp(`^/projects/${UUID_PATH}/annotations$`).test(path) ||
     new RegExp(`^/projects/${UUID_PATH}/annotations/${UUID_PATH}/resolve$`).test(path))
+
+const isBrowserSessionConnectorDeviceWrite = (method: string, path: string): boolean =>
+  (method === "POST" && (path === "/connector-devices" || path === "/connector-devices/adopt")) ||
+  (method === "POST" && new RegExp(`^/connector-devices/${UUID_PATH}/grants$`).test(path)) ||
+  (method === "DELETE" && new RegExp(`^/connector-devices/${UUID_PATH}$`).test(path)) ||
+  (method === "DELETE" && new RegExp(`^/conversation-share-grants/${UUID_PATH}$`).test(path))
 
 const isBrowserSessionOnboardingWrite = (method: string, path: string): boolean => {
   if (

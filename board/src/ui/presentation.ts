@@ -25,19 +25,49 @@ export const plainInlineMarkdown = (value: string): string =>
     .replace(/(^|[\s([{])([*_])(\S(?:[^\n]*?\S)?)\2(?=$|[\s)\]}.,!?])/g, "$1$3");
 
 export const statusTone = (status: string): "alert" | "active" | "ready" | "quiet" => {
-  if (["failed", "timed_out", "continuity_lost"].includes(status)) return "alert";
+  if (["failed", "timed_out", "continuity_lost", "disconnected"].includes(status)) return "alert";
   if (status === "idle") return "ready";
-  if (["queued", "provisioning", "running", "closing"].includes(status)) return "active";
+  if (["queued", "provisioning", "running", "closing", "active"].includes(status)) return "active";
   return "quiet";
 };
 
 export const displayStatus = (status: string): string => {
   if (status === "idle") return "ready";
-  if (status === "succeeded" || status === "closed") return "completed";
+  if (status === "succeeded" || status === "closed" || status === "ended") return "completed";
   return status.replace("_", " ");
 };
 
-const ACTIVE_WORK_STATUSES = new Set(["queued", "provisioning", "running", "closing"]);
+export const linkedConversationSource = (source: string): string =>
+  source === "claude-code" ? "Claude Code" : source === "codex" ? "Codex" : humanAgent(source);
+
+export const linkedConversationLabel = (
+  row: Pick<PresentedBoardRow, "kind" | "agentType">,
+): string | null => row.kind === "mirror"
+  ? `Linked conversation · observed from ${linkedConversationSource(row.agentType)}`
+  : null;
+
+export const observedConversationStatus = (
+  status: string,
+  syncStatus?: "waiting" | "connected" | "stale" | "revoked",
+): string => {
+  if (status === "active" && (syncStatus === undefined || syncStatus === "connected")) {
+    return "Observed live";
+  }
+  if (status === "ended") return "Source ended";
+  if (syncStatus === "waiting") return "Waiting for Companion";
+  if (syncStatus === "stale") return "Sync paused";
+  if (syncStatus === "revoked") return "Sharing revoked";
+  return "Sync idle";
+};
+
+/** Mirrors report source observation, not an execution lifecycle owned by Meanwhile. */
+export const displayWorkStatus = (
+  row: Pick<PresentedBoardRow, "kind" | "status" | "sourceObservation">,
+): string => row.kind === "mirror"
+  ? observedConversationStatus(row.status, row.sourceObservation?.syncStatus)
+  : displayStatus(row.status);
+
+const ACTIVE_WORK_STATUSES = new Set(["queued", "provisioning", "running", "closing", "active"]);
 
 /**
  * Active work shows time since acceptance. Inactive work shows time since its last state change.

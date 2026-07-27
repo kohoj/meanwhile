@@ -29,11 +29,24 @@ test("the route inventory is exact and every control operation fails closed", as
     "/briefs/{id}",
     "/browser-sessions",
     "/browser-sessions/current",
+    "/connector-devices",
+    "/connector-devices/adopt",
+    "/connector-devices/{id}",
+    "/connector-devices/{id}/grants",
+    "/connector/v1/heartbeat",
+    "/connector/v1/mirrors",
+    "/connector/v1/mirrors/{id}/checkpoint",
+    "/connector/v1/mirrors/{id}/events",
+    "/connector/v1/setup",
+    "/conversation-share-grants",
+    "/conversation-share-grants/{id}",
     "/deployments",
     "/deployments/{id}",
     "/deployments/{id}/logs",
     "/healthz",
     "/me",
+    "/mirrors/{id}",
+    "/mirrors/{id}/events",
     "/onboarding",
     "/onboarding/agent-connections",
     "/onboarding/agent-connections/{connectionId}",
@@ -76,6 +89,16 @@ test("the route inventory is exact and every control operation fails closed", as
   ]
   expect(Object.keys(specification.paths).sort()).toEqual(expectedPaths)
   expect(specification.security).toEqual([{ BearerAuth: [] }])
+  for (const path of [
+    "/connector/v1/heartbeat",
+    "/connector/v1/mirrors",
+    "/connector/v1/mirrors/{id}/checkpoint",
+    "/connector/v1/mirrors/{id}/events",
+    "/connector/v1/setup",
+  ]) {
+    const operation = specification.paths[path]?.get ?? specification.paths[path]?.post
+    expect(operation?.security).toEqual([{ ConnectorAuth: [] }])
+  }
 
   const publicPaths = new Set(["/healthz", "/readyz", "/openapi.json"])
   for (const path of publicPaths) {

@@ -79,38 +79,39 @@ data. Only the opaque Meanwhile session is returned to the Board cookie.
 ### Checkout authority
 
 A maintainer explicitly binds one `administer` GitHub grant to an existing
-Project. The binding freezes provider account, installation, repository, and
-URL identity; a repository URL alone grants nothing.
-
-This binding is optional Project governance, not a prerequisite for personal
-Lobby selection. Unbound Projects remain valid local/self-hosted rooms and may
-delegate against an explicitly supplied public HTTPS repository. The presence
-of any GitHub grant must not force unrelated selected Projects to bind to it.
+Project. As amended by ADR 0011 and the repository-fidelity contract, the
+immutable GitHub repository ID is the room identity; provider account,
+installation, repository name, and canonical URL are refreshable metadata. A
+repository URL alone grants nothing. Collaboration Lobby selection admits only
+bound Projects, and a Project can never be redirected to another repository.
 
 Immediately before preparing a repository-backed Run or AgentSession, the
 resolver requires the exact active Project binding, active grant, active
 Principal and Project membership,
 identity, non-expired credential, and current GitHub directory entry for the
-same installation and repository. It refreshes the bounded grant observation,
+same immutable repository ID. It refreshes the bounded grant observation,
 then returns a preformatted Basic authorization value only as
 `MEANWHILE_REPOSITORY_CREDENTIAL` to `WorkspacePreparer`. Git uses it as an HTTP
 header without embedding the token in argv or the repository URL. Git output is
 exact-value redacted, and a `finally` boundary releases the material before the
 runner or agent starts.
 
-Provider rejection or a missing repository revokes the grant and binding and
-fails closed. An expired access credential requires explicit relinking. The
+Provider rejection or a missing repository revokes the caller's grant and fails
+closed without revoking or repurposing the durable Project binding. An expired
+access credential requires explicit relinking. The
 current design does not automatically exchange a refresh token because GitHub
 refresh-token rotation would require a separate durable intent/recovery
 contract across the provider-mutation-before-persistence crash window.
 
 ## Consequences
 
-- GitHub and Google remain optional adapters; API-key and self-hosted bootstrap
-  paths retain the same Principal, Project, and session contracts.
-- One Lobby may contain GitHub-backed and unbound local Projects. Only a
-  maintainer with an `administer` grant receives the repository-binding control;
-  other members receive read-only binding context.
+- Google remains an optional identity adapter; API-key and self-hosted bootstrap
+  paths retain the same Principal and session contracts. GitHub repository
+  identity is required only for the collaboration Lobby, not for hosting the
+  control plane or choosing a runtime.
+- The Lobby contains only GitHub-backed Projects. A maintainer with an
+  `administer` grant may import the repository once; no role receives a
+  repository-rebinding control.
 - Provider tokens never become browser cookies, Run/Session input, runner
   environment, transcript, artifact, or agent credentials.
 - Repository authorization is checked at the last responsible moment rather

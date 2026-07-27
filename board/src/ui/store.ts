@@ -1,5 +1,8 @@
 import {
   type AgentTimeline,
+  type MirrorTimeline,
+  mirrorTimelineFromEvents,
+  reduceMirrorTimeline,
   reduceSessionTimeline,
   reduceTimeline,
   type SessionTimeline,
@@ -8,6 +11,7 @@ import {
 } from "@kohoz/meanwhile/timeline";
 import type {
   RunEvent,
+  MirrorEvent,
   SessionEvent,
   TaskAnnotation,
   TaskRelay,
@@ -17,14 +21,15 @@ import { create } from "zustand";
 interface BoardState {
   runTimelines: Record<string, AgentTimeline>;
   sessionTimelines: Record<string, SessionTimeline>;
+  mirrorTimelines: Record<string, MirrorTimeline>;
   taskAnnotations: Record<string, readonly TaskAnnotation[]>;
   taskRelays: Record<string, readonly TaskRelay[]>;
   loading: Record<string, boolean>;
   errors: Record<string, string | null>;
-  loadHistory: (kind: "run" | "session", id: string, projectId: string) => Promise<boolean>;
-  refreshRelays: (kind: "run" | "session", id: string, projectId: string) => Promise<void>;
-  refreshAnnotations: (kind: "run" | "session", id: string, projectId: string) => Promise<void>;
-  ingestEvent: (kind: "run" | "session", id: string, event: RunEvent | SessionEvent) => void;
+  loadHistory: (kind: "run" | "session" | "mirror", id: string, projectId: string) => Promise<boolean>;
+  refreshRelays: (kind: "run" | "session" | "mirror", id: string, projectId: string) => Promise<void>;
+  refreshAnnotations: (kind: "run" | "session" | "mirror", id: string, projectId: string) => Promise<void>;
+  ingestEvent: (kind: "run" | "session" | "mirror", id: string, event: RunEvent | SessionEvent | MirrorEvent) => void;
   replaceRelay: (relay: TaskRelay) => void;
   replaceAnnotation: (annotation: TaskAnnotation) => void;
 }
@@ -34,6 +39,7 @@ const historyRequests = new Map<string, Promise<boolean>>();
 export const useBoard = create<BoardState>((set, get) => ({
   runTimelines: {},
   sessionTimelines: {},
+  mirrorTimelines: {},
   taskAnnotations: {},
   taskRelays: {},
   loading: {},
@@ -41,7 +47,7 @@ export const useBoard = create<BoardState>((set, get) => ({
   loadHistory: (kind, id, projectId) => {
     const key = `${kind}:${id}`;
     const state = get();
-    if (state.runTimelines[id] || state.sessionTimelines[id]) return Promise.resolve(true);
+    if (state.runTimelines[id] || state.sessionTimelines[id] || state.mirrorTimelines[id]) return Promise.resolve(true);
     const pending = historyRequests.get(key);
     if (pending !== undefined) return pending;
     set((current) => ({
@@ -50,20 +56,36 @@ export const useBoard = create<BoardState>((set, get) => ({
     }));
     const request = (async () => {
       try {
-        const response = await fetch(
-          `/task/${kind}/${id}/events?projectId=${encodeURIComponent(projectId)}`,
-        );
-        if (!response.ok) {
-          set((current) => ({
-            errors: { ...current.errors, [key]: "Conversation history is unavailable." },
-          }));
-          return false;
+        const events: unknown[] = [];
+        let relays: readonly TaskRelay[] = [];
+        let annotations: readonly TaskAnnotation[] = [];
+        let after: number | null = null;
+        for (;;) {
+          const query = new URLSearchParams({ projectId });
+          if (after !== null) query.set("after", String(after));
+          const response = await fetch(`/task/${kind}/${id}/events?${query.toString()}`);
+          if (!response.ok) {
+            set((current) => ({
+              errors: { ...current.errors, [key]: "Conversation history is unavailable." },
+            }));
+            return false;
+          }
+          const page = (await response.json()) as {
+            events: unknown[];
+            nextCursor?: number | null;
+            relays: readonly TaskRelay[];
+            annotations: readonly TaskAnnotation[];
+          };
+          events.push(...page.events);
+          relays = page.relays;
+          annotations = page.annotations;
+          const next = page.nextCursor ?? null;
+          if (next === null) break;
+          if (!Number.isSafeInteger(next) || next < 1 || (after !== null && next <= after)) {
+            throw new Error("Invalid conversation history cursor");
+          }
+          after = next;
         }
-        const { events, relays, annotations } = (await response.json()) as {
-          events: unknown[];
-          relays: readonly TaskRelay[];
-          annotations: readonly TaskAnnotation[];
-        };
         if (kind === "run") {
           const timeline = timelineFromEvents(events as never[]);
           set((current) => ({
@@ -71,10 +93,17 @@ export const useBoard = create<BoardState>((set, get) => ({
             taskAnnotations: { ...current.taskAnnotations, [key]: annotations },
             taskRelays: { ...current.taskRelays, [key]: relays },
           }));
-        } else {
+        } else if (kind === "session") {
           const timeline = sessionTimelineFromEvents(events as never[]);
           set((current) => ({
             sessionTimelines: { ...current.sessionTimelines, [id]: timeline },
+            taskAnnotations: { ...current.taskAnnotations, [key]: annotations },
+            taskRelays: { ...current.taskRelays, [key]: relays },
+          }));
+        } else {
+          const timeline = mirrorTimelineFromEvents(events as never[]);
+          set((current) => ({
+            mirrorTimelines: { ...current.mirrorTimelines, [id]: timeline },
             taskAnnotations: { ...current.taskAnnotations, [key]: annotations },
             taskRelays: { ...current.taskRelays, [key]: relays },
           }));
@@ -103,7 +132,7 @@ export const useBoard = create<BoardState>((set, get) => ({
       });
       return;
     }
-    set((current) => {
+    if (kind === "session") set((current) => {
       const timeline = current.sessionTimelines[id];
       return timeline === undefined
         ? current
@@ -111,6 +140,17 @@ export const useBoard = create<BoardState>((set, get) => ({
             sessionTimelines: {
               ...current.sessionTimelines,
               [id]: reduceSessionTimeline(timeline, event as SessionEvent),
+            },
+          };
+    });
+    else set((current) => {
+      const timeline = current.mirrorTimelines[id];
+      return timeline === undefined
+        ? current
+        : {
+            mirrorTimelines: {
+              ...current.mirrorTimelines,
+              [id]: reduceMirrorTimeline(timeline, event as MirrorEvent),
             },
           };
     });

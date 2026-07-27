@@ -3,12 +3,8 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import {
-  CURRENT_SCHEMA,
-  databaseSchemaFingerprint,
-  SCHEMA_SQL,
-  splitSchemaSql,
-} from "../../src/persistence/schema"
+import { preConversationMirrorSchemaStatements } from "../../scripts/conversation-mirror-schema"
+import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../../src/persistence/schema"
 
 const PROJECT_WATCH_SCHEMA_FINGERPRINT =
   "c2defba13120fe341f211a6d56d6abfe4df5ccf91f499959761951be6c79d4f8"
@@ -89,7 +85,7 @@ function projectWatchSchemaStatements(): readonly string[] {
     "principal_invitations_prefix_idx",
     "principal_invitations_principal_idx",
   ])
-  return splitSchemaSql(SCHEMA_SQL).filter((statement) => {
+  return preConversationMirrorSchemaStatements().filter((statement) => {
     const match = /^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+([a-z0-9_]+)/i.exec(statement)
     return match === null || !relayObjects.has(match[1] as string)
   })

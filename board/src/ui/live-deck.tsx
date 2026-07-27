@@ -26,8 +26,10 @@ import seatAlice from "./assets/seat-alice.png";
 import seatBob from "./assets/seat-bob.png";
 import seatPriya from "./assets/seat-priya.png";
 import {
-  displayStatus,
+  displayWorkStatus,
   humanAgent,
+  linkedConversationLabel,
+  linkedConversationSource,
   plainInlineMarkdown,
   type PresentedBoardRow,
   workActivityAge,
@@ -236,9 +238,10 @@ const DeckTaskCard = ({ row, index, selected, relayCount, onFocus, onOpen }: {
   const loadHistory = useBoard((state) => state.loadHistory);
   const runTimeline = useBoard((state) => row.kind === "run" ? state.runTimelines[row.id] : undefined);
   const sessionTimeline = useBoard((state) => row.kind === "session" ? state.sessionTimelines[row.id] : undefined);
+  const mirrorTimeline = useBoard((state) => row.kind === "mirror" ? state.mirrorTimelines[row.id] : undefined);
   const historyLoading = useBoard((state) => state.loading[`${row.kind}:${row.id}`] ?? false);
   const historyError = useBoard((state) => state.errors[`${row.kind}:${row.id}`] ?? null);
-  const timeline = row.kind === "run" ? runTimeline : sessionTimeline;
+  const timeline = row.kind === "run" ? runTimeline : row.kind === "session" ? sessionTimeline : mirrorTimeline;
   useEffect(() => {
     void loadHistory(row.kind, row.id, row.projectId);
   }, [loadHistory, row.id, row.kind, row.projectId]);
@@ -246,12 +249,12 @@ const DeckTaskCard = ({ row, index, selected, relayCount, onFocus, onOpen }: {
   const preview = useMemo<DeckPreview>(() => {
     const blocks = composeTranscript(timeline?.messages ?? [], timeline?.toolCalls ?? []);
     const realTurns = ([
-      {
+      ...(row.kind === "mirror" ? [] : [{
         actor: row.delegatedBy.displayName,
-        role: "human",
+        role: "human" as const,
         text: promptBody(row.title),
         time: shortClock(row.createdAt),
-      },
+      }]),
       ...blocks.flatMap((block): DeckTurn[] => {
         if (block.type !== "message" || block.value.role === "thought") return [];
         return [{
@@ -268,7 +271,11 @@ const DeckTaskCard = ({ row, index, selected, relayCount, onFocus, onOpen }: {
       ? { kind: "shield", label: "Transcript", value: "Unavailable" }
       : historyLoading && timeline === undefined
         ? { kind: "brain", label: "Transcript", value: "Opening…" }
-        : { kind: "check", label: "Task status", value: displayStatus(row.status) };
+        : {
+            kind: "check",
+            label: row.kind === "mirror" ? "Source status" : "Task status",
+            value: displayWorkStatus(row),
+          };
     return {
       elapsed: workActivityAge(row),
       turns: realTurns,
@@ -277,12 +284,17 @@ const DeckTaskCard = ({ row, index, selected, relayCount, onFocus, onOpen }: {
   }, [historyError, historyLoading, row, timeline]);
 
   const tone = toneFor(row, index);
-  const agentName = humanAgent(row.agentType);
-  const status = ["queued", "provisioning", "running"].includes(row.status)
-    ? "LIVE"
-    : row.status === "idle"
-      ? "READY"
-      : displayStatus(row.status).toUpperCase();
+  const linkedLabel = linkedConversationLabel(row);
+  const agentName = row.kind === "mirror"
+    ? linkedConversationSource(row.agentType)
+    : humanAgent(row.agentType);
+  const status = row.kind === "mirror"
+    ? displayWorkStatus(row)
+    : ["queued", "provisioning", "running", "active"].includes(row.status)
+      ? "LIVE"
+      : row.status === "idle"
+        ? "READY"
+        : displayWorkStatus(row).toUpperCase();
   return (
     <article
       className={`deck-task-card tone-${tone} ${selected ? "is-selected" : ""} ${relayCount > 0 ? "has-incoming-relay" : ""}`}
@@ -296,9 +308,9 @@ const DeckTaskCard = ({ row, index, selected, relayCount, onFocus, onOpen }: {
           <span>×</span>
           <AgentOrb tone={tone} neutral={selected} />
         </div>
-        <div className="deck-card-parties">
+        <div className={`deck-card-parties ${linkedLabel === null ? "" : "is-linked"}`}>
           <strong>{row.delegatedBy.displayName}</strong>
-          <span>{agentName}</span>
+          <span>{linkedLabel ?? agentName}</span>
         </div>
         <div className="deck-card-status">
           <strong><i />{relayCount > 0 ? "PASSED TO YOU" : status}</strong>

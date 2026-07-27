@@ -1,6 +1,7 @@
 import { Meanwhile, MeanwhileError } from "@kohoz/meanwhile";
 import type {
   AgentConnection,
+  MirrorEvent,
   Principal,
   PresenceLease,
   Project,
@@ -78,7 +79,7 @@ interface LobbySnapshot {
   readonly updatedAt: string;
 }
 
-type TaskKind = "run" | "session";
+type TaskKind = "run" | "session" | "mirror";
 
 const SESSION_COOKIE = "mw_board_session";
 const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
@@ -149,6 +150,12 @@ export class BoardServer {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/login") return this.#login(request);
     if (request.method === "POST" && url.pathname === "/logout") return this.#logout(request);
+    if (
+      (request.method === "GET" || request.method === "POST") &&
+      url.pathname.startsWith("/connector/v1/")
+    ) {
+      return this.#proxyConnector(request, url);
+    }
     const invitation = url.pathname.match(/^\/join\/(mwi_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43})$/);
     if (request.method === "GET" && invitation !== null) {
       return this.#acceptInvitation(request, invitation[1] ?? "");
@@ -184,6 +191,30 @@ export class BoardServer {
     }
     if (request.method === "POST" && url.pathname === "/onboarding/agent-connections") {
       return this.#connectAgent(request);
+    }
+    if (request.method === "POST" && url.pathname === "/onboarding/connector-devices") {
+      return this.#createConnectorDevice(request);
+    }
+    if (request.method === "POST" && url.pathname === "/onboarding/connector-devices/adopt") {
+      return this.#adoptConnectorDevice(request);
+    }
+    const revokeConnectorDevice = url.pathname.match(
+      /^\/onboarding\/connector-devices\/([\w-]+)$/,
+    );
+    if (request.method === "DELETE" && revokeConnectorDevice !== null) {
+      return this.#revokeConnectorDevice(request, revokeConnectorDevice[1] ?? "");
+    }
+    const createConversationGrant = url.pathname.match(
+      /^\/onboarding\/connector-devices\/([\w-]+)\/grants$/,
+    );
+    if (request.method === "POST" && createConversationGrant !== null) {
+      return this.#grantConnectorProject(request, createConversationGrant[1] ?? "");
+    }
+    const revokeConversationGrant = url.pathname.match(
+      /^\/onboarding\/conversation-share-grants\/([\w-]+)$/,
+    );
+    if (request.method === "DELETE" && revokeConversationGrant !== null) {
+      return this.#revokeConversationShareGrant(request, revokeConversationGrant[1] ?? "");
     }
     const revokeAgentConnection = url.pathname.match(
       /^\/onboarding\/agent-connections\/([\w-]+)$/,
@@ -252,7 +283,7 @@ export class BoardServer {
     if (url.pathname === "/board") return this.#board(request, url.searchParams.get("projectId"));
     const projectPresence = url.pathname.match(/^\/projects\/([\w-]+)\/presence$/);
     if (projectPresence !== null) return this.#presence(request, projectPresence[1] ?? "");
-    const taskRelays = url.pathname.match(/^\/task\/(run|session)\/([\w-]+)\/relays$/);
+    const taskRelays = url.pathname.match(/^\/task\/(run|session|mirror)\/([\w-]+)\/relays$/);
     if (taskRelays !== null) {
       return this.#taskRelays(
         request,
@@ -263,7 +294,7 @@ export class BoardServer {
       );
     }
     const taskAnnotations = url.pathname.match(
-      /^\/task\/(run|session)\/([\w-]+)\/annotations$/,
+      /^\/task\/(run|session|mirror)\/([\w-]+)\/annotations$/,
     );
     if (taskAnnotations !== null) {
       return this.#taskAnnotations(
@@ -274,17 +305,18 @@ export class BoardServer {
         request.signal,
       );
     }
-    const history = url.pathname.match(/^\/task\/(run|session)\/([\w-]+)\/events$/);
+    const history = url.pathname.match(/^\/task\/(run|session|mirror)\/([\w-]+)\/events$/);
     if (history !== null) {
       return this.#history(
         request,
         history[1] as TaskKind,
         history[2] ?? "",
         url.searchParams.get("projectId") ?? "",
+        url.searchParams.get("after"),
         request.signal,
       );
     }
-    const follow = url.pathname.match(/^\/task\/(run|session)\/([\w-]+)\/follow$/);
+    const follow = url.pathname.match(/^\/task\/(run|session|mirror)\/([\w-]+)\/follow$/);
     if (follow !== null) {
       return this.#follow(
         request,
@@ -293,6 +325,13 @@ export class BoardServer {
         Number(url.searchParams.get("after") ?? "0"),
         request.signal,
       );
+    }
+    if (
+      url.pathname === "/connect" ||
+      /^\/projects\/[\w-]+\/?$/.test(url.pathname) ||
+      /^\/projects\/[\w-]+\/conversations\/(run|session|mirror)\/[\w-]+\/?$/.test(url.pathname)
+    ) {
+      return this.#asset("/");
     }
     return this.#asset(url.pathname);
   }
@@ -611,12 +650,53 @@ export class BoardServer {
     const client = this.#client(request);
     if (client === null) return this.#unauthenticated();
     try {
-      return new Response(JSON.stringify(await client.onboarding.get()), {
+      const [onboarding, connectorDevices, conversationShareGrants] = await Promise.all([
+        client.onboarding.get(),
+        client.connectorDevices.list(),
+        client.connectorDevices.grants(),
+      ]);
+      return new Response(JSON.stringify({
+        ...onboarding,
+        connectorDevices,
+        conversationShareGrants,
+      }), {
         headers: jsonHeaders(),
       });
     } catch (error) {
       return this.#upstreamFailure(error);
     }
+  }
+
+  async #proxyConnector(request: Request, url: URL): Promise<Response> {
+    const authorization = request.headers.get("Authorization");
+    if (authorization === null || !authorization.startsWith("Connector ")) {
+      return this.#unauthenticated();
+    }
+    const headers = new Headers({
+      Authorization: authorization,
+      Accept: "application/json",
+    });
+    const contentType = request.headers.get("Content-Type");
+    if (contentType !== null) headers.set("Content-Type", contentType);
+    const upstream = await this.#fetch(
+      new URL(`${url.pathname.slice(1)}${url.search}`, this.#baseUrl),
+      {
+        method: request.method,
+        headers,
+        ...(request.method === "GET" ? {} : { body: request.body, duplex: "half" }),
+        signal: request.signal,
+      },
+    ).catch(() => null);
+    if (upstream === null) {
+      return new Response(JSON.stringify({ error: { code: "CONTROL_PLANE_UNAVAILABLE" } }), {
+        status: 502,
+        headers: jsonHeaders(),
+      });
+    }
+    const responseHeaders = jsonHeaders();
+    const requestId = upstream.headers.get("X-Request-Id");
+    if (requestId !== null) responseHeaders.set("X-Request-Id", requestId);
+    return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
   }
 
   async #presence(request: Request, projectId: string): Promise<Response> {
@@ -672,6 +752,85 @@ export class BoardServer {
       const agentType = typeof body.agentType === "string" ? body.agentType : "";
       const connection = await client.onboarding.connectAgent(agentType);
       return new Response(JSON.stringify({ connection }), { status: 201, headers: jsonHeaders() });
+    } catch (error) {
+      return this.#upstreamFailure(error);
+    }
+  }
+
+  async #createConnectorDevice(request: Request): Promise<Response> {
+    if (!sameOriginWrite(request)) return this.#forbidden("Cross-origin writes are not allowed.");
+    const client = this.#client(request);
+    if (client === null) return this.#unauthenticated();
+    try {
+      const body = (await request.json()) as { source?: unknown; displayName?: unknown };
+      if (body.source !== "codex" && body.source !== "claude-code") {
+        return this.#badRequest("Connector source is invalid.");
+      }
+      const displayName = typeof body.displayName === "string" ? body.displayName : "";
+      const created = await client.connectorDevices.create({ source: body.source, displayName });
+      return new Response(JSON.stringify(created), { status: 201, headers: jsonHeaders() });
+    } catch (error) {
+      return this.#upstreamFailure(error);
+    }
+  }
+
+  async #adoptConnectorDevice(request: Request): Promise<Response> {
+    if (!sameOriginWrite(request)) return this.#forbidden("Cross-origin writes are not allowed.");
+    const client = this.#client(request);
+    if (client === null) return this.#unauthenticated();
+    try {
+      const body = (await request.json()) as Record<string, unknown>;
+      if (body.source !== "codex" && body.source !== "claude-code") {
+        return this.#badRequest("Connector source is invalid.");
+      }
+      const adopted = await client.connectorDevices.adopt({
+        deviceId: typeof body.deviceId === "string" ? body.deviceId : "",
+        displayName: typeof body.displayName === "string" ? body.displayName : "",
+        source: body.source,
+        credentialPrefix:
+          typeof body.credentialPrefix === "string" ? body.credentialPrefix : "",
+        credentialHash: typeof body.credentialHash === "string" ? body.credentialHash : "",
+        projectId: typeof body.projectId === "string" ? body.projectId : "",
+      });
+      return new Response(JSON.stringify(adopted), { status: 201, headers: jsonHeaders() });
+    } catch (error) {
+      return this.#upstreamFailure(error);
+    }
+  }
+
+  async #revokeConnectorDevice(request: Request, deviceId: string): Promise<Response> {
+    if (!sameOriginWrite(request)) return this.#forbidden("Cross-origin writes are not allowed.");
+    const client = this.#client(request);
+    if (client === null) return this.#unauthenticated();
+    try {
+      const device = await client.connectorDevices.revoke(deviceId);
+      return new Response(JSON.stringify({ device }), { headers: jsonHeaders() });
+    } catch (error) {
+      return this.#upstreamFailure(error);
+    }
+  }
+
+  async #grantConnectorProject(request: Request, deviceId: string): Promise<Response> {
+    if (!sameOriginWrite(request)) return this.#forbidden("Cross-origin writes are not allowed.");
+    const client = this.#client(request);
+    if (client === null) return this.#unauthenticated();
+    try {
+      const body = (await request.json()) as { projectId?: unknown };
+      const projectId = typeof body.projectId === "string" ? body.projectId : "";
+      const grant = await client.connectorDevices.grantProject(deviceId, projectId);
+      return new Response(JSON.stringify({ grant }), { status: 201, headers: jsonHeaders() });
+    } catch (error) {
+      return this.#upstreamFailure(error);
+    }
+  }
+
+  async #revokeConversationShareGrant(request: Request, grantId: string): Promise<Response> {
+    if (!sameOriginWrite(request)) return this.#forbidden("Cross-origin writes are not allowed.");
+    const client = this.#client(request);
+    if (client === null) return this.#unauthenticated();
+    try {
+      const grant = await client.connectorDevices.revokeGrant(grantId);
+      return new Response(JSON.stringify({ grant }), { headers: jsonHeaders() });
     } catch (error) {
       return this.#upstreamFailure(error);
     }
@@ -739,10 +898,14 @@ export class BoardServer {
         client.projects.me(),
         client.onboarding.get(),
       ]);
+      const repositoryBindings = new Map(
+        onboarding.repositoryBindings.map((binding) => [binding.projectId, binding]),
+      );
+      const githubProjects = me.projects.filter((candidate) => repositoryBindings.has(candidate.id));
       const project =
         requestedProjectId === null
-          ? me.projects[0]
-          : me.projects.find((candidate) => candidate.id === requestedProjectId);
+          ? githubProjects[0]
+          : githubProjects.find((candidate) => candidate.id === requestedProjectId);
       if (project === undefined) {
         return new Response(JSON.stringify({ error: "Project not found." }), {
           status: 404,
@@ -768,8 +931,7 @@ export class BoardServer {
         delegation: {
           agents: onboarding.agentConnections.filter((connection) => connection.revokedAt === null),
           repository:
-            onboarding.repositoryBindings.find((binding) => binding.projectId === project.id) ??
-            null,
+            repositoryBindings.get(project.id) ?? null,
         },
         updatedAt: new Date().toISOString(),
       };
@@ -790,7 +952,12 @@ export class BoardServer {
       const selectedIds = new Set(
         onboarding.projects.filter((entry) => entry.selected).map((entry) => entry.project.id),
       );
-      const visibleProjects = me.projects.filter((project) => selectedIds.has(project.id));
+      const bindings = new Map(
+        onboarding.repositoryBindings.map((binding) => [binding.projectId, binding]),
+      );
+      const visibleProjects = me.projects.filter(
+        (project) => selectedIds.has(project.id) && bindings.has(project.id),
+      );
       const tables = await mapWithConcurrency(visibleProjects, 6, async (project) => {
         const [members, work, pendingRelays, presence] = await Promise.all([
           client.projects.participants(project.id),
@@ -829,24 +996,15 @@ export class BoardServer {
           presence,
         } satisfies LobbyTableSnapshot;
       });
-      const bindings = new Map(
-        onboarding.repositoryBindings.map((binding) => [binding.projectId, binding]),
-      );
       const grouped = new Map<string, LobbySpaceSnapshot>();
       for (const table of tables) {
         const binding = bindings.get(table.project.id);
-        const source =
-          binding === undefined
-            ? {
-                provider: "meanwhile" as const,
-                accountId: me.principal.ownerId,
-                accountName: "Local installation",
-              }
-            : {
-                provider: "github" as const,
-                accountId: binding.accountId,
-                accountName: binding.accountName,
-              };
+        if (binding === undefined) continue;
+        const source = {
+          provider: "github" as const,
+          accountId: binding.accountId,
+          accountName: binding.accountName,
+        };
         const key = `${source.provider}:${source.accountId}`;
         const current = grouped.get(key);
         grouped.set(key, {
@@ -870,27 +1028,34 @@ export class BoardServer {
     kind: TaskKind,
     id: string,
     projectId: string,
+    afterValue: string | null,
     signal: AbortSignal,
   ): Promise<Response> {
     const client = this.#client(request);
     if (client === null) return this.#unauthenticated();
-    const events: Array<RunEvent | SessionEvent> = [];
-    let after: number | undefined;
+    const after = afterValue === null ? undefined : Number(afterValue);
+    if (
+      after !== undefined &&
+      (!Number.isSafeInteger(after) || after < 0 || String(after) !== afterValue)
+    ) return this.#badRequest("Invalid event cursor.");
     try {
-      while (events.length < 5_000 && !signal.aborted) {
-        const page =
-          kind === "run"
-            ? await client.runs.events(id, { after, limit: 500, signal })
-            : await client.sessions.events(id, { after, limit: 500, signal });
-        events.push(...page.items);
-        if (page.nextCursor === null) break;
-        after = page.nextCursor;
-      }
+      const page = kind === "run"
+        ? await client.runs.events(id, { after, limit: 500, signal })
+        : kind === "session"
+          ? await client.sessions.events(id, { after, limit: 500, signal })
+          : await client.mirrors.events(id, { after, limit: 500, signal });
       const [relays, annotations] = await Promise.all([
         client.taskRelays.list(projectId, { kind, id }, { signal }),
         client.taskAnnotations.list(projectId, { kind, id }, { signal }),
       ]);
-      return new Response(JSON.stringify({ kind, id, events, relays, annotations }), {
+      return new Response(JSON.stringify({
+        kind,
+        id,
+        events: page.items,
+        nextCursor: page.nextCursor,
+        relays,
+        annotations,
+      }), {
         headers: jsonHeaders(),
       });
     } catch (error) {
@@ -954,10 +1119,11 @@ export class BoardServer {
         controller.enqueue(encoder.encode("event: ready\ndata: {}\n\n"));
         void (async () => {
           try {
-            const events =
-              kind === "run"
-                ? client.runs.followEvents(id, { after, signal })
-                : client.sessions.followEvents(id, { after, signal });
+            const events = kind === "run"
+              ? client.runs.followEvents(id, { after, signal })
+              : kind === "session"
+                ? client.sessions.followEvents(id, { after, signal })
+                : client.mirrors.followEvents(id, { after, signal });
             for await (const event of events) {
               controller.enqueue(encoder.encode(`event: task\ndata: ${JSON.stringify(event)}\n\n`));
             }
@@ -1015,7 +1181,6 @@ export class BoardServer {
     if (client === null) return this.#unauthenticated();
     let input: {
       prompt?: unknown;
-      repositoryUrl?: unknown;
       revision?: unknown;
       idempotencyKey?: unknown;
       agentType?: unknown;
@@ -1026,8 +1191,6 @@ export class BoardServer {
       return this.#badRequest("Could not read the task.");
     }
     const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
-    const requestedRepositoryUrl =
-      typeof input.repositoryUrl === "string" ? input.repositoryUrl.trim() : "";
     const revision = typeof input.revision === "string" ? input.revision.trim() : "";
     const idempotencyKey =
       typeof input.idempotencyKey === "string" ? input.idempotencyKey.trim() : "";
@@ -1045,7 +1208,13 @@ export class BoardServer {
       return this.#upstreamFailure(error);
     }
     const binding = onboarding.repositoryBindings.find((candidate) => candidate.projectId === projectId);
-    const repositoryUrl = binding?.repositoryUrl ?? requestedRepositoryUrl;
+    if (binding === undefined) {
+      return new Response(JSON.stringify({ error: "This Project is not bound to a GitHub repository." }), {
+        status: 409,
+        headers: jsonHeaders(),
+      });
+    }
+    const repositoryUrl = binding.repositoryUrl;
     const connection =
       onboarding.agentConnections.find(
         (candidate) => candidate.agentType === requestedAgentType && candidate.revokedAt === null,
@@ -1211,11 +1380,11 @@ export class BoardServer {
 }
 
 function sectionFor(item: ProjectWorkItem): BoardRow["section"] {
-  if (["failed", "timed_out", "continuity_lost"].includes(item.status)) {
+  if (["failed", "timed_out", "continuity_lost", "disconnected"].includes(item.status)) {
     return "attention";
   }
   if (item.status === "idle") return "ready";
-  if (["queued", "provisioning", "running", "closing"].includes(item.status)) return "active";
+  if (["queued", "provisioning", "running", "closing", "active"].includes(item.status)) return "active";
   return "completed";
 }
 

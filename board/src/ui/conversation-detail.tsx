@@ -29,8 +29,10 @@ import {
   ProjectSource,
 } from "./live-deck";
 import {
-  displayStatus,
+  displayWorkStatus,
   humanAgent,
+  linkedConversationLabel,
+  linkedConversationSource,
   plainInlineMarkdown,
   type PresentedBoardRow,
   workActivityAge,
@@ -284,15 +286,19 @@ const Transcript = ({ row, live }: {
 }) => {
   const runTimeline = useBoard((state) => row.kind === "run" ? state.runTimelines[row.id] : undefined);
   const sessionTimeline = useBoard((state) => row.kind === "session" ? state.sessionTimelines[row.id] : undefined);
-  const timeline = row.kind === "run" ? runTimeline : sessionTimeline;
+  const mirrorTimeline = useBoard((state) => row.kind === "mirror" ? state.mirrorTimelines[row.id] : undefined);
+  const timeline = row.kind === "run" ? runTimeline : row.kind === "session" ? sessionTimeline : mirrorTimeline;
   const blocks = composeTranscript(timeline?.messages ?? [], timeline?.toolCalls ?? []);
   const lastAgentId = [...(timeline?.messages ?? [])].reverse().find((message) => message.role === "agent")?.id;
+  const agentName = row.kind === "mirror"
+    ? linkedConversationSource(row.agentType)
+    : humanAgent(row.agentType);
   return (
     <>
-      <SourceBlock sequence={0} blockId="ask" className="cd-opening-message">
+      {row.kind === "mirror" ? null : <SourceBlock sequence={0} blockId="ask" className="cd-opening-message">
         <header><Portrait identity={row.delegatedBy} size="medium" /><strong>{row.delegatedBy.displayName}</strong><time>{clock(row.createdAt)}</time></header>
         <TranscriptMarkdown text={taskBody(row.title)} className="cd-opening-copy" anchorCopy />
-      </SourceBlock>
+      </SourceBlock>}
       {blocks.map((block, blockIndex) => {
         if (block.type === "work") {
           const summary = workSummary(block.details);
@@ -320,7 +326,7 @@ const Transcript = ({ row, live }: {
             blockId={`message.${block.value.id}`}
             className={`cd-agent-message ${agent && followsWork ? "cd-answer-message" : ""}`}
           >
-            <header>{agent ? <AgentOrb size="medium" /> : <Portrait identity={row.delegatedBy} size="medium" />}<strong>{agent ? humanAgent(row.agentType) : row.delegatedBy.displayName}</strong><time>{clock(block.value.lastOccurredAt)}</time></header>
+            <header>{agent ? <AgentOrb size="medium" /> : <Portrait identity={row.delegatedBy} size="medium" />}<strong>{agent ? agentName : row.delegatedBy.displayName}</strong><time>{clock(block.value.lastOccurredAt)}</time></header>
             <TranscriptMarkdown text={block.value.text} className="cd-message-markdown" live={agent && live && block.value.id === lastAgentId} anchorCopy />
           </SourceBlock>
         );
@@ -395,9 +401,10 @@ export const ConversationDetail = ({
   const relays = useBoard((state) => state.taskRelays[`${row.kind}:${row.id}`] ?? NO_RELAYS);
   const runTimeline = useBoard((state) => row.kind === "run" ? state.runTimelines[row.id] : undefined);
   const sessionTimeline = useBoard((state) => row.kind === "session" ? state.sessionTimelines[row.id] : undefined);
+  const mirrorTimeline = useBoard((state) => row.kind === "mirror" ? state.mirrorTimelines[row.id] : undefined);
   const historyLoading = useBoard((state) => state.loading[`${row.kind}:${row.id}`] ?? false);
   const historyError = useBoard((state) => state.errors[`${row.kind}:${row.id}`] ?? null);
-  const timeline = row.kind === "run" ? runTimeline : sessionTimeline;
+  const timeline = row.kind === "run" ? runTimeline : row.kind === "session" ? sessionTimeline : mirrorTimeline;
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [activeSequence, setActiveSequence] = useState(0);
   const [draft, setDraft] = useState<DraftAnnotation | null>(null);
@@ -414,7 +421,11 @@ export const ConversationDetail = ({
   const [relayAcknowledgeBusy, setRelayAcknowledgeBusy] = useState(false);
   const [relayAcknowledgeError, setRelayAcknowledgeError] = useState<string | null>(null);
   const [anchorVisual, setAnchorVisual] = useState<AnchorVisual | null>(null);
-  const live = ["queued", "provisioning", "running", "closing"].includes(row.status);
+  const live = ["queued", "provisioning", "running", "closing", "active"].includes(row.status);
+  const linkedLabel = linkedConversationLabel(row);
+  const agentName = row.kind === "mirror"
+    ? linkedConversationSource(row.agentType)
+    : humanAgent(row.agentType);
   const visiblePeople = useMemo(() => {
     const unique = new Map(presence.map((lease) => [lease.principal.id, lease.principal]));
     return [...unique.values()].sort((left, right) =>
@@ -437,13 +448,13 @@ export const ConversationDetail = ({
   const index = useMemo<readonly TranscriptIndexItem[]>(() => {
     const blocks = composeTranscript(timeline?.messages ?? [], timeline?.toolCalls ?? []);
     return [
-      { sequence: 0, blockId: "ask", actor: row.delegatedBy.displayName, label: "Initial ask", time: clock(row.createdAt), human: true },
+      ...(row.kind === "mirror" ? [] : [{ sequence: 0, blockId: "ask", actor: row.delegatedBy.displayName, label: "Initial ask", time: clock(row.createdAt), human: true }]),
       ...blocks.map((block, blockIndex): TranscriptIndexItem => {
         if (block.type === "work") {
           return {
             sequence: block.lastSequence,
             blockId: block.id,
-            actor: humanAgent(row.agentType),
+            actor: agentName,
             label: workSummary(block.details).title.replace(/\s*·.*$/, ""),
             time: latestTime(block.details),
             human: false,
@@ -454,14 +465,14 @@ export const ConversationDetail = ({
         return {
           sequence: block.lastSequence,
           blockId: `message.${block.value.id}`,
-          actor: agent ? humanAgent(row.agentType) : row.delegatedBy.displayName,
+          actor: agent ? agentName : row.delegatedBy.displayName,
           label: agent ? (followsWork ? "Answer" : "Acknowledged") : "Follow-up",
           time: clock(block.value.lastOccurredAt),
           human: !agent,
         };
       }),
     ];
-  }, [row, timeline]);
+  }, [agentName, row, timeline]);
   const activeIndexPosition = Math.max(0, index.findIndex((item) => item.sequence === activeSequence));
   const activeIndexItem = index[activeIndexPosition] ?? index[0];
   const incomingRelayIndex = incomingRelay === null
@@ -488,7 +499,11 @@ export const ConversationDetail = ({
     void loadHistory(row.kind, row.id, row.projectId).then((loaded) => {
       if (disposed || !loaded) return;
       const state = useBoard.getState();
-      const cursor = row.kind === "run" ? (state.runTimelines[row.id]?.cursor ?? 0) : (state.sessionTimelines[row.id]?.cursor ?? 0);
+      const cursor = row.kind === "run"
+        ? (state.runTimelines[row.id]?.cursor ?? 0)
+        : row.kind === "session"
+          ? (state.sessionTimelines[row.id]?.cursor ?? 0)
+          : (state.mirrorTimelines[row.id]?.cursor ?? 0);
       source = new EventSource(`/task/${row.kind}/${row.id}/follow?after=${encodeURIComponent(String(cursor))}`);
       source.addEventListener("task", (event) => {
         try { ingestEvent(row.kind, row.id, JSON.parse((event as MessageEvent<string>).data)); }
@@ -797,11 +812,11 @@ export const ConversationDetail = ({
       </header>
 
       <section className="cd-task-banner">
-        <article className="cd-task-pair"><Portrait identity={row.delegatedBy} size="large" /><span>×</span><AgentOrb size="large" /><strong>{humanAgent(row.agentType)}</strong><em>{row.delegatedBy.displayName}</em></article>
-        <div className="cd-task-live"><strong><i />{live ? "LIVE" : displayStatus(row.status).toUpperCase()}</strong><span>{workActivityAge(row)}</span></div>
+        <article className={`cd-task-pair ${linkedLabel === null ? "" : "is-linked"}`}><Portrait identity={row.delegatedBy} size="large" /><span>×</span><AgentOrb size="large" /><strong>{agentName}</strong><em>{linkedLabel ?? row.delegatedBy.displayName}</em></article>
+        <div className={`cd-task-live ${linkedLabel === null ? "" : "is-linked"}`}><strong><i />{row.kind === "mirror" ? displayWorkStatus(row) : live ? "LIVE" : displayWorkStatus(row).toUpperCase()}</strong><span>{workActivityAge(row)}</span></div>
         <i className="cd-banner-rule" />
         <h1>{taskTitle(row.title)}</h1>
-        <time><span>Started {clock(row.createdAt)}</span><strong>{date(row.createdAt)}</strong></time>
+        <time><span>{row.kind === "mirror" ? "Observed since" : "Started"} {clock(row.createdAt)}</span><strong>{date(row.createdAt)}</strong></time>
         <button type="button" onClick={onBack}>Open in Live Deck <ArrowSquareOut size={16} weight="regular" aria-hidden="true" /></button>
       </section>
 
