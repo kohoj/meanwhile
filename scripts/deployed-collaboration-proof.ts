@@ -53,9 +53,9 @@ try {
   )
 
   await Promise.all([
-    first.onboarding.connectAgent("demo"),
+    first.onboarding.connectAgent("fixture"),
     first.onboarding.selectProject(projectId, true),
-    second.onboarding.connectAgent("demo"),
+    second.onboarding.connectAgent("fixture"),
     second.onboarding.selectProject(projectId, true),
   ])
   const [firstOnboarding, secondOnboarding] = await Promise.all([
@@ -259,7 +259,7 @@ try {
       controlPlaneTransport: "https",
       boardTransport: "https",
       runtimeProvider: "local",
-      agentType: "demo",
+      agentType: "fixture",
       boardBoundary: "project-watch-bff",
     },
     identities: {
@@ -373,7 +373,7 @@ async function createProofRun(input: {
         type: "files",
         files: [uploadedFile("README.md", "Meanwhile deployed collaboration proof workspace")],
       },
-      agentType: "demo",
+      agentType: "fixture",
       provider: "local",
       prompt: input.prompt,
       env: {},
@@ -509,7 +509,7 @@ function onboardingReady(value: unknown, projectId: string): boolean {
     connections.some(
       (connection) =>
         isRecord(connection) &&
-        connection["agentType"] === "demo" &&
+        connection["agentType"] === "fixture" &&
         connection["revokedAt"] === null,
     ) &&
     Array.isArray(projects) &&

@@ -111,7 +111,7 @@ liveTest(
         runId: `live-run-${crypto.randomUUID()}`,
         runnerSessionId: `live-runner-session-${crypto.randomUUID()}`,
         agent: {
-          executable: "meanwhile-demo-agent",
+          executable: "meanwhile-fixture-agent",
           args: [],
         },
         prompt: "prove the remote ACP lifecycle",
@@ -168,7 +168,7 @@ liveTest(
           mode: "session",
           sessionId,
           runnerSessionId: "live-session-runner",
-          agent: { executable: "meanwhile-demo-agent", args: [] },
+          agent: { executable: "meanwhile-fixture-agent", args: [] },
           permissionPolicy: { mode: "deny-all" },
           environment: {},
           credentialEnvironmentNames: [],

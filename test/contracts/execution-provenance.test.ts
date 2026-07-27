@@ -73,7 +73,7 @@ describe("execution provenance", () => {
       id: "run",
       ownerId: "owner",
       workspace: { type: "bundle", artifactId: "a".repeat(64) },
-      agentType: "demo",
+      agentType: "fixture",
       agentSpec: testAgentSpec(),
       agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
       executionProvenance: provenance,

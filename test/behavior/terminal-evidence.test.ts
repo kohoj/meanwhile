@@ -628,7 +628,7 @@ function createRun(
     id: crypto.randomUUID(),
     ownerId: OWNER_ID,
     workspace: { type: "bundle", artifactId: "a".repeat(64) },
-    agentType: "demo",
+    agentType: "fixture",
     agentSpec,
     agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
     executionProvenance: testExecutionProvenanceFor(

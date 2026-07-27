@@ -50,7 +50,7 @@ test("a Relay carries one anchored human handoff without granting agent control"
           type: "files",
           files: [{ path: "TASK.md", contentBase64: Buffer.from("relay test").toString("base64") }],
         },
-        agentType: "demo",
+        agentType: "fixture",
         prompt: "Audit the migration boundary",
         artifactPaths: [],
         timeoutMs: 5_000,

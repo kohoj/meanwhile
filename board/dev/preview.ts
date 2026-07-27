@@ -186,7 +186,6 @@ const githubGrant = {
   provider: "github",
   accountId: "northstar-labs",
   accountName: "Northstar Labs",
-  installationId: "preview-installation",
   repositoryId: "northstar",
   repositoryName: "northstar",
   repositoryFullName: "northstar-labs/northstar",
@@ -214,7 +213,6 @@ const repositoryBinding = {
   provider: "github",
   accountId: githubGrant.accountId,
   accountName: githubGrant.accountName,
-  installationId: githubGrant.installationId,
   repositoryId: githubGrant.repositoryId,
   repositoryName: githubGrant.repositoryName,
   repositoryFullName: githubGrant.repositoryFullName,
@@ -244,6 +242,13 @@ const importedBinding = {
 }
 const onboardingSnapshot = (viewer = principal) => ({
   principal: viewer,
+  repositoryConnection: viewer.id === principal.id
+    ? {
+        provider: "github" as const,
+        status: "connected" as const,
+        lastVerifiedAt: API_TIMESTAMP,
+      }
+    : null,
   identities: viewer.id === principal.id ? [githubIdentity] : [],
   repositoryGrants: viewer.id === principal.id ? [githubGrant, importGrant] : [],
   repositoryBindings: [repositoryBinding, ...(importedRepository ? [importedBinding] : [])],
@@ -824,6 +829,9 @@ const upstream = Bun.serve({
     }
     if (url.pathname === "/me") return Response.json({ principal: viewer, projects })
     if (request.method === "GET" && url.pathname === "/onboarding") {
+      return Response.json(onboardingSnapshot(viewer))
+    }
+    if (request.method === "POST" && url.pathname === "/onboarding/repositories/refresh") {
       return Response.json(onboardingSnapshot(viewer))
     }
     if (request.method === "GET" && url.pathname === "/connector-devices") {

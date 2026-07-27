@@ -6,6 +6,7 @@ import {
   SCHEMA_SQL,
   splitSchemaSql,
 } from "../src/persistence/schema"
+import { migrateProgressiveOnboardingSchema } from "./progressive-onboarding-schema"
 
 const PREVIOUS_SCHEMA_FINGERPRINT =
   "cbc6cdc49475a836ac05c63bbfa4505260eec0f3d07218f18002ef643269ddfc"
@@ -80,6 +81,7 @@ try {
     )
     process.exit(0)
   }
+  database.exec("PRAGMA foreign_keys=OFF")
   database
     .transaction(() => {
       database.query("UPDATE project_repository_bindings SET revoked_at=NULL").run()
@@ -88,11 +90,13 @@ try {
       )
       if (statement === undefined) throw new Error("Current repository identity index is missing")
       database.query(statement).run()
+      migrateProgressiveOnboardingSchema(database)
       database
         .query("UPDATE schema_identity SET fingerprint=? WHERE singleton=1")
         .run(CURRENT_SCHEMA.fingerprint)
     })
     .immediate()
+  database.exec("PRAGMA foreign_keys=ON")
   if (
     database.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all().length > 0 ||
     databaseSchemaFingerprint(database) !== CURRENT_SCHEMA.fingerprint

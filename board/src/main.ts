@@ -15,7 +15,7 @@ if (!(await Bun.file(`${assetsDir}index.html`).exists())) {
 const server = new BoardServer({
   baseUrl,
   ...(apiKey === undefined ? {} : { apiKey }),
-  defaultAgentType: Bun.env.MEANWHILE_BOARD_AGENT ?? "demo",
+  defaultAgentType: Bun.env.MEANWHILE_BOARD_AGENT ?? "codex",
   assetsDir,
   hostname: Bun.env.MEANWHILE_BOARD_HOST ?? "127.0.0.1",
   port: Number(Bun.env.MEANWHILE_BOARD_PORT ?? 7333),

@@ -168,13 +168,13 @@ describe("Cloudflare Sandbox bridge", () => {
       "bun ../../scripts/stage-cloudflare-runner.ts",
     )
     expect(stagingScript).toMatch(/bun-linux-x64-baseline-v\$\{version\}/)
-    expect(stagingScript).toContain("meanwhile-demo-agent")
+    expect(stagingScript).toContain("meanwhile-fixture-agent")
     expect(dockerfile).toContain(
       "FROM docker.io/cloudflare/sandbox:0.12.3@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
     )
     expect(dockerfile).toContain(".runner/meanwhile-runner /opt/meanwhile/bin/meanwhile-runner")
     expect(dockerfile).toContain(
-      ".runner/meanwhile-demo-agent /opt/meanwhile/bin/meanwhile-demo-agent",
+      ".runner/meanwhile-fixture-agent /opt/meanwhile/bin/meanwhile-fixture-agent",
     )
     expect(dockerfile).toContain(".runner/BUN_VERSION /opt/meanwhile/metadata/BUN_VERSION")
     expect(dockerfile).toContain("bun install --frozen-lockfile --production")

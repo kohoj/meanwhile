@@ -1,6 +1,6 @@
 # ADR 0008: First-task journey and browser self-delegation
 
-- Status: accepted
+- Status: accepted; manual-repository Board admission and GitHub authentication superseded by ADR 0013
 - Date: 2026-07-23
 
 ## Context
@@ -65,13 +65,12 @@ task and no Board-owned task lifecycle.
 This change does not fake a GitHub login or private checkout. ADR 0007 remains
 the next identity and repository-binding path. When a room has a real
 `ProjectRepositoryBinding`, the composer must inherit that immutable repository
-identity and omit the manual URL. Private checkout authority must be issued as a
-short-lived installation credential behind the existing broker boundary; no
-GitHub token may enter browser JavaScript, Run input, agent environment, logs,
-or durable projections.
+identity and omit the manual URL. Private checkout authority must be held behind
+the existing broker boundary; no GitHub token may enter browser JavaScript, Run
+input, agent environment, logs, or durable projections.
 
-GitHub establishes the external subject and the current installation/repository
-intersection. Meanwhile still establishes the Owner projection, Principal,
+GitHub establishes the external subject and the current OAuth-visible repository
+set. Meanwhile still establishes the Owner projection, Principal,
 Project binding, immutable delegator, lifecycle authority, events, artifacts,
 audit, and cleanup.
 
@@ -99,7 +98,8 @@ The local and self-hosted product now has one honest first-task vertical slice.
 The hard boundary remains intact because write permission is route-exact and
 service authorization derives identity rather than trusting Board input.
 
-The remaining first-use gap is GitHub App authorization, external identity and
-repository binding, private checkout brokering, and deployed two-person proof.
+ADR 0013 later made a selected repository binding the first-use admission gate
+and replaced GitHub App installation with ordinary OAuth. Live provider receipts, private
+checkout acceptance, and deployed two-person proof remain separate gates.
 AgentSession creation, invitations, presence, comments, and generalized browser
 write scopes remain separate decisions.

@@ -135,10 +135,20 @@ durable outbox and computes replay identity from the redacted payload.
 A Project Room and a GitHub repository are the same collaboration boundary.
 Within one Owner, an immutable GitHub repository ID names exactly one Project;
 the Project cannot be rebound, duplicated, or used to execute or mirror work
-from another repository. Renames, transfers, App reinstallations, and grant
-changes may refresh display metadata or authority, but they never silently move
-the room. A source that cannot prove the matching repository fails closed
-before content is shared.
+from another repository. Renames, transfers, OAuth grant changes, and current
+repository access may refresh metadata or authority, but they never silently
+move the room. Unbound operator or legacy Projects are not collaboration rooms.
+A source that cannot prove the matching repository fails closed before content
+is shared.
+
+### 13. Honest identity
+
+When GitHub is linked, the human-facing name and portrait come from that current
+GitHub profile. Meanwhile may apply one coherent visual treatment, such as its
+halftone texture, but must never substitute a stock person, invented name, or
+fixture identity. A Principal without provider imagery gets a neutral monogram,
+not a fabricated human face. Test agents and fixture records remain confined to
+proof infrastructure and never appear as product choices.
 
 ## Core loop
 

@@ -213,7 +213,7 @@ async function createRun(projectId: string, prompt: string): Promise<{ id: strin
               { path: "TASK.md", contentBase64: Buffer.from("annotation test").toString("base64") },
             ],
           },
-          agentType: "demo",
+          agentType: "fixture",
           prompt,
           artifactPaths: [],
           timeoutMs: 5_000,

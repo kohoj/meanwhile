@@ -107,11 +107,12 @@ provider calls and never returns, logs, or includes it in normalized failures.
 Repository names and permissions returned by GitHub remain untrusted provider
 data until validated. A repository grant may qualify watch or participation,
 but it never grants control of another Principal's agent. Immediately before a
-bound private checkout, the control plane revalidates the exact installation
-and repository, passes the token only to the short-lived Git helper, redacts its
-output, and releases the material before the agent starts. Expired credentials
-require explicit relinking. Provider rejection or repository absence revokes
-the binding locally. Webhook invalidation is not yet implemented, so changes
+bound private checkout, the control plane revalidates the exact OAuth-visible
+repository, passes the token only to the short-lived Git helper, redacts its
+output, and releases the material before the agent starts. A credential with a
+provider expiry requires explicit relinking after expiry. Provider rejection or
+repository absence revokes the current grant without repurposing the immutable
+Project binding. Webhook invalidation is not yet implemented, so changes
 that do not reject provider access are detected at checkout or the next explicit
 authorization refresh rather than pushed immediately.
 
@@ -326,7 +327,7 @@ The POSIX-only local provider runs agent and repository code as host processes. 
 Use it only for:
 
 - deterministic tests;
-- the no-account demo with trusted fixtures;
+- the no-account proof with trusted fixtures;
 - trusted local development.
 
 Do not expose a local-provider-enabled control plane to untrusted tenants. Secret-bearing agent runs and sessions are rejected on local because it has no mediation boundary. Stronger local isolation belongs in a container/VM runtime provider that passes the same contracts and has an independently reviewed threat model.

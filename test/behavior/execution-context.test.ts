@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import {
   type ApplicationHarness,
   createApplicationHarness,
-  createDemoRun,
+  createFixtureRun,
 } from "../application-harness"
 
 let harness: ApplicationHarness
@@ -16,7 +16,7 @@ afterEach(async () => {
 })
 
 test("a run can reuse selected immutable output from an earlier run", async () => {
-  const source = await createDemoRun(harness, {
+  const source = await createFixtureRun(harness, {
     prompt: "Record that FEATURE_FLAG_X=true is required",
     files: [{ path: "README.md", content: "source workspace" }],
     env: { FIXTURE_OUTPUT_PATH: "findings.md" },
@@ -34,7 +34,7 @@ test("a run can reuse selected immutable output from an earlier run", async () =
   const brief = await promoteBrief(artifact?.id as string, "Feature flag requirement")
   expect(brief).toMatchObject({ sourceWorkspace: source.workspace })
 
-  const consumer = await createDemoRun(harness, {
+  const consumer = await createFixtureRun(harness, {
     prompt: "Use the earlier finding in this checkout",
     files: [{ path: "README.md", content: "consumer workspace" }],
     artifactPaths: [],
@@ -71,11 +71,11 @@ test("brief admission remains owner scoped", async () => {
         files: [
           {
             path: "README.md",
-            contentBase64: Buffer.from("demo").toString("base64"),
+            contentBase64: Buffer.from("fixture").toString("base64"),
           },
         ],
       },
-      agentType: "demo",
+      agentType: "fixture",
       prompt: "Do not start",
       provider: "local",
       briefIds: ["f".repeat(64)],
@@ -89,7 +89,7 @@ test("brief admission remains owner scoped", async () => {
 })
 
 test("resolved context evidence participates canonically in run idempotency", async () => {
-  const source = await createDemoRun(harness, {
+  const source = await createFixtureRun(harness, {
     prompt: "Record the canonical finding",
     files: [{ path: "README.md", content: "source" }],
     env: { FIXTURE_OUTPUT_PATH: "finding.md" },
@@ -125,7 +125,7 @@ test("resolved context evidence participates canonically in run idempotency", as
         },
       ],
     },
-    agentType: "demo",
+    agentType: "fixture",
     prompt: "Use the canonical finding",
     provider: "local",
     briefIds,
@@ -158,7 +158,7 @@ test("resolved context evidence participates canonically in run idempotency", as
 })
 
 test("a durable turn explicitly reuses and revalidates selected Brief evidence", async () => {
-  const source = await createDemoRun(harness, {
+  const source = await createFixtureRun(harness, {
     prompt: "Record that SESSION_FACT=durable is required",
     files: [{ path: "README.md", content: "source workspace" }],
     env: { FIXTURE_OUTPUT_PATH: "session-finding.md" },
@@ -183,7 +183,7 @@ test("a durable turn explicitly reuses and revalidates selected Brief evidence",
           },
         ],
       },
-      agentType: "demo",
+      agentType: "fixture",
       provider: "local",
       idleTimeoutMs: 5_000,
     }),

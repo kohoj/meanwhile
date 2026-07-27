@@ -114,7 +114,7 @@ function proofInput(): Parameters<typeof createDeployedCollaborationProofReceipt
       controlPlaneTransport: "https",
       boardTransport: "https",
       runtimeProvider: "local",
-      agentType: "demo",
+      agentType: "fixture",
       boardBoundary: "project-watch-bff",
     },
     identities: {

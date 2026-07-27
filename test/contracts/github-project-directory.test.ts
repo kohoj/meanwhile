@@ -3,50 +3,45 @@ import { GitHubProjectDirectory } from "../../src/integrations/github-project-di
 import { RepositoryDirectoryError } from "../../src/integrations/repository-directory"
 
 describe("GitHub project directory", () => {
-  test("normalizes the user and App permission intersection into lobby access", async () => {
+  test("normalizes OAuth-visible repositories into lobby access", async () => {
     const requests: Request[] = []
     const fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init)
       requests.push(request)
       const url = new URL(request.url)
-      if (url.pathname === "/user/installations") {
-        return Response.json({
-          installations: [
-            {
-              id: 44,
-              account: {
-                id: 7,
-                login: "acme",
-                type: "Organization",
-                avatar_url: "https://avatars.example/acme.png",
-              },
+      if (url.pathname === "/user/repos") {
+        return Response.json([
+          {
+            id: 202,
+            name: "private-core",
+            full_name: "acme/private-core",
+            private: true,
+            default_branch: "main",
+            html_url: "https://github.com/acme/private-core",
+            owner: {
+              id: 7,
+              login: "acme",
+              type: "Organization",
+              avatar_url: "https://avatars.example/acme.png",
             },
-          ],
-        })
-      }
-      if (url.pathname === "/user/installations/44/repositories") {
-        return Response.json({
-          repositories: [
-            {
-              id: 202,
-              name: "private-core",
-              full_name: "acme/private-core",
-              private: true,
-              default_branch: "main",
-              html_url: "https://github.com/acme/private-core",
-              permissions: { pull: true, push: true },
+            permissions: { pull: true, push: true },
+          },
+          {
+            id: 101,
+            name: "observatory",
+            full_name: "acme/observatory",
+            private: true,
+            default_branch: "trunk",
+            html_url: "https://github.com/acme/observatory",
+            owner: {
+              id: 7,
+              login: "acme",
+              type: "Organization",
+              avatar_url: "https://avatars.example/acme.png",
             },
-            {
-              id: 101,
-              name: "observatory",
-              full_name: "acme/observatory",
-              private: true,
-              default_branch: "trunk",
-              html_url: "https://github.com/acme/observatory",
-              permissions: { pull: true },
-            },
-          ],
-        })
+            permissions: { pull: true },
+          },
+        ])
       }
       return new Response("Not Found", { status: 404 })
     }
@@ -57,7 +52,6 @@ describe("GitHub project directory", () => {
     expect(entries).toEqual([
       {
         provider: "github",
-        installationId: "44",
         account: {
           id: "7",
           login: "acme",
@@ -76,7 +70,6 @@ describe("GitHub project directory", () => {
       },
       {
         provider: "github",
-        installationId: "44",
         account: {
           id: "7",
           login: "acme",
@@ -94,7 +87,7 @@ describe("GitHub project directory", () => {
         access: "participate",
       },
     ])
-    expect(requests).toHaveLength(2)
+    expect(requests).toHaveLength(1)
     for (const request of requests) {
       expect(request.headers.get("Authorization")).toBe("Bearer short-lived-user-token")
       expect(request.headers.get("X-GitHub-Api-Version")).toBe("2022-11-28")
@@ -104,14 +97,13 @@ describe("GitHub project directory", () => {
   test("follows only same-origin GitHub pagination", async () => {
     const fetch = async (input: RequestInfo | URL): Promise<Response> => {
       const url = new URL(input instanceof Request ? input.url : input.toString())
-      if (url.pathname === "/user/installations" && url.searchParams.get("page") === null) {
-        return Response.json(
-          { installations: [] },
-          { headers: { Link: '<https://api.example/user/installations?page=2>; rel="next"' } },
-        )
+      if (url.pathname === "/user/repos" && url.searchParams.get("page") === null) {
+        return Response.json([], {
+          headers: { Link: '<https://api.example/user/repos?page=2>; rel="next"' },
+        })
       }
-      if (url.pathname === "/user/installations" && url.searchParams.get("page") === "2") {
-        return Response.json({ installations: [] })
+      if (url.pathname === "/user/repos" && url.searchParams.get("page") === "2") {
+        return Response.json([])
       }
       return new Response("Not Found", { status: 404 })
     }

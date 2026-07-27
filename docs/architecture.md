@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains Meanwhile's implemented durable architecture. [AGENTS.md](../AGENTS.md) is normative when wording differs. Implementation claims are established by the matching contract, behavior, integration, demo, container, or live-provider proof.
+This document explains Meanwhile's implemented durable architecture. [AGENTS.md](../AGENTS.md) is normative when wording differs. Implementation claims are established by the matching contract, behavior, integration, proof, container, or live-provider proof.
 
 ## The system property
 
@@ -160,19 +160,19 @@ tagged `run | session | mirror` projection, not a shared status table or another
 mutable task lifecycle. There is no Project activity truth source. See
 [Shared Project definition](project-collaboration.md) and the Project ADRs.
 
-ADR 0007 adds a provider-neutral `RepositoryProjectDirectory` beside, not
-inside, Project authorization. The GitHub implementation consumes a transient
-GitHub App user token, lists only the installations and repositories GitHub
-returns for that user/App intersection, normalizes the result to
+ADR 0013 keeps the provider-neutral `RepositoryProjectDirectory` beside, not
+inside, Project authorization. The GitHub implementation consumes a sealed
+OAuth user token, lists `/user/repos`, normalizes current permission fields to
 watch/participate/administer, and returns no credential. The wired Lobby exposes
-only selected GitHub-bound Projects and groups explicit repository bindings by
-provider account. One immutable GitHub repository ID maps to at most one
-Project per Owner; a Project cannot be rebound to a different repository.
+only selected GitHub-bound Projects, grouped by provider account. One immutable
+GitHub repository ID maps to at most one Project per Owner; an unbound Project
+cannot pass connected onboarding or appear as a Board Project card, and a bound
+Project cannot be rebound to a different repository.
 External identity, repository binding, expiring grant, AgentConnection,
 Project-selection persistence, OAuth/PKCE, sealed identity credentials, and
 opaque browser-session issuance are implemented. GitHub checkout authority is
 resolved only for the exact active Project/repository binding and is revalidated
-against the current App/user repository intersection immediately before
+against the current OAuth repository directory immediately before
 workspace preparation. The access token is passed only to the bounded git
 helper, its output is exact-value redacted, and the material is released before
 the agent starts. Expired credentials fail closed and require relinking.
@@ -202,7 +202,7 @@ with no provider-name branch in the executor. Cloudflare remains an optional
 remote provider. Native and linked work meet only in Project presentation and
 human collaboration.
 
-The public contract has one implementation path. Pure Zod schemas define requests and responses, generate OpenAPI through the Hono route layer, and validate SDK traffic at runtime. `src/client.ts` adds the deep consumer semantics that raw HTTP should not force every caller to rebuild: authentication, request correlation, durable waits, structured safe failures, and cursor-correct `AsyncIterable` event following. `src/timeline.ts` is a pure projection from durable events to messages, tool calls, plans, usage, and statuses. The CLI and executable demos are presentation layers over that client. None may call a service or store directly, so local convenience cannot become a second control plane.
+The public contract has one implementation path. Pure Zod schemas define requests and responses, generate OpenAPI through the Hono route layer, and validate SDK traffic at runtime. `src/client.ts` adds the deep consumer semantics that raw HTTP should not force every caller to rebuild: authentication, request correlation, durable waits, structured safe failures, and cursor-correct `AsyncIterable` event following. `src/timeline.ts` is a pure projection from durable events to messages, tool calls, plans, usage, and statuses. The CLI and executable proofs are presentation layers over that client. None may call a service or store directly, so local convenience cannot become a second control plane.
 
 ## Control path of a linked conversation
 

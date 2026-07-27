@@ -4,15 +4,49 @@ const productionSurfaceFiles = [
   "../src/ui/app.tsx",
   "../src/ui/live-deck.tsx",
   "../src/ui/conversation-detail.tsx",
+  "../src/ui/portrait.tsx",
 ] as const;
 
 test("production collaboration surfaces never recognize preview identities", async () => {
   for (const relativePath of productionSurfaceFiles) {
     const source = await Bun.file(new URL(relativePath, import.meta.url)).text();
     expect(source).not.toContain("00000000-0000-4000-8000-000000000001");
-    expect(source).not.toContain("DEMO_PREVIEWS");
-    expect(source).not.toContain("deterministicDemo");
+    expect(source).not.toContain("PROOF_PREVIEWS");
+    expect(source).not.toContain("deterministicFixture");
+    expect(source).not.toMatch(/seat-(alice|bob|priya|agent)\.png/);
   }
+});
+
+test("human portraits use provider imagery with one shared halftone treatment", async () => {
+  const portrait = await Bun.file(new URL("../src/ui/portrait.tsx", import.meta.url)).text();
+  const styles = await Bun.file(new URL("../src/ui/styles.css", import.meta.url)).text();
+
+  expect(portrait).toContain("identity.avatarUrl");
+  expect(portrait).toContain('referrerPolicy="no-referrer"');
+  expect(styles).toContain(".person-portrait::after");
+  expect(styles).toContain("radial-gradient");
+});
+
+test("one token source owns the Board typography and interaction scales", async () => {
+  const app = await Bun.file(new URL("../src/ui/app.tsx", import.meta.url)).text();
+  const styles = await Bun.file(new URL("../src/ui/styles.css", import.meta.url)).text();
+  const tokens = await Bun.file(new URL("../src/ui/design-tokens.css", import.meta.url)).text();
+  const packageManifest = await Bun.file(new URL("../package.json", import.meta.url)).text();
+
+  expect(styles).toContain('@import "./design-tokens.css"');
+  expect(tokens).toContain('--font-editorial: "Newsreader Variable"');
+  expect(tokens).toContain('--font-ui: "Roboto Condensed Variable"');
+  expect(tokens).toContain('--font-mono: "IBM Plex Mono"');
+  expect(tokens).toContain("--text-label-size: 11px");
+  expect(tokens).toContain("--text-body-size: 15px");
+  expect(tokens).toContain("--text-body-leading: 24px");
+  expect(tokens).toContain("--space-1: 4px");
+  expect(tokens).toContain("--target-min: 44px");
+
+  expect(app).not.toContain("@fontsource-variable/inter");
+  expect(packageManifest).not.toContain("@fontsource-variable/inter");
+  expect(styles).not.toMatch(/(?:^|[;{]\s*)font(?:-size)?:\s*[^;{}]*\d+px/m);
+  expect(styles).not.toMatch(/--(?:display|body|mono|editorial)\b/);
 });
 
 test("bundled assets remain valid on nested Project and conversation routes", async () => {

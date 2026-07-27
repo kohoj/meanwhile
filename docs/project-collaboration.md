@@ -3,8 +3,8 @@
 This document is the controlling product and acceptance contract for
 Meanwhile's Shared Project milestone. ADR 0009 selects Connected Onboarding
 → Project Lobby → Live Deck → Conversation Detail as the product hierarchy. The
-ADR 0011 access model makes that journey reachable through optional GitHub
-authorization without turning GitHub into the work control plane. The
+ADR 0011 access model and ADR 0013 OAuth flow make that journey reachable
+through GitHub authorization without turning GitHub into the work control plane. The
 implementation status and remaining proof boundary are recorded here rather
 than hidden behind UI claims.
 
@@ -125,21 +125,25 @@ The source now implements:
   portraits, bounded native-event previews, and one entry into Conversation
   Detail;
 - a first-task composer that creates one durable Run as the current Principal,
-  inherits a bound repository and selected personally authorized agent, refreshes
+  inherits the Project's bound repository plus a selected personally authorized
+  agent, refreshes
   authoritative Project work, and opens its native live transcript; the
   composer remains a modal surface over its originating Live Deck or
   Conversation Detail rather than reviving a second room shell;
-- connected onboarding with explicitly configured `closed|open` external
+- connected onboarding with default-open and explicitly closable external
   registration and separately persisted external identity, repository
   grant/binding, agent connection, and Project selection records; optional
-  GitHub App and Google OIDC login/link/invite use PKCE, sealed provider-bound
+  GitHub OAuth and Google OIDC login/link/invite use PKCE, sealed provider-bound
   state, sealed server-side credentials, and opaque browser sessions;
-- personal Lobby selection stores only GitHub-bound Projects. An `administer`
-  grant may atomically import one repository as its unique room without
-  fabricating membership; unbound operator/bootstrap Projects never appear as
-  collaboration rooms;
-- Project repository identity is immutable and Owner-unique by GitHub
-  repository ID. GitHub rename/URL/installation metadata may refresh in place,
+- linked GitHub profile presentation is consistent across every Board surface:
+  the current provider name and avatar are used directly, with the Board's
+  halftone treatment layered on the real image and no stock human portraits;
+- personal Lobby selection includes only accessible GitHub-bound Projects and
+  defaults to hidden until explicitly selected. Open registration creates
+  identity only. An `administer` grant may import one repository as its unique
+  room without fabricating membership;
+- Project repository identity is immutable and Owner-unique by
+  GitHub repository ID. GitHub rename, URL, and authorization metadata may refresh in place,
   while duplicate import, Project rebinding, cross-repository Run or Session
   creation, and cross-repository Linked conversation publication fail closed;
 - high-entropy, digest-only, expiring and revocable Principal invitations whose
@@ -151,7 +155,7 @@ The source now implements:
   client-scoped reconnect identity, best-effort release, and expiry filtering;
 - a truthful local Project Lobby that composes existing Project reads and enters
   Live Deck without creating another lifecycle or activity store;
-- a provider-neutral repository directory plus a tested GitHub App directory
+- a provider-neutral repository directory plus a tested GitHub OAuth directory
   adapter that normalizes effective repository access as watch, participate, or
   administer without persisting provider credentials;
 - exact v0.1.3, Project-Watch-to-current, and intermediate migrations through
@@ -287,12 +291,12 @@ control-plane architecture:
 | Aggregation | authoritative Project work polling; native task events for detail | ADR 0004 |
 | Schema transition | additive companion tables; exact v0.1.3 offline migration | ADR 0005 |
 | Transcript and handoff | native event follow; foldable details; addressed Task Relay | ADR 0006 |
-| Repository-backed discovery | optional provider-neutral directory; GitHub App adapter; Meanwhile retains lifecycle authority | ADR 0007 |
+| Repository-gated onboarding and discovery | default-open identity registration; mandatory selected GitHub repository Project; Meanwhile retains lifecycle authority | ADR 0013 |
 | First-task journey | exact browser self-delegation and self-cancellation; native Run remains truth | ADR 0008 |
 | Presence | expiring client-scoped lease; membership never implies online | ADR 0009 |
 | Marginalia | exact source-anchored Project Annotation; addressed Relay remains distinct | ADR 0009 |
 | External authorization | linked Principal identity; sealed OAuth/OIDC state and credentials; JIT checkout only | ADR 0010 |
-| Provider-derived Project access | explicit open/closed registration; repository import; request-time effective access; per-delegator checkout | ADR 0011 |
+| Provider-derived Project access | explicit open/closed registration; renewable repository-directory observation; repository import; request-time effective access; per-delegator checkout | ADR 0011 + 0013 |
 | Existing local-agent integration | ConnectorDevice + explicit share grant + ConversationMirror; source-owned and observation-only | ADR 0012 |
 | Local-first owned execution | real local sandbox behind RuntimeProvider; existing host process remains non-isolated; Cloudflare optional | ADR 0012 |
 
@@ -359,9 +363,11 @@ This is the selected product contract implemented by the current vertical slice.
 ### Project Lobby
 
 - only authorized Projects, grouped by a truthful provider account or local
-  installation boundary;
+  deployment boundary;
 - table condition based on native work and pending Relay facts;
 - durable member count beside deduped active PresenceLease people;
+- an always-visible Add project action that reopens repository-backed Project
+  selection from both the populated and empty Lobby;
 - an explicit entry into Live Deck;
 - watch/participate/administer capability only after the corresponding provider
   and local policy have actually been evaluated.
@@ -412,7 +418,7 @@ Product language should use `Project`, `member`, `delegated by`, `agent`,
 The selected collaboration architecture is:
 
 ```text
-Owner or installation tenant
+Owner or deployment tenant
         └── Project
               ├── ProjectMembership ── stable human/service identity
               ├── TaskRelay ────────── human author → recipient + task event anchor
@@ -578,7 +584,7 @@ claim the shared visibility outcome the user actually asked for.
 - Do not let an internal noun decide the product model.
 - Do not treat `idle`, `failed`, or `succeeded` as a personal attention claim
   without viewer-specific semantics.
-- Do not turn the Board into a task tracker or agent operator to make the demo
+- Do not turn the Board into a task tracker or agent operator to make the proof
   easier.
 - Do not treat a Project field, multiple API keys, mock data, or two browser
   windows as multi-person proof.

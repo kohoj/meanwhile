@@ -24,7 +24,7 @@ import {
 } from "./release-proof-receipt"
 
 type ProofProvider = "local" | "cloudflare"
-type ProofAgent = "demo" | "codex" | "claude-code" | "pi"
+type ProofAgent = "fixture" | "codex" | "claude-code" | "pi"
 
 interface PreparedProofAgent {
   readonly type: ProofAgent
@@ -143,9 +143,14 @@ try {
   const previewText = proofAgent.previewText(roundTripToken, prompt)
   running = await startInstance(config, key.key)
   await waitForProviderReady(running.client, provider)
+  const proofProject = await running.client.projects.create({
+    name: "Release proof",
+    slug: `release-proof-${provider}-${proofAgent.type}`,
+  })
 
   const created = await running.client.runs.create(
     {
+      projectId: proofProject.id,
       workspace: {
         type: "files",
         files: [...proofAgent.workspaceFiles],
@@ -187,7 +192,7 @@ try {
     }
   }
   const agentResponse = agentResponseText(logs.items)
-  if (proofAgent.type === "demo" && agentResponse !== `fixture response: ${prompt}`) {
+  if (proofAgent.type === "fixture" && agentResponse !== `fixture response: ${prompt}`) {
     throw new ProofError(
       "ACP_ROUND_TRIP_FAILED",
       "The durable ACP response did not contain the expected semantic result",
@@ -264,6 +269,7 @@ try {
     "Do not reproduce the execution-context markup. Finish after saving the file."
   const followUpCreated = await running.client.runs.create(
     {
+      projectId: proofProject.id,
       workspace: {
         type: "files",
         files: [...proofAgent.workspaceFiles],
@@ -398,6 +404,7 @@ try {
   const secondSessionToken = roundTripToken.slice(24, 48)
   const session = await running.client.sessions.create(
     {
+      projectId: proofProject.id,
       workspace: { type: "files", files: [...proofAgent.workspaceFiles] },
       agentType: proofAgent.type,
       provider,
@@ -415,7 +422,7 @@ try {
     throw new ProofError("SESSION_READY_EVIDENCE_MISSING", "The ACP session identity is missing")
   }
   const firstSessionPrompt =
-    proofAgent.type === "demo"
+    proofAgent.type === "fixture"
       ? `Return both session tokens: ${firstSessionToken} ${secondSessionToken}`
       : `This is a two-turn continuity check. Memorize the opaque identifier ${firstSessionToken} for my next message. Do not use tools. Your entire response must be exactly: STORED ${firstSessionToken}`
   const firstTurn = await running.client.sessions.send(session.id, firstSessionPrompt, {
@@ -444,7 +451,7 @@ try {
     .join("")
   if (
     firstTurnResponse.trim().length === 0 ||
-    (proofAgent.type !== "demo" && !firstTurnResponse.includes(firstSessionToken))
+    (proofAgent.type !== "fixture" && !firstTurnResponse.includes(firstSessionToken))
   ) {
     throw new ProofError(
       "SESSION_FIRST_TURN_EVIDENCE_MISSING",
@@ -535,7 +542,7 @@ try {
     )
   }
   const secondSessionPrompt =
-    proofAgent.type === "demo"
+    proofAgent.type === "fixture"
       ? `Return both session tokens again: ${firstSessionToken} ${secondSessionToken}`
       : `Continue the continuity check without using tools. Your entire response must be exactly two whitespace-separated identifiers: first the opaque identifier from my previous message, then ${secondSessionToken}. Do not add labels, punctuation, or explanation.`
   const secondTurn = await running.client.sessions.send(sessionId, secondSessionPrompt, {
@@ -683,8 +690,8 @@ try {
       runtime: proofAgent.runtime,
       authenticationEvidence: proofAgent.authenticationEvidence,
       executionEvidence:
-        proofAgent.type === "demo" ? "deterministic-fixture" : "credentialed-live-agent",
-      modelIdentityEvidence: proofAgent.type === "demo" ? "not-applicable" : "not-attested",
+        proofAgent.type === "fixture" ? "deterministic-fixture" : "credentialed-live-agent",
+      modelIdentityEvidence: proofAgent.type === "fixture" ? "not-applicable" : "not-attested",
     },
     revision,
     provenance: {
@@ -1260,9 +1267,9 @@ function selectedProvider(arguments_: readonly string[]): ProofProvider {
 
 function selectedProofAgent(arguments_: readonly string[]): ProofAgent {
   const option = arguments_.find((argument) => argument.startsWith("--agent="))
-  const value = option?.slice("--agent=".length) ?? "demo"
-  if (value !== "demo" && value !== "codex" && value !== "claude-code" && value !== "pi") {
-    throw new ProofError("INVALID_ARGUMENT", "Agent must be demo, codex, claude-code, or pi")
+  const value = option?.slice("--agent=".length) ?? "fixture"
+  if (value !== "fixture" && value !== "codex" && value !== "claude-code" && value !== "pi") {
+    throw new ProofError("INVALID_ARGUMENT", "Agent must be fixture, codex, claude-code, or pi")
   }
   return value
 }
@@ -1281,7 +1288,7 @@ function selectedReceiptPath(arguments_: readonly string[]): string | null {
 }
 
 function assertProofAgentCredentialIntent(agent: PreparedProofAgent): void {
-  if (agent.type === "demo") return
+  if (agent.type === "fixture") return
   const referenceNames = Object.keys(agent.secretReferences)
   if (
     referenceNames.length === 0 ||
@@ -1302,7 +1309,7 @@ function credentialBoundaryEvidence(
   runId: string,
   sessionId: string,
 ): ReleaseProofPayload["credentialBoundary"] {
-  if (agent.type === "demo") {
+  if (agent.type === "fixture") {
     return {
       mode: "not-required",
       runLeaseId: null,
@@ -1346,7 +1353,7 @@ function sharedExecutionCredentialEvidence(
   store: Pick<Store, "getCredentialLeaseInternal">,
   followUpRunId: string,
 ): Pick<ReleaseProofPayload["sharedExecution"], "credentialLeaseId" | "credentialLeaseRevoked"> {
-  if (agent.type === "demo") {
+  if (agent.type === "fixture") {
     return { credentialLeaseId: null, credentialLeaseRevoked: null }
   }
 
@@ -1371,13 +1378,13 @@ async function prepareProofAgent(
   root: string,
 ): Promise<PreparedProofAgent> {
   const encode = (value: string) => new TextEncoder().encode(value).toBase64()
-  if (type === "demo") {
+  if (type === "fixture") {
     return {
       type,
-      adapter: "meanwhile-demo-agent",
+      adapter: "meanwhile-fixture-agent",
       runtime: `bun@${Bun.version}`,
       authenticationEvidence: "not-required",
-      catalogPath: resolve("config/agents.json"),
+      catalogPath: resolve("test/fixtures/agents.json"),
       environment: { FIXTURE_OUTPUT_PATH: "site/index.html" },
       secretReferences: {},
       secretValues: [],

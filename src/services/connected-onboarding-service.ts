@@ -14,6 +14,8 @@ import type {
 } from "../domain"
 import { AppError } from "../errors"
 import type { Store } from "../persistence/store"
+import type { GitHubRepositoryConnection } from "./external-project-grant-refresher"
+import { presentPrincipal } from "./principal-profile"
 
 export interface AvailableAgentConnection {
   readonly agentType: string
@@ -23,6 +25,7 @@ export interface AvailableAgentConnection {
 
 export interface ConnectedOnboardingSnapshot {
   readonly principal: Principal
+  readonly repositoryConnection: GitHubRepositoryConnection | null
   readonly identities: readonly ExternalIdentity[]
   readonly repositoryGrants: readonly ExternalProjectGrant[]
   readonly repositoryBindings: readonly ProjectRepositoryBinding[]
@@ -69,19 +72,34 @@ export class ConnectedOnboardingService {
     private readonly availableAgents: () => readonly AvailableAgentConnection[],
     private readonly now: () => Date = () => new Date(),
     private readonly id: () => string = () => crypto.randomUUID(),
+    private readonly refreshRepositories?: (
+      context: RequestContext,
+      force?: boolean,
+    ) => Promise<GitHubRepositoryConnection>,
   ) {}
 
-  snapshot(context: RequestContext): ConnectedOnboardingSnapshot {
+  async snapshot(
+    context: RequestContext,
+    forceRepositoryRefresh = false,
+  ): Promise<ConnectedOnboardingSnapshot> {
+    const repositoryConnection =
+      this.refreshRepositories === undefined
+        ? null
+        : await this.refreshRepositories(context, forceRepositoryRefresh)
     const principal = this.#principal(context)
+    const identities = this.store.listExternalIdentities(context.ownerId, context.principalId)
     const at = this.now().toISOString()
+    const availableAgents = this.availableAgents()
+    const availableAgentTypes = new Set(availableAgents.map((agent) => agent.agentType))
     const selections = new Map(
       this.store
         .listProjectSelections(context.ownerId, context.principalId, at)
         .map((selection) => [selection.projectId, selection.hiddenAt === null]),
     )
     return {
-      principal,
-      identities: this.store.listExternalIdentities(context.ownerId, context.principalId),
+      principal: presentPrincipal(principal, identities),
+      repositoryConnection,
+      identities,
       repositoryGrants: this.store.listExternalProjectGrants(
         context.ownerId,
         context.principalId,
@@ -92,8 +110,10 @@ export class ConnectedOnboardingService {
         context.principalId,
         at,
       ),
-      agentConnections: this.store.listAgentConnections(context.ownerId, context.principalId),
-      availableAgents: this.availableAgents(),
+      agentConnections: this.store
+        .listAgentConnections(context.ownerId, context.principalId)
+        .filter((connection) => availableAgentTypes.has(connection.agentType)),
+      availableAgents,
       projects: this.store
         .listProjectsForPrincipal(context.ownerId, context.principalId, at)
         .filter(
@@ -230,7 +250,6 @@ export class ConnectedOnboardingService {
       provider: grant.provider,
       accountId: grant.accountId,
       accountName: grant.accountName,
-      installationId: grant.installationId,
       repositoryId: grant.repositoryId,
       repositoryName: grant.repositoryName,
       repositoryFullName: grant.repositoryFullName,

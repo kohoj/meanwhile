@@ -23,7 +23,7 @@ await mkdir(outputDirectory, { recursive: true })
 
 for (const [entrypoint, output] of [
   ["runner/main.ts", "meanwhile-runner"],
-  ["test/fixtures/acp-agent.ts", "meanwhile-demo-agent"],
+  ["test/fixtures/acp-agent.ts", "meanwhile-fixture-agent"],
 ] as const) {
   const child = Bun.spawn({
     cmd: [

@@ -31,6 +31,17 @@ const snapshotRoute = createRoute({
   },
 })
 
+const refreshRepositoriesRoute = createRoute({
+  method: "post",
+  path: "/onboarding/repositories/refresh",
+  operationId: "refreshOnboardingRepositories",
+  tags: ["Connected onboarding"],
+  responses: {
+    200: jsonResponse(ConnectedOnboardingResponseSchema, "Refreshed connected onboarding facts"),
+    ...errorResponses,
+  },
+})
+
 const connectAgentRoute = createRoute({
   method: "post",
   path: "/onboarding/agent-connections",
@@ -117,9 +128,19 @@ export const createConnectedOnboardingRoutes = (
   service: ConnectedOnboardingService,
 ): OpenAPIHono<ApiEnv> => {
   const routes = createApiRouter()
-  routes.openapi(snapshotRoute, (context) =>
+  routes.openapi(snapshotRoute, async (context) =>
     context.json(
-      ConnectedOnboardingResponseSchema.parse(service.snapshot(context.get("requestContext"))),
+      ConnectedOnboardingResponseSchema.parse(
+        await service.snapshot(context.get("requestContext")),
+      ),
+      200,
+    ),
+  )
+  routes.openapi(refreshRepositoriesRoute, async (context) =>
+    context.json(
+      ConnectedOnboardingResponseSchema.parse(
+        await service.snapshot(context.get("requestContext"), true),
+      ),
       200,
     ),
   )

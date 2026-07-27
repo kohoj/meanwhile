@@ -209,6 +209,9 @@ describe("bootstrap identity", () => {
 
       expect(store.bootstrapIdentity(input)).toEqual({ created: true })
       expect(store.bootstrapIdentity(input)).toEqual({ created: false })
+      const principal = store.listPrincipals(input.ownerId)[0]
+      if (principal === undefined) throw new Error("Bootstrap Principal is missing")
+      expect(store.listProjectsForPrincipal(input.ownerId, principal.id, AT)).toEqual([])
       store.touchApiKey(input.apiKeyId, "2026-07-13T00:01:00.000Z")
       store.touchApiKey(input.apiKeyId, "2026-07-13T00:01:30.000Z")
       expect(store.listApiKeys(input.ownerId)[0]?.lastUsedAt).toBe("2026-07-13T00:01:00.000Z")
@@ -570,7 +573,7 @@ describe("durable session runtime ownership", () => {
         id: "session-a",
         ownerId: OWNER_A,
         workspace: { type: "repository", url: "https://example.test/repo.git" },
-        agentType: "demo",
+        agentType: "fixture",
         agentSpec: testAgentSpec(),
         agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
         executionProvenance: testExecutionProvenanceFor("local"),
@@ -792,7 +795,7 @@ function createRun(store: Store, ownerId: string, id: string): void {
     id,
     ownerId,
     workspace: { type: "repository", url: "https://example.test/repo.git" },
-    agentType: "demo",
+    agentType: "fixture",
     agentSpec: testAgentSpec(),
     agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
     executionProvenance: testExecutionProvenanceFor("local"),
@@ -812,7 +815,7 @@ function createAgentSessionRecord(store: Store, ownerId: string, id: string): vo
     id,
     ownerId,
     workspace: { type: "repository", url: "https://example.test/repo.git" },
-    agentType: "demo",
+    agentType: "fixture",
     agentSpec: testAgentSpec(),
     agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
     executionProvenance: testExecutionProvenanceFor("local"),

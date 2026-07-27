@@ -13,11 +13,12 @@ afterEach(async () => {
 })
 
 describe("agent launch catalog", () => {
-  test("the shipped catalog advertises only its bundled runnable agent", async () => {
+  test("the shipped catalog advertises only real supported agents", async () => {
     const catalog = await AgentCatalog.load(resolve("config/agents.json"))
 
-    expect(catalog.list()).toEqual(["demo"])
-    expect(catalog.resolve("demo").executable).toBe("meanwhile-demo-agent")
+    expect(catalog.list()).toEqual(["claude-code", "codex"])
+    expect(catalog.resolve("codex").executable).toBe("codex-acp")
+    expect(catalog.resolve("claude-code").executable).toBe("claude-agent-acp")
   })
 
   test("rejects unknown fields at every catalog object boundary", async () => {

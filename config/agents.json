@@ -1,29 +1,53 @@
 {
   "version": 1,
   "agents": {
-    "demo": {
+    "codex": {
       "transport": "stdio",
-      "executable": "meanwhile-demo-agent",
+      "executable": "codex-acp",
       "args": [],
       "workingDirectory": "workspace",
       "capabilities": {
         "filesystem": true,
-        "terminal": false
+        "terminal": true
       },
-      "envNames": [
-        "FIXTURE_DELAY_MS",
-        "FIXTURE_REQUEST_PERMISSION",
-        "FIXTURE_MALFORMED_OUTPUT",
-        "FIXTURE_OVERSIZED_BYTES",
-        "FIXTURE_OUTPUT_PATH"
-      ],
+      "envNames": ["CI"],
       "networkPolicy": {
-        "allowedHosts": []
+        "allowedHosts": ["api.openai.com"]
       },
       "credentials": [
         {
-          "environmentVariable": "TEST_RUNNER_SECRET",
-          "host": "example.com",
+          "environmentVariable": "OPENAI_API_KEY",
+          "host": "api.openai.com",
+          "methods": ["POST"]
+        }
+      ]
+    },
+    "claude-code": {
+      "transport": "stdio",
+      "executable": "claude-agent-acp",
+      "args": [],
+      "workingDirectory": "workspace",
+      "capabilities": {
+        "filesystem": true,
+        "terminal": true
+      },
+      "envNames": [
+        "CI",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "CLAUDE_CODE_DISABLE_AGENT_VIEW",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER",
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_BASE_URL"
+      ],
+      "networkPolicy": {
+        "allowedHosts": ["api.anthropic.com"]
+      },
+      "credentials": [
+        {
+          "environmentVariable": "ANTHROPIC_API_KEY",
+          "host": "api.anthropic.com",
           "methods": ["POST"]
         }
       ]

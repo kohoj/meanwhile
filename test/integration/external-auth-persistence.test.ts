@@ -41,6 +41,7 @@ describe("external auth persistence", () => {
     })
     expect(completed.grants.map((grant) => grant.repositoryName)).toEqual(["repo-a", "repo-b"])
     expect(active.getActiveIdentityCredential(ownerId, identityId)?.id).toBe(credentialId(1))
+    expect(active.getPrincipal(ownerId, principalId)?.displayName).toBe("Alice Chen")
 
     const staleGrant = completed.grants[1]
     if (staleGrant === undefined) throw new Error("Expected the second repository grant")
@@ -53,7 +54,6 @@ describe("external auth persistence", () => {
         provider: "github",
         accountId: staleGrant.accountId,
         accountName: staleGrant.accountName,
-        installationId: staleGrant.installationId,
         repositoryId: staleGrant.repositoryId,
         repositoryName: staleGrant.repositoryName,
         repositoryFullName: staleGrant.repositoryFullName,
@@ -128,7 +128,7 @@ async function setup(): Promise<Store> {
   store = new Store(join(temporary, "meanwhile.sqlite"))
   store.createOwner({ id: ownerId, name: "Acme", createdAt: at })
   for (const [id, name] of [
-    [principalId, "Alice Chen"],
+    [principalId, "Owner"],
     [otherPrincipalId, "Bob Li"],
   ] as const) {
     store.createPrincipal({
@@ -177,7 +177,6 @@ async function completion(sequence: number, repositories: readonly string[]) {
       provider: "github",
       accountId: "account-1",
       accountName: "acme",
-      installationId: "installation-1",
       repositoryId: `repository-${repository}`,
       repositoryName: repository,
       repositoryFullName: `acme/${repository}`,

@@ -6,7 +6,7 @@ The older Project Watch comparison remains below as decision history.
 
 ## ADR 0009 + ADR 0012 selected experience
 
-1. A person signs in with GitHub or Google, or uses the installation's explicit
+1. A person signs in with GitHub or Google, or uses the deployment's explicit
    local bootstrap path.
 2. Onboarding separately authorizes repository discovery, managed execution,
    and local observation. Pairing a Companion uploads nothing until the person
@@ -61,12 +61,12 @@ sync—rather than saying the agent failed.
 
 | Product step | Authoritative implementation | Current proof | Remaining gate |
 | --- | --- | --- | --- |
-| Sign in | Optional GitHub App / Google OIDC plus installation access; all issue one opaque Meanwhile browser session | Contract, API, BFF, migration, and deterministic browser coverage | Live configured GitHub and Google callback receipts |
-| Connected onboarding | Separate ExternalIdentity, repository grant/binding, AgentConnection, and personal Project selection | Mixed GitHub-backed plus local Project browser journey | Provider revocation/relink acceptance on a clean deployment |
+| Sign in | GitHub OAuth / Google OIDC plus deployment-local access; default-open registration creates identity only and all paths issue one opaque Meanwhile browser session | Contract, API, BFF, migration, and deterministic browser coverage | Live configured GitHub and Google callback receipts |
+| Connected onboarding | Separate ExternalIdentity, renewable repository-directory observation, repository binding, AgentConnection, and personal Project selection; entry requires one selected repository-backed Project | Repository-backed browser journey, expired-directory auto-refresh, explicit search/refresh, and unbound-project denial coverage | Live provider revocation/relink acceptance on a clean deployment |
 | Local Companion | Principal-bound ConnectorDevice plus separate device/source/Project share consent | Selected ADR 0012 contract and deterministic connector fixtures | Pairing UX, device-local outbox, safe hook installation, real-source restart/revocation receipt |
 | Project Lobby | Provider-neutral `spaces[].tables` read model over authoritative Projects, work, membership, attention, and PresenceLeases | Source-rendered Lobby, empty-room browser proof, and current dirty-tree two-Principal HTTPS system receipt | Two real members entering from separate clients on one clean revision |
 | Live Deck | Tagged `run | session | mirror` cards; mirrors are explicitly Linked and observation-only | Native cards have source-locked browser and deployed BFF proof; mirror core is a separate in-progress slice | Board mirror projection plus multi-person observation of one real local source |
-| New task | Contextual self-delegation through the public Project Run contract | Accepted Run enters the room; deterministic journey plus clean local public-repository Demo ACP integration | Real private checkout plus credentialed live-agent receipt |
+| New task | Contextual self-delegation through the public Project Run contract | Accepted Run enters the room; deterministic journey plus clean local public-repository Proof ACP integration | Real private checkout plus credentialed live-agent receipt |
 | Conversation Detail | Native task events, foldable work, transcript index, exact selection, Marginalia, and Relay | Source-locked comparison, Annotation/Relay journey, reload-free local SSE answer receipt, and reciprocal deployed conversation/Annotation/Relay proof | Two-human author/recipient acceptance |
 | Local owned execution | Actual sandbox behind RuntimeProvider; host-process `local` remains non-isolated | OCI provider candidate has deterministic and machine-local coverage | Registry/config wiring plus clean provider and credential-bound live receipts |
 

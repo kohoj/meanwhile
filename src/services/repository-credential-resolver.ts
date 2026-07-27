@@ -71,7 +71,10 @@ export class GitHubRepositoryCredentialResolver implements RepositoryCredentialR
       at.toISOString(),
     )
     if (authority === null) return null
-    if (Date.parse(authority.credential.accessExpiresAt) <= at.getTime() + ACCESS_EXPIRY_SKEW_MS) {
+    if (
+      authority.credential.accessExpiresAt !== null &&
+      Date.parse(authority.credential.accessExpiresAt) <= at.getTime() + ACCESS_EXPIRY_SKEW_MS
+    ) {
       throw new AppError({
         code: "REPOSITORY_AUTHORIZATION_EXPIRED",
         status: 409,
@@ -125,7 +128,6 @@ export class GitHubRepositoryCredentialResolver implements RepositoryCredentialR
       ...authority.grant,
       accountId: entry.account.id,
       accountName: entry.account.login,
-      installationId: entry.installationId,
       repositoryId: entry.repository.id,
       repositoryName: entry.repository.name,
       repositoryFullName: entry.repository.fullName,
@@ -146,7 +148,6 @@ export class GitHubRepositoryCredentialResolver implements RepositoryCredentialR
         at.toISOString(),
         {
           repositoryId: grant.repositoryId,
-          installationId: grant.installationId,
           access: grant.access,
           expiresAt: grant.expiresAt,
         },
@@ -159,7 +160,7 @@ export class GitHubRepositoryCredentialResolver implements RepositoryCredentialR
     }
     const values = [
       opened.accessToken,
-      opened.refreshToken,
+      ...(opened.refreshToken === null ? [] : [opened.refreshToken]),
       gitAuthorization,
       gitAuthorization.slice("Basic ".length),
     ]

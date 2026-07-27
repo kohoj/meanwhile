@@ -14,7 +14,8 @@ export interface ExternalAuthIdentityProfile {
 export interface ExternalAuthCredentialMaterial {
   readonly accessToken: string
   readonly refreshToken: string | null
-  readonly accessExpiresAt: string
+  /** Null when the provider does not declare an access-token expiry. */
+  readonly accessExpiresAt: string | null
   readonly refreshExpiresAt: string | null
 }
 

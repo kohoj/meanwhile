@@ -1,6 +1,6 @@
 *
 !.runner/meanwhile-runner
-!.runner/meanwhile-demo-agent
+!.runner/meanwhile-fixture-agent
 !.runner/LICENSE
 !.runner/THIRD_PARTY_NOTICES
 !.runner/BUN_VERSION

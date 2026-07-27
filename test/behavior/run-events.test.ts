@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test"
 import type { RunEvent } from "../../src/api/contracts"
 import { timelineFromEvents } from "../../src/timeline"
-import { createApplicationHarness, createDemoRun } from "../application-harness"
+import { createApplicationHarness, createFixtureRun } from "../application-harness"
 
 test("one durable run journal explains status, agent work, output, and cleanup", async () => {
   const harness = await createApplicationHarness()
   try {
-    const run = await createDemoRun(harness)
+    const run = await createFixtureRun(harness)
     expect((await harness.waitForRun(run.id)).status).toBe("succeeded")
 
     const events = await waitForCompleteJournal(harness.request, run.id)

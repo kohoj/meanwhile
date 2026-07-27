@@ -369,6 +369,7 @@ interface ProjectAccessRow extends Record<string, Bind> {
   principal_id: string
   kind: PrincipalKind
   display_name: string
+  avatar_url: string | null
   access: ProjectAccess["access"]
   source: ProjectAccess["source"]
   since: string
@@ -527,7 +528,7 @@ interface IdentityCredentialRow extends Record<string, Bind> {
   provider: "github"
   sealed_payload: string
   key_version: string
-  access_expires_at: string
+  access_expires_at: string | null
   refresh_expires_at: string | null
   created_at: string
   updated_at: string
@@ -542,7 +543,6 @@ interface ExternalProjectGrantRow extends Record<string, Bind> {
   provider: "github"
   account_id: string
   account_name: string
-  installation_id: string
   repository_id: string
   repository_name: string
   repository_full_name: string
@@ -562,7 +562,6 @@ interface ProjectRepositoryBindingRow extends Record<string, Bind> {
   provider: "github"
   account_id: string
   account_name: string
-  installation_id: string
   repository_id: string
   repository_name: string
   repository_full_name: string
@@ -828,6 +827,18 @@ const principalFromRow = (row: PrincipalRow): Principal => ({
   disabledAt: row.disabled_at,
 })
 
+const providerPrincipalDisplayName = (
+  identity: Pick<ExternalIdentityRow, "display_name" | "login">,
+  fallback: string,
+): string => {
+  const displayName = identity.display_name?.trim()
+  if (displayName !== undefined && displayName.length > 0 && displayName.length <= 120) {
+    return displayName
+  }
+  const login = identity.login?.trim()
+  return login !== undefined && login.length > 0 && login.length <= 120 ? login : fallback
+}
+
 const projectFromRow = (row: ProjectRow): Project => ({
   id: row.id,
   ownerId: row.owner_id,
@@ -854,6 +865,7 @@ const projectAccessFromRow = (row: ProjectAccessRow): ProjectAccess => ({
     id: row.principal_id,
     kind: row.kind,
     displayName: row.display_name,
+    avatarUrl: row.avatar_url,
   },
   access: row.access,
   source: row.source,
@@ -933,7 +945,6 @@ const externalProjectGrantFromRow = (row: ExternalProjectGrantRow): ExternalProj
   provider: row.provider,
   accountId: row.account_id,
   accountName: row.account_name,
-  installationId: row.installation_id,
   repositoryId: row.repository_id,
   repositoryName: row.repository_name,
   repositoryFullName: row.repository_full_name,
@@ -955,7 +966,6 @@ const projectRepositoryBindingFromRow = (
   provider: row.provider,
   accountId: row.account_id,
   accountName: row.account_name,
-  installationId: row.installation_id,
   repositoryId: row.repository_id,
   repositoryName: row.repository_name,
   repositoryFullName: row.repository_full_name,
@@ -1605,6 +1615,13 @@ export interface CompletedExternalAuthentication {
   readonly session: BrowserSession
 }
 
+export interface RefreshExternalProjectGrantsInput {
+  readonly identity: ExternalIdentity
+  readonly grants: readonly ExternalProjectGrant[]
+  readonly at: string
+  readonly audit: AuditRecord
+}
+
 export interface ProjectRepositoryCheckoutAuthority {
   readonly binding: ProjectRepositoryBinding
   readonly grant: ExternalProjectGrant
@@ -1863,13 +1880,7 @@ export class Store {
     )
   }
 
-  #ensureOwnerDefaultCollaboration(
-    ownerId: string,
-    createdAt: string,
-  ): {
-    readonly principal: Principal
-    readonly project: Project
-  } {
+  #ensureOwnerPrincipal(ownerId: string, createdAt: string): Principal {
     let principalRow = this.database
       .query<PrincipalRow, [string]>(
         "SELECT * FROM principals WHERE owner_id = ? ORDER BY created_at, id LIMIT 1",
@@ -1892,6 +1903,18 @@ export class Store {
         .get(principalId)
     }
     if (principalRow === null) throw new Error("Default Principal was not created")
+
+    return principalFromRow(principalRow)
+  }
+
+  #ensureOwnerDefaultCollaboration(
+    ownerId: string,
+    createdAt: string,
+  ): {
+    readonly principal: Principal
+    readonly project: Project
+  } {
+    const principal = this.#ensureOwnerPrincipal(ownerId, createdAt)
 
     let projectRow = this.database
       .query<ProjectRow, [string]>(
@@ -1918,8 +1941,8 @@ export class Store {
         VALUES (?, ?, ?, 'maintainer', ?, NULL)
         ON CONFLICT(project_id,principal_id) DO UPDATE SET removed_at=NULL
       `)
-      .run(ownerId, projectRow.id, principalRow.id, createdAt)
-    return { principal: principalFromRow(principalRow), project: projectFromRow(projectRow) }
+      .run(ownerId, projectRow.id, principal.id, createdAt)
+    return { principal, project: projectFromRow(projectRow) }
   }
 
   #resolveWorkCollaboration(input: {
@@ -2291,7 +2314,22 @@ export class Store {
       .query<ProjectAccessRow, [string, string, string, string, string]>(`
         WITH candidates AS (
           SELECT membership.project_id,membership.principal_id,
-            principal.kind,principal.display_name,
+            principal.kind,
+            COALESCE(
+              (SELECT COALESCE(identity.display_name,identity.login)
+               FROM external_identities identity
+               WHERE identity.owner_id=principal.owner_id
+                 AND identity.principal_id=principal.id
+                 AND identity.provider='github' AND identity.revoked_at IS NULL
+               ORDER BY identity.last_verified_at DESC,identity.id LIMIT 1),
+              principal.display_name
+            ) AS display_name,
+            (SELECT identity.avatar_url
+             FROM external_identities identity
+             WHERE identity.owner_id=principal.owner_id
+               AND identity.principal_id=principal.id
+               AND identity.provider='github' AND identity.revoked_at IS NULL
+             ORDER BY identity.last_verified_at DESC,identity.id LIMIT 1) AS avatar_url,
             CASE membership.role
               WHEN 'maintainer' THEN 'administer'
               ELSE 'participate'
@@ -2306,7 +2344,9 @@ export class Store {
             AND membership.removed_at IS NULL AND principal.disabled_at IS NULL
           UNION ALL
           SELECT binding.project_id,grant.principal_id,
-            principal.kind,principal.display_name,
+            principal.kind,
+            COALESCE(identity.display_name,identity.login,principal.display_name) AS display_name,
+            identity.avatar_url,
             grant.access,'github' AS source,grant.observed_at AS since
           FROM project_repository_bindings binding
           JOIN external_project_grants grant
@@ -2337,7 +2377,7 @@ export class Store {
             ) AS access_rank
           FROM candidates
         )
-        SELECT project_id,principal_id,kind,display_name,access,source,since
+        SELECT project_id,principal_id,kind,display_name,avatar_url,access,source,since
         FROM ranked WHERE access_rank=1
         ORDER BY display_name,principal_id
       `)
@@ -3770,7 +3810,7 @@ export class Store {
       this.database
         .query("INSERT INTO owners(id, name, created_at) VALUES (?, ?, ?)")
         .run(input.ownerId, input.ownerName, input.createdAt)
-      const collaboration = this.#ensureOwnerDefaultCollaboration(input.ownerId, input.createdAt)
+      const principal = this.#ensureOwnerPrincipal(input.ownerId, input.createdAt)
       this.database
         .query(`
             INSERT INTO api_keys(id, owner_id, prefix, hash, name, created_at)
@@ -3789,7 +3829,7 @@ export class Store {
           INSERT INTO api_key_principals(api_key_id,owner_id,principal_id,created_at)
           VALUES (?, ?, ?, ?)
         `)
-        .run(input.apiKeyId, input.ownerId, collaboration.principal.id, input.createdAt)
+        .run(input.apiKeyId, input.ownerId, principal.id, input.createdAt)
       this.insertAudit({
         id: crypto.randomUUID(),
         ownerId: input.ownerId,
@@ -4226,6 +4266,184 @@ export class Store {
     return row === null ? null : identityCredentialFromRow(row)
   }
 
+  /**
+   * Replaces one identity's repository-directory observation atomically. A
+   * successful empty observation is meaningful: it revokes repositories that
+   * disappeared while advancing the identity verification time, so callers do
+   * not mistake an account with zero repositories for an unverified account.
+   */
+  refreshExternalProjectGrantsWithAudit(
+    input: RefreshExternalProjectGrantsInput,
+  ): readonly ExternalProjectGrant[] {
+    return this.database
+      .transaction(() => {
+        const identityRow = this.database
+          .query<ExternalIdentityRow, [string, string, string]>(`
+            SELECT * FROM external_identities
+            WHERE owner_id=? AND id=? AND principal_id=?
+              AND provider='github' AND revoked_at IS NULL
+          `)
+          .get(input.identity.ownerId, input.identity.id, input.identity.principalId)
+        if (identityRow === null) {
+          throw new AppError({ code: "NOT_FOUND", message: "GitHub identity not found" })
+        }
+        if (
+          input.grants.some(
+            (grant) =>
+              grant.ownerId !== input.identity.ownerId ||
+              grant.principalId !== input.identity.principalId ||
+              grant.externalIdentityId !== input.identity.id ||
+              grant.provider !== "github" ||
+              grant.observedAt !== input.at ||
+              grant.revokedAt !== null,
+          )
+        ) {
+          throw new TypeError("Repository refresh grants do not match their GitHub identity")
+        }
+
+        this.database
+          .query(`
+            UPDATE external_identities SET last_verified_at=?
+            WHERE owner_id=? AND id=?
+          `)
+          .run(input.at, input.identity.ownerId, input.identity.id)
+        this.database
+          .query(`
+            UPDATE external_project_grants SET revoked_at=?
+            WHERE owner_id=? AND principal_id=? AND external_identity_id=?
+              AND provider='github' AND revoked_at IS NULL
+          `)
+          .run(input.at, input.identity.ownerId, input.identity.principalId, input.identity.id)
+
+        const refreshed: ExternalProjectGrant[] = []
+        for (const grant of input.grants) {
+          this.database
+            .query(`
+              INSERT INTO external_project_grants(
+                id,owner_id,principal_id,external_identity_id,provider,account_id,account_name,
+                repository_id,repository_name,repository_full_name,repository_url,
+                private,access,observed_at,expires_at,revoked_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+              ON CONFLICT(owner_id,principal_id,provider,repository_id) DO UPDATE SET
+                external_identity_id=excluded.external_identity_id,
+                account_id=excluded.account_id,
+                account_name=excluded.account_name,
+                repository_name=excluded.repository_name,
+                repository_full_name=excluded.repository_full_name,
+                repository_url=excluded.repository_url,
+                private=excluded.private,
+                access=excluded.access,
+                observed_at=excluded.observed_at,
+                expires_at=excluded.expires_at,
+                revoked_at=NULL
+            `)
+            .run(
+              grant.id,
+              grant.ownerId,
+              grant.principalId,
+              grant.externalIdentityId,
+              grant.provider,
+              grant.accountId,
+              grant.accountName,
+              grant.repositoryId,
+              grant.repositoryName,
+              grant.repositoryFullName,
+              grant.repositoryUrl,
+              grant.private ? 1 : 0,
+              grant.access,
+              grant.observedAt,
+              grant.expiresAt,
+            )
+          const grantRow = this.database
+            .query<ExternalProjectGrantRow, [string, string, string]>(`
+              SELECT * FROM external_project_grants
+              WHERE owner_id=? AND principal_id=? AND provider='github' AND repository_id=?
+            `)
+            .get(grant.ownerId, grant.principalId, grant.repositoryId)
+          if (grantRow === null) throw new Error("Refreshed repository grant is missing")
+          const stored = externalProjectGrantFromRow(grantRow)
+          this.#syncProjectRepositoryMetadata(stored)
+          refreshed.push(stored)
+        }
+        this.insertAudit(input.audit)
+        return refreshed.sort((left, right) =>
+          `${left.accountName}/${left.repositoryFullName}/${left.id}`.localeCompare(
+            `${right.accountName}/${right.repositoryFullName}/${right.id}`,
+          ),
+        )
+      })
+      .immediate()
+  }
+
+  syncPrincipalGitHubProfileWithAudit(input: {
+    readonly ownerId: string
+    readonly principalId: string
+    readonly externalIdentityId: string
+    readonly at: string
+    readonly audit: AuditRecord
+  }): Principal {
+    return this.database
+      .transaction(() => {
+        const identity = this.database
+          .query<ExternalIdentityRow, [string, string, string]>(`
+            SELECT * FROM external_identities
+            WHERE owner_id=? AND id=? AND principal_id=?
+              AND provider='github' AND revoked_at IS NULL
+          `)
+          .get(input.ownerId, input.externalIdentityId, input.principalId)
+        if (identity === null) {
+          throw new AppError({ code: "NOT_FOUND", message: "GitHub identity not found" })
+        }
+        const principal = this.getPrincipal(input.ownerId, input.principalId)
+        if (principal === null || principal.disabledAt !== null || principal.kind !== "person") {
+          throw new AppError({
+            code: "UNAUTHENTICATED",
+            status: 401,
+            message: "Authentication required",
+          })
+        }
+        const displayName = providerPrincipalDisplayName(identity, principal.displayName)
+        if (displayName !== principal.displayName) {
+          this.database
+            .query("UPDATE principals SET display_name=? WHERE owner_id=? AND id=?")
+            .run(displayName, input.ownerId, input.principalId)
+          this.insertAudit(input.audit)
+        }
+        const updated = this.getPrincipal(input.ownerId, input.principalId)
+        if (updated === null) throw new Error("Synchronized Principal is missing")
+        return updated
+      })
+      .immediate()
+  }
+
+  revokeGitHubAuthorizationWithAudit(input: {
+    readonly ownerId: string
+    readonly principalId: string
+    readonly externalIdentityId: string
+    readonly at: string
+    readonly audit: AuditRecord
+  }): void {
+    this.database
+      .transaction(() => {
+        this.database
+          .query(`
+            UPDATE identity_credentials SET revoked_at=?,updated_at=?
+            WHERE owner_id=? AND principal_id=? AND external_identity_id=?
+              AND provider='github' AND revoked_at IS NULL
+          `)
+          .run(input.at, input.at, input.ownerId, input.principalId, input.externalIdentityId)
+        this.database
+          .query(`
+            UPDATE external_project_grants SET revoked_at=?
+            WHERE owner_id=? AND principal_id=? AND external_identity_id=?
+              AND provider='github' AND revoked_at IS NULL
+          `)
+          .run(input.at, input.ownerId, input.principalId, input.externalIdentityId)
+        this.insertAudit(input.audit)
+      })
+      .immediate()
+  }
+
   getProjectRepositoryCheckoutAuthority(
     ownerId: string,
     principalId: string,
@@ -4483,6 +4701,15 @@ export class Store {
         if (identityRow === null) throw new Error("External identity was not persisted")
         const identity = externalIdentityFromRow(identityRow)
 
+        if (identity.provider === "github") {
+          const displayName = providerPrincipalDisplayName(identityRow, principal.displayName)
+          if (displayName !== principal.displayName) {
+            this.database
+              .query("UPDATE principals SET display_name=? WHERE owner_id=? AND id=?")
+              .run(displayName, identity.ownerId, identity.principalId)
+          }
+        }
+
         let credential: IdentityCredential | null = null
         if (input.credential !== null) {
           this.database
@@ -4542,14 +4769,13 @@ export class Store {
               .query(`
                 INSERT INTO external_project_grants(
                   id,owner_id,principal_id,external_identity_id,provider,account_id,account_name,
-                  installation_id,repository_id,repository_name,repository_full_name,
+                  repository_id,repository_name,repository_full_name,
                   repository_url,private,access,observed_at,expires_at,revoked_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 ON CONFLICT(owner_id,principal_id,provider,repository_id) DO UPDATE SET
                   external_identity_id=excluded.external_identity_id,
                   account_id=excluded.account_id,
                   account_name=excluded.account_name,
-                  installation_id=excluded.installation_id,
                   repository_name=excluded.repository_name,
                   repository_full_name=excluded.repository_full_name,
                   repository_url=excluded.repository_url,
@@ -4567,7 +4793,6 @@ export class Store {
                 grant.provider,
                 grant.accountId,
                 grant.accountName,
-                grant.installationId,
                 grant.repositoryId,
                 grant.repositoryName,
                 grant.repositoryFullName,
@@ -4654,14 +4879,13 @@ export class Store {
           .query(`
             INSERT INTO external_project_grants(
               id,owner_id,principal_id,external_identity_id,provider,account_id,account_name,
-              installation_id,repository_id,repository_name,repository_full_name,repository_url,
+              repository_id,repository_name,repository_full_name,repository_url,
               private,access,observed_at,expires_at,revoked_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_id,principal_id,provider,repository_id) DO UPDATE SET
               external_identity_id=excluded.external_identity_id,
               account_id=excluded.account_id,
               account_name=excluded.account_name,
-              installation_id=excluded.installation_id,
               repository_name=excluded.repository_name,
               repository_full_name=excluded.repository_full_name,
               repository_url=excluded.repository_url,
@@ -4679,7 +4903,6 @@ export class Store {
             input.grant.provider,
             input.grant.accountId,
             input.grant.accountName,
-            input.grant.installationId,
             input.grant.repositoryId,
             input.grant.repositoryName,
             input.grant.repositoryFullName,
@@ -4785,10 +5008,10 @@ export class Store {
         this.database
           .query(`
             INSERT INTO project_repository_bindings(
-              id,owner_id,project_id,grant_id,provider,account_id,account_name,installation_id,
+              id,owner_id,project_id,grant_id,provider,account_id,account_name,
               repository_id,repository_name,repository_full_name,repository_url,private,
               bound_by_principal_id,created_at,revoked_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .run(
             input.binding.id,
@@ -4798,7 +5021,6 @@ export class Store {
             input.binding.provider,
             input.binding.accountId,
             input.binding.accountName,
-            input.binding.installationId,
             input.binding.repositoryId,
             input.binding.repositoryName,
             input.binding.repositoryFullName,
@@ -4880,7 +5102,6 @@ export class Store {
             provider: grant.provider,
             accountId: grant.accountId,
             accountName: grant.accountName,
-            installationId: grant.installationId,
             repositoryId: grant.repositoryId,
             repositoryName: grant.repositoryName,
             repositoryFullName: grant.repositoryFullName,
@@ -4893,10 +5114,10 @@ export class Store {
           this.database
             .query(`
               INSERT INTO project_repository_bindings(
-                id,owner_id,project_id,grant_id,provider,account_id,account_name,installation_id,
+                id,owner_id,project_id,grant_id,provider,account_id,account_name,
                 repository_id,repository_name,repository_full_name,repository_url,private,
                 bound_by_principal_id,created_at,revoked_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             `)
             .run(
               binding.id,
@@ -4906,7 +5127,6 @@ export class Store {
               binding.provider,
               binding.accountId,
               binding.accountName,
-              binding.installationId,
               binding.repositoryId,
               binding.repositoryName,
               binding.repositoryFullName,
@@ -4961,7 +5181,6 @@ export class Store {
       | "repositoryId"
       | "accountId"
       | "accountName"
-      | "installationId"
       | "repositoryName"
       | "repositoryFullName"
       | "repositoryUrl"
@@ -4971,14 +5190,13 @@ export class Store {
     this.database
       .query(`
         UPDATE project_repository_bindings SET
-          account_id=?,account_name=?,installation_id=?,repository_name=?,
+          account_id=?,account_name=?,repository_name=?,
           repository_full_name=?,repository_url=?,private=?
         WHERE owner_id=? AND provider=? AND repository_id=? AND revoked_at IS NULL
       `)
       .run(
         source.accountId,
         source.accountName,
-        source.installationId,
         source.repositoryName,
         source.repositoryFullName,
         source.repositoryUrl,

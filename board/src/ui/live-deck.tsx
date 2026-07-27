@@ -17,14 +17,7 @@ import {
   TerminalWindow,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import deckAgentBlue from "./assets/deck-agent-blue.png";
-import deckAgentCoral from "./assets/deck-agent-coral.png";
-import deckAgentNeutral from "./assets/deck-agent-neutral.png";
-import deckAgentViolet from "./assets/deck-agent-violet.png";
 import liveDeckBackground from "./assets/live-deck-background.png";
-import seatAlice from "./assets/seat-alice.png";
-import seatBob from "./assets/seat-bob.png";
-import seatPriya from "./assets/seat-priya.png";
 import {
   displayWorkStatus,
   humanAgent,
@@ -35,15 +28,11 @@ import {
   workActivityAge,
 } from "./presentation";
 import { useBoard } from "./store";
+import {
+  AgentPortrait as SharedAgentPortrait,
+  PersonPortrait as SharedPersonPortrait,
+} from "./portrait";
 import { composeTranscript, type TranscriptDetail, workSummary } from "./transcript";
-
-const HUMAN_SEATS = [seatAlice, seatBob, seatPriya] as const;
-const AGENT_SEATS: Readonly<Record<DeckTone | "neutral", string>> = {
-  coral: deckAgentCoral,
-  blue: deckAgentBlue,
-  violet: deckAgentViolet,
-  neutral: deckAgentNeutral,
-};
 
 export const ProjectSource = ({
   repository,
@@ -107,34 +96,16 @@ const SIGNAL_LEVELS = [
   0, 1, 0, 0, 1, 3, 4, 4, 4, 4,
 ] as const;
 
-const stableSeat = (identity: Pick<Principal, "id" | "displayName">): string => {
-  const name = identity.displayName.toLowerCase();
-  if (name.includes("alice")) return seatAlice;
-  if (name.includes("bob") || name.includes("owner")) return seatBob;
-  if (name.includes("priya")) return seatPriya;
-  let hash = 0;
-  for (const character of identity.id) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
-  return HUMAN_SEATS[hash % HUMAN_SEATS.length] ?? seatAlice;
-};
-
 const PersonPortrait = ({ identity, size = "medium" }: {
-  readonly identity: Pick<Principal, "id" | "displayName">;
+  readonly identity: Pick<Principal, "id" | "displayName" | "avatarUrl">;
   readonly size?: "tiny" | "small" | "medium" | "large";
-}) => (
-  <span className={`deck-person deck-person-${size}`} aria-hidden="true">
-    <img src={stableSeat(identity)} alt="" />
-  </span>
-);
+}) => <SharedPersonPortrait className={`deck-person deck-person-${size}`} identity={identity} />;
 
 const AgentOrb = ({ tone, size = "medium", neutral = false }: {
   readonly tone: DeckTone;
   readonly size?: "small" | "medium";
   readonly neutral?: boolean;
-}) => (
-  <span className={`deck-agent-orb deck-agent-${tone} deck-agent-${size} ${neutral ? "deck-agent-neutral" : ""}`} aria-hidden="true">
-    <img src={AGENT_SEATS[neutral ? "neutral" : tone]} alt="" />
-  </span>
-);
+}) => <SharedAgentPortrait className={`deck-agent-orb deck-agent-${tone} deck-agent-${size} ${neutral ? "deck-agent-neutral" : ""}`} />;
 
 const SignalMatrix = ({ tone }: { readonly tone: DeckTone }) => (
   <span className={`deck-signal-matrix deck-signal-${tone}`} aria-hidden="true">
@@ -360,8 +331,8 @@ const RelayHandoff = ({ tone, relay }: {
 }) => (
   <article className="deck-handoff">
     <div className="deck-handoff-route">
-      <img src={stableSeat(relay.author)} alt="" /><span>→</span>
-      <img src={stableSeat(relay.recipient)} alt="" />
+      <PersonPortrait identity={relay.author} size="tiny" /><span>→</span>
+      <PersonPortrait identity={relay.recipient} size="tiny" />
       <strong>{relay.author.displayName}</strong>
       <ArrowRight size={12} weight="light" aria-hidden="true" />
       <strong>{relay.recipient.displayName}</strong>

@@ -15,7 +15,6 @@ export interface RepositoryDirectoryAccount {
 
 export interface RepositoryDirectoryEntry {
   readonly provider: string
-  readonly installationId: string
   readonly account: RepositoryDirectoryAccount
   readonly repository: {
     readonly id: string

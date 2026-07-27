@@ -44,7 +44,7 @@ test("run HTTP contract covers create, idempotency, isolation, evidence, and SSE
     expect(created.run.status).toBe("queued")
     expect(created.run.provider).toBe("local")
     expect(created.run.agentSpec).toMatchObject({
-      executable: "meanwhile-demo-agent",
+      executable: "meanwhile-fixture-agent",
       permissionPolicy: {
         mode: "allow-once",
         toolKinds: ["read", "edit", "delete", "move", "search"],

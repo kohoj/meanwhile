@@ -42,11 +42,11 @@ Bun loads local `.env` files for development. Production should inject environme
 | `MEANWHILE_LOG_LEVEL` | No | Bounded structured-log threshold |
 | `MEANWHILE_API_KEY` | Local bootstrap only | Initial development owner key; never the production key lifecycle |
 | `MEANWHILE_EXTERNAL_AUTH_OWNER_ID` | With external auth | Exact Owner receiving linked external identities; external subjects never choose an Owner |
-| `MEANWHILE_EXTERNAL_REGISTRATION` | No | `closed` by default; `open` permits a verified unknown provider subject to create one stable member Principal inside the configured external-auth Owner |
+| `MEANWHILE_EXTERNAL_REGISTRATION` | No | `open` by default; `closed` restricts sign-in to pre-provisioned or invited Principals |
 | `MEANWHILE_IDENTITY_CREDENTIAL_KEY` | With external auth | 32-byte base64url AES-GCM key kept in deployment secret storage; never logged or returned to the browser |
 | `MEANWHILE_IDENTITY_CREDENTIAL_KEY_VERSION` | No | Stable metadata label for the configured credential key; defaults to `v1` |
-| `MEANWHILE_GITHUB_CLIENT_ID` | With GitHub auth | GitHub App OAuth client identifier; configure only with the matching secret and callback |
-| `MEANWHILE_GITHUB_CLIENT_SECRET` | With GitHub auth | GitHub App OAuth client secret |
+| `MEANWHILE_GITHUB_CLIENT_ID` | With GitHub auth | GitHub OAuth App client identifier; configure once per deployment with the matching secret and callback |
+| `MEANWHILE_GITHUB_CLIENT_SECRET` | With GitHub auth | GitHub OAuth App client secret |
 | `MEANWHILE_GITHUB_CALLBACK_URL` | With GitHub auth | Exact public Board callback URL, HTTPS except loopback development |
 | `MEANWHILE_GOOGLE_CLIENT_ID` | With Google auth | Google OIDC client identifier; configure only with the matching secret and callback |
 | `MEANWHILE_GOOGLE_CLIENT_SECRET` | With Google auth | Google OIDC client secret |
@@ -102,14 +102,28 @@ The startup order is:
 
 Invalid configuration, data-root ownership, schema identity, catalog data, registry collisions, or an unknown default provider fail startup. The preview listener starts lazily on the first local-static deployment and resumes automatically when persisted successful previews exist. Runner availability is always an explicit `doctor` check. Catalog agent executables are host-checked only when the local provider admits new runs; remote toolchains are an image and live-provider proof concern. A missing executable never masquerades as startup health and causes the affected run to fail with durable evidence.
 
-The collaboration schema makes `(owner, GitHub repository ID)` a unique room
-identity. When upgrading the exact pre-identity ConversationMirror schema, stop
+The collaboration schema makes `(owner, GitHub repository ID)` a unique bound
+room identity. When upgrading the exact pre-identity ConversationMirror schema, stop
 the control plane, take and verify a backup, run
 `bun run migrate:project-repository-identity -- --database=/absolute/path/to/meanwhile.sqlite`,
 inspect the dry run, then repeat with `--write`. Duplicate historical bindings
 fail closed and require explicit operator resolution; the migration never picks
 a winning Project. A single legacy revoked binding is reactivated because grant
 revocation may remove current access but no longer erases repository identity.
+This migration also applies ADR 0013's progressive OAuth schema and reaches the
+current fingerprint directly.
+
+An exact post-identity GitHub App onboarding database from before ADR 0013 uses
+the dedicated progressive-onboarding migration after stopping the control plane
+and taking a verified backup:
+
+```console
+bun run migrate:progressive-onboarding -- --database=/absolute/path/to/meanwhile.sqlite
+bun run migrate:progressive-onboarding -- --database=/absolute/path/to/meanwhile.sqlite --write
+```
+
+This removes obsolete installation metadata and makes OAuth access-token expiry
+nullable without changing Principals, grants, bindings, or work.
 
 Development target:
 
@@ -206,21 +220,27 @@ The standard local-bootstrap Owner is
 durable Owner ID it initialized. Startup rejects an unknown Owner rather than
 silently creating a new tenant.
 
-The GitHub App must enable expiring user access tokens and grant only the
-repository permissions the installation needs; private checkout requires
-Contents read access. The current parser deliberately rejects non-expiring token
-responses because they omit refresh/expiry material and violate the bounded
-credential contract.
+Create one GitHub OAuth App for the deployment and register the exact callback
+URL. Users approve `read:user repo`; no user or organization administrator
+installs an App. GitHub may return either an expiring access token plus refresh
+token or a non-expiring OAuth token. Meanwhile stores the credential sealed,
+never invents expiry metadata, and revalidates the exact repository before each
+private checkout.
 
-`MEANWHILE_EXTERNAL_REGISTRATION=closed` maps login only onto an existing active
-Principal, preserving invitation and operator-provisioned deployments. With
-`open`, a verified unknown GitHub or Google subject creates exactly one stable
-member Principal inside the configured Owner; the subject never chooses an
-Owner. This creates identity, not ambient Project access. GitHub Project access
+`MEANWHILE_EXTERNAL_REGISTRATION=open` lets a verified unknown GitHub or Google
+subject atomically create one stable member Principal inside the configured
+Owner; it creates no Project or selection, and the subject never chooses an Owner. Set
+`closed` to map login only onto an existing active Principal, preserving
+invitation and operator-provisioned deployments. GitHub Project access
 is computed at request time from a current repository grant matching an active
 Project binding, while explicit local membership remains an independent unioned
-authority. Google users may link GitHub during onboarding to obtain repository
-grants.
+authority. Grant expiry is an internal freshness boundary: Project requests
+refresh the repository directory from the sealed credential, and an explicit
+Board refresh discovers newly created or newly authorized repositories
+immediately. Only provider rejection or an unrefreshable credential requires a
+new OAuth consent. The Board remains in onboarding until at least one real
+repository-backed Project is imported and selected. Google users must also link
+GitHub during onboarding to obtain repository grants.
 
 An `administer` GitHub grant may atomically import its repository as a Project
 room or bind it to an existing Project. Other Principals with matching current
@@ -228,10 +248,11 @@ grants enter that room as `watch`, `participate`, or `administer`; expiration or
 revocation removes only that provider-derived access and never rewrites durable
 attribution or explicit membership. At Run or AgentSession checkout, the
 control plane revalidates the delegator's own immutable repository ID through a
-current grant (even if the GitHub App installation has rotated),
+current grant,
 exposes only that person's access token to the bounded git helper, redacts its
 output, and releases the material before the agent starts. One person's provider
-rejection revokes that grant, not the shared Project binding. GitHub webhook
+rejection revokes that identity's credential and repository grants, not the
+shared Project binding. GitHub webhook
 invalidation is not yet wired, so keep provider permissions narrow and do not
 describe grant changes as push-invalidated until that receipt exists.
 

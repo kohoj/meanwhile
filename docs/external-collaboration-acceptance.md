@@ -55,7 +55,7 @@ Conversation Detail reading tasks.
 2. Each enters Project Lobby, confirms the shared Project is present and an
    unauthorized fixture Project is absent, then enters its Live Deck.
 3. From `New task`, each delegates a small real repository task with Codex,
-   Claude Code, or Pi—not the demo agent. Acceptance opens the new Run's native
+   Claude Code, or Pi—not the proof agent. Acceptance opens the new Run's native
    Conversation Detail; each then returns to the Live Deck.
 4. Starting when the Live Deck becomes visible, each finds the other person's
    card within fifteen seconds, names its delegator and condition, and opens it.

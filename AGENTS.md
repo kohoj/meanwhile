@@ -38,7 +38,7 @@ meanwhile api-keys create --name "Bob laptop" --principal <principal-id>
 The original challenge is the acceptance floor. The product bar is that a failed remote run can be explained, cancelled, recovered, or cleaned up without SSH access.
 
 The active product outcome is the coherent collaboration journey selected in
-ADRs 0009, 0011, and 0012: GitHub/Google or installation sign-in, connected
+ADRs 0009, 0011, 0012, and 0013: GitHub/Google or deployment-local sign-in, connected
 onboarding, Project Lobby, Project Room as a Live Deck of simultaneous
 human-agent conversations, then one full Conversation Detail with foldable
 agent work, Project-visible transcript marginalia, and addressed Task Relays.
@@ -59,9 +59,10 @@ Lobby and Live Deck are read models over native work and linked conversations;
 neither creates a second mutable task lifecycle or Project activity journal.
 The collaboration product uses one immutable GitHub repository identity per
 Project and at most one Project per `(Owner, GitHub repository ID)`. Repository
-name, URL, App installation, and current grants may change without changing the
-room; no Run, AgentSession, or ConversationMirror may enter a Project from a
-different repository. The implementation uses stable Principals, Owner-contained Projects, an
+name, URL, and current OAuth grants may change without changing the room; no
+Run, AgentSession, or ConversationMirror may enter a Project from a different
+repository. Unbound operator or legacy Projects never appear as collaboration
+rooms. The implementation uses stable Principals, Owner-contained Projects, an
 effective request-time union of explicit membership and current matching GitHub
 repository grants, immutable Project/delegator bindings, delegator-only
 lifecycle control, Principal-scoped idempotency, revocable browser and device
@@ -72,7 +73,15 @@ GitHub repository identity as the Project-room namespace. GitHub does not
 replace Meanwhile attribution, authorization, or owned-work lifecycle authority. Keep
 [`docs/product-constitution.md`](docs/product-constitution.md),
 [`docs/project-collaboration.md`](docs/project-collaboration.md), ADRs 0009,
-0011, and 0012, implementation, tests, and Board aligned.
+0011, 0012, and 0013, implementation, tests, and Board aligned.
+
+Human identity presentation is equally truthful: an active linked GitHub
+identity supplies the visible profile name and avatar everywhere in onboarding,
+Lobby, Live Deck, Conversation Detail, Presence, Relay, and Annotation. The
+Board may layer its halftone treatment over that image but must never ship or
+select a stock human portrait. Unlinked people use a neutral monogram. Fixture
+agents and fixture records stay in proof/test catalogs and never enter the
+active product catalog or UI.
 
 Meanwhile is not a generic shell API, agent/model provider, workflow engine, provider-specific wrapper, secrets manager, CI system, IDE, or dashboard. Do not add Redis, Kafka, a distributed queue, DAG engine, DI container, ORM, MCP facade, second remote provider, or UI merely to look complete.
 
@@ -130,6 +139,16 @@ share grants, provider grants, and agent connections are revocable credentials
 or grants, not durable people. Generic social comments, delegated operator
 control, and a durable Project activity stream remain outside this contract.
 
+Provider-derived repository grants are short-lived observations, not a repeated
+OAuth requirement. Authenticated Project requests refresh an expired GitHub
+directory from the sealed identity credential before resolving access; an
+expiring token uses its provider refresh token when available. Provider outage
+fails provider-derived access closed while remaining visibly retryable, and a
+rejected credential is the only state that asks the person to reconnect.
+Concurrent refreshes for one ExternalIdentity coalesce and re-read current
+identity state after the gate; a stale waiter may neither duplicate the
+provider request nor revive revoked authorization.
+
 ```text
 User / upstream agent
         │ HTTP / SDK / CLI
@@ -174,7 +193,7 @@ Use the smallest current primitive that owns each responsibility completely.
 | Runtime, packages, scripts, tests, bundling | Bun | One toolchain; native process, streams, SQLite, hashing, and standalone executable support |
 | Language | strict TypeScript | One typed contract language across API, core, runner, and bridge |
 | HTTP | Hono on Bun Web APIs | Small, Web-standard, portable; no Node server shim |
-| Public client | Typed resource namespaces over `fetch`, `AbortSignal`, Web streams, and shared Zod contracts | One deep consumer interface for SDK, CLI, demos, and upstream agents without server or provider coupling |
+| Public client | Typed resource namespaces over `fetch`, `AbortSignal`, Web streams, and shared Zod contracts | One deep consumer interface for SDK, CLI, proofs, and upstream agents without server or provider coupling |
 | Validation and OpenAPI | Zod 4 + `@hono/zod-openapi` | Runtime validation and API documentation from one schema source |
 | Agent protocol | official `@agentclientprotocol/sdk` | Harness-neutral typed ACP instead of per-agent CLI scraping |
 | Persistence | `bun:sqlite` in WAL mode | Durable local control plane without an ORM or sidecar |
@@ -352,7 +371,7 @@ Agent processes run with `TZ=UTC`. Public and durable timestamps are UTC ISO 860
 
 `config/agents.json` is the only source of agent launch configuration. Each entry declares ACP transport, executable, argv, working-directory policy, expected capabilities, allowed non-secret environment names, exact non-credential egress hosts, and exact credential environment/host/method grants. Validate once at startup and fail fast. No hidden commands or agent conditionals belong in routes or the executor.
 
-Executables are bare portable PATH names, never control-plane host paths. At run creation, snapshot the selected non-secret launch definition, capability-derived permission policy, definition digest, and catalog digest into durable run intent and include that snapshot in idempotency. Execution and recovery use the snapshot rather than re-reading mutable catalog configuration. The shipped catalog lists only bundled runnable agents; examples for external ACP adapters live in documentation, and remote executable availability is proved by the provider image and live test.
+Executables are bare portable PATH names, never control-plane host paths. At run creation, snapshot the selected non-secret launch definition, capability-derived permission policy, definition digest, and catalog digest into durable run intent and include that snapshot in idempotency. Execution and recovery use the snapshot rather than re-reading mutable catalog configuration. The shipped catalog lists only real supported ACP integrations; executable availability is a deployment invariant proved by the provider image and live test. Deterministic fixture agents belong to proof/test catalogs and must never appear in the product catalog or UI.
 
 ### 5.4 Execution provenance
 
@@ -425,14 +444,15 @@ A person with a selected authorized Project may enter the Lobby to watch even
 without an agent connection; delegation remains unavailable until that person
 authorizes an eligible managed agent. `companion connect` selects one local
 conversation, generates its secret locally, opens verifier-only browser
-approval for one Project, then proves possession before Keychain installation.
+approval for one Project, then proves possession before Keychain installation;
+the Project requires a matching local GitHub origin.
 `MEANWHILE_API_KEY` remains an explicit local single-user bootstrap; team mode
 exchanges each person's API key once for an opaque browser session held in an
 HttpOnly SameSite cookie.
 
 The controlling contract and remaining release boundary are in
-[`docs/project-collaboration.md`](docs/project-collaboration.md). ADR 0007
-controls the optional GitHub-backed directory boundary; ADR 0009 controls
+[`docs/project-collaboration.md`](docs/project-collaboration.md). ADR 0013
+controls repository-gated Project admission and the GitHub OAuth directory; ADR 0009 controls
 connected onboarding, Live Deck, PresenceLease, and transcript marginalia; ADR
 0010 retains the sealed external-credential and checkout-isolation contract;
 ADR 0011 controls explicit owner-scoped registration, provider-derived Project
@@ -595,7 +615,7 @@ Deployment statuses are `queued`, `running`, `succeeded`, and `failed`. Store se
 
 Hono routes validate with shared Zod/OpenAPI schemas, authenticate, call one service, and serialize. They do not orchestrate providers, update status, or access SQL.
 
-`src/client.ts` is the canonical programmatic consumer of this HTTP boundary. It exposes resource namespaces, validated inputs and responses, structured `MeanwhileError`, deterministic waits, and resumable log iteration. It uses only Web transport primitives plus `src/api/contracts.ts`; it never imports application composition, services, provider adapters, persistence, or owner internals. The CLI and demos call this client rather than maintaining a second HTTP stack. Browser use is fail-closed by default because bearer credentials do not belong in untrusted frontend bundles.
+`src/client.ts` is the canonical programmatic consumer of this HTTP boundary. It exposes resource namespaces, validated inputs and responses, structured `MeanwhileError`, deterministic waits, and resumable log iteration. It uses only Web transport primitives plus `src/api/contracts.ts`; it never imports application composition, services, provider adapters, persistence, or owner internals. The CLI and proofs call this client rather than maintaining a second HTTP stack. Browser use is fail-closed by default because bearer credentials do not belong in untrusted frontend bundles.
 
 Required routes:
 
@@ -661,7 +681,7 @@ Never return provider bodies, stack traces, SQL text, tokens, secret values, pro
 
 SQLite is the source of truth for a single-active-control-plane topology. Enable foreign keys, WAL, busy timeout, and transactional current-schema initialization; use no ORM.
 
-The store initializes one exact schema only when the database is empty, records its source fingerprint atomically, and rejects every nonempty database whose identity differs. Startup never upgrades, backfills, repairs, or dual-reads database state. Separate offline migrations each accept one exact source: `migrate:projects` accepts the published v0.1.3 fingerprint, `migrate:task-relays` accepts the Project Watch fingerprint and reaches the current Relay-plus-Annotation schema directly, `migrate:task-annotations` accepts the intermediate exact Task Relay fingerprint, `migrate:conversation-mirrors` accepts the exact pre-mirror schema, and `migrate:project-repository-identity` accepts the exact pre-repository-identity schema. All default to a dry run and verify the resulting current fingerprint plus foreign keys after explicit `--write`; unknown, ambiguous, or partially modified schemas fail closed. Schema SQL executes statement-by-statement because Bun does not reliably surface every statement-level failure through multi-statement `Database.exec()`.
+The store initializes one exact schema only when the database is empty, records its source fingerprint atomically, and rejects every nonempty database whose identity differs. Startup never upgrades, backfills, repairs, or dual-reads database state. Separate offline migrations each accept one exact source: `migrate:projects` accepts the published v0.1.3 fingerprint, `migrate:task-relays` accepts the Project Watch fingerprint and reaches the current Relay-plus-Annotation schema directly, `migrate:task-annotations` accepts the intermediate exact Task Relay fingerprint, `migrate:conversation-mirrors` accepts the exact pre-mirror schema, `migrate:project-repository-identity` accepts the exact pre-repository-identity schema, and `migrate:progressive-onboarding` accepts the exact GitHub App onboarding schema. All default to a dry run and verify the resulting current fingerprint plus foreign keys after explicit `--write`; unknown, ambiguous, or partially modified schemas fail closed. Schema SQL executes statement-by-statement because Bun does not reliably surface every statement-level failure through multi-statement `Database.exec()`.
 
 The schema includes its exact identity, Owners, stable Principals, Projects and
 memberships, hashed API keys and Principal bindings, opaque browser sessions,
@@ -732,7 +752,7 @@ Structured logs use stable event names and fields; prose belongs in `message`. T
 
 ### 12.1 Local process
 
-The local provider is a POSIX-only full adapter for development, deterministic tests, and the no-account demo. It uses one process-group implementation and the same runner and contract: lifecycle, persistable process identity, replay, ordered/idempotent process input, cancellation, files, artifacts, and exposure where applicable.
+The local provider is a POSIX-only full adapter for development, deterministic tests, and the no-account proof. It uses one process-group implementation and the same runner and contract: lifecycle, persistable process identity, replay, ordered/idempotent process input, cancellation, files, artifacts, and exposure where applicable.
 
 It is not a security sandbox. README and provider diagnostics must say so. Never run untrusted code locally while claiming isolation.
 
@@ -827,6 +847,7 @@ src/services/artifact-collector.ts
 src/services/artifact-service.ts  Project-member immutable artifact reads
 src/services/brief-service.ts     curated artifact reference and run-resolution boundary
 src/services/project-service.ts   Principal, Project, membership, and work read model
+src/services/principal-profile.ts provider-backed human name and portrait projection only
 src/services/browser-session-service.ts opaque deny-by-default browser credential lifecycle
 src/services/connector-device-service.ts Principal-bound device issue/list/revoke lifecycle
 src/services/conversation-mirror-service.ts device/share authorization, mirror ingest/replay, Project reads
@@ -855,6 +876,7 @@ src/providers/oci-local-provider.ts selected isolated local RuntimeProvider
 src/providers/cloudflare-provider.ts bridge client adapter
 providers/cloudflare-sandbox/     isolated Cloudflare package
 board/                            isolated Project Lobby/Live Deck BFF (native and mirror reads; self-delegation through the public client; no SQL or cross-member control)
+board/src/ui/design-tokens.css   sole Board color, typography, spacing, control, radius, shadow, motion, and layer scale
 
 src/artifacts/                    immutable storage contract + local store
 src/artifacts/workspace-bundle.ts uploaded immutable workspace input
@@ -868,8 +890,8 @@ test/contracts/                   replaceability and protocol contracts
 test/integration/                 real local composition
 test/live/                        credential-gated remote proof
 test/fixtures/                    deterministic ACP agent and fakes
-scripts/demo.ts                   readable SDK create → logs → artifacts → deploy proof
-scripts/demo-environment.ts       hermetic local/live-agent proof setup and teardown
+scripts/local-proof.ts                   readable SDK create → logs → artifacts → deploy proof
+scripts/proof-environment.ts       hermetic local/live-agent proof setup and teardown
 scripts/agent-toolchains.ts       exact local/remote agent proof toolchains
 scripts/container-smoke.ts        packaged-image agent and deployment proof
 scripts/release-proof.ts          run → Brief reuse → deploy → cleanup → restart → backup release evidence
@@ -934,7 +956,7 @@ Tests must prove:
 - the public client authenticates, validates contract responses, preserves structured safe errors, waits deterministically, and reconnects log streams without gaps or duplicates;
 - artifact inspection/download and deployment listing follow current Project membership; audit is Owner-admin-only; API-key reads are Principal-scoped with admin authority for cross-Principal issuance/revocation;
 - sandbox clock skew cannot control durable log timestamps or runner timeout duration, and the ACP child timezone is UTC;
-- the no-account demo completes create → run → logs → artifact → local deployment;
+- the no-account proof completes create → run → logs → artifact → local deployment;
 - the release proof sends a revision-bound prompt through ACP, downloads the immutable agent-written artifact through the public SDK, promotes one exact entry to a Brief, proves a separate run can reuse that frozen evidence into new immutable output, deploys through the SDK, verifies the returned URL and semantic OTLP signals, byte-scans live and backed-up durable data for exact private values, then proves cleanup, restart, hashed backup, restore, and a second boot;
 - each Cloudflare live-agent proof requires credentialed generation and multi-turn continuity inside the sandbox; a deterministic ACP fixture, image version check, health response, or lifecycle-only test is not accepted as equivalent evidence, and exact model identity is not claimed without attestation;
 - pinned OTel SDK/exporter packages initialize and export under Bun.
@@ -953,8 +975,8 @@ bun run dev
 bun run typecheck
 bun test
 bun run check
-bun run demo
-bun run demo:serve
+bun run proof:local
+bun run proof:local:serve
 bun run proof:release
 bun run proof:release:cloudflare
 bun run proof:release:cloudflare:codex
@@ -997,7 +1019,7 @@ Build in dependency order:
 4. One-shot run service/executor, timeout, cancellation, reconciliation, cleanup, API.
 5. Artifact capture and local deployment.
 6. Cloudflare bridge and real remote provider.
-7. CLI, doctor, demo, documentation, containers, complete verification.
+7. CLI, doctor, proof, documentation, containers, complete verification.
 
 The existing execution stack has completed that sequence. The Shared Project
 Definition Gate, schema/API/Board implementation, container packaging, and
@@ -1031,8 +1053,8 @@ Honest current limits:
 - a ConversationMirror is observation-only; Companion pairing, deterministic
   parsing, or local file tail does not prove external-agent control or
   two-person use;
-- API keys, opaque browser sessions, optional linked GitHub/Google identities, single-use Principal invitations, and explicit owner-scoped open registration are wired login paths; invitation delivery, federation, provider webhook invalidation, and seamless credential-key rotation are not;
-- Project Lobby, the source-locked Live Deck room, native live transcript, Task Relays, durable Annotation marginalia, connected onboarding, and PresenceLease are implemented for existing Projects; external two-person use of one deployed HTTPS origin is not yet accepted;
+- API keys, opaque browser sessions, optional linked GitHub/Google identities, single-use Principal invitations, and default-open owner-scoped registration are wired login paths; invitation delivery, federation, provider webhook invalidation, and seamless credential-key rotation are not;
+- Project Lobby, GitHub-bound Live Deck rooms, native live transcript, Task Relays, durable Annotation marginalia, connected onboarding, and PresenceLease are implemented; external two-person use of one deployed HTTPS origin is not yet accepted;
 - Project authorization is Owner-contained and unions explicit membership with current matching GitHub grants at request time; cross-Owner Projects, materialized provider-derived membership, delegated operator grants, and a durable Project activity stream are not implemented;
 - SQLite supports one active control-plane writer;
 - in-flight recovery is only as strong as provider process identity and replay;
@@ -1059,7 +1081,7 @@ Never solve these by leaking cases into routes or `run-executor.ts`.
 
 - The Bun control plane, exact SQLite schema/store and data-root lifecycle, one-shot and multi-turn ACP runner, durable run/session event journals, local and Cloudflare runtime adapters, immutable artifact pipeline, local-static deployment, complete owner-facing API/SDK/CLI resources, telemetry, reconciliation, cleanup, containers, and documentation are implemented.
 - Durable sessions keep one ACP identity across ordered turns, explicit conflict policies, interrupt and per-turn timeout, process replay, control-plane restart, exact evidence deduplication, and independent runtime-lease cleanup. The deterministic suite owns interrupt/timeout semantics; current Cloudflare release evidence owns remote continuity, replay, restart, and cleanup rather than inheriting stronger claims from mock coverage.
-- The no-account demo proves create → ACP run → durable logs/status → SDK artifact download → SDK deployment → isolated preview. The release proof binds exact agent output to the revision, promotes that output into an explicit Brief, proves a separate run can carry the frozen evidence into new immutable output, verifies the downloaded bytes and deployed URL, validates telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
+- The no-account proof proves create → ACP run → durable logs/status → SDK artifact download → SDK deployment → isolated preview. The release proof binds exact agent output to the revision, promotes that output into an explicit Brief, proves a separate run can carry the frozen evidence into new immutable output, verifies the downloaded bytes and deployed URL, validates telemetry semantics and private-data exclusion, then extends the path through runtime destruction, restart, persisted reads, complete backup, restore, and a second boot.
 - The deterministic suite covers product behavior, contracts, local composition, persistence, cancellation, timeout, restart reconciliation, secret boundaries, and provider replacement.
 - The local proof is deliberately credential-free and deterministic. Credential-bearing Codex, Claude Code, and Pi proofs run only through the Cloudflare mediation boundary; local execution has no exception path.
 - The Cloudflare package uses the real official Sandbox SDK and a pinned `standard-1` custom image containing the standalone Bun runner plus exact Codex, Claude Code, and Pi ACP toolchains. The image gate proves installation and bootability. Each separate credential-gated acceptance command requires remote output and two-turn continuity, then uses the public SDK to download, deploy, and fetch immutable output while verifying telemetry, persistence, backup/restore, and cleanup; only its clean current-revision receipt establishes that path as passed.

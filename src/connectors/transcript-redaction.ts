@@ -205,7 +205,10 @@ function localPathsFor(
     .sort((left, right) => right.length - left.length)
 
   return paths.map((path) => ({
-    pattern: new RegExp(`${escapeRegExp(path)}(?=$|[\\\\/])`, isWindowsPath(path) ? "gi" : "g"),
+    pattern: new RegExp(
+      `${escapeRegExp(path)}(?=$|[\\\\/\\s,.;:!?)}\\]])`,
+      isWindowsPath(path) ? "gi" : "g",
+    ),
   }))
 }
 

@@ -60,7 +60,7 @@ const environmentSchema = z.object({
     .regex(/^[a-f0-9]{64}$/)
     .optional(),
   MEANWHILE_EXTERNAL_AUTH_OWNER_ID: z.string().uuid().optional(),
-  MEANWHILE_EXTERNAL_REGISTRATION: z.enum(["closed", "open"]).default("closed"),
+  MEANWHILE_EXTERNAL_REGISTRATION: z.enum(["closed", "open"]).default("open"),
   MEANWHILE_IDENTITY_CREDENTIAL_KEY: z
     .string()
     .regex(/^[A-Za-z0-9_-]{43}$/)

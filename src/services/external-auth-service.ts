@@ -236,7 +236,7 @@ export class ExternalAuthService {
     const grantExpiresAt = new Date(
       Math.min(
         nowMs + REPOSITORY_GRANT_TTL_MS,
-        exchanged.credential === null
+        exchanged.credential === null || exchanged.credential.accessExpiresAt === null
           ? nowMs + REPOSITORY_GRANT_TTL_MS
           : Date.parse(exchanged.credential.accessExpiresAt),
       ),
@@ -257,7 +257,6 @@ export class ExternalAuthService {
         provider: "github",
         accountId: entry.account.id,
         accountName: entry.account.login,
-        installationId: entry.installationId,
         repositoryId: entry.repository.id,
         repositoryName: entry.repository.name,
         repositoryFullName: entry.repository.fullName,
@@ -474,7 +473,7 @@ export class ExternalAuthService {
       }
       return null
     }
-    if (material === null || material.refreshToken === null) {
+    if (material === null) {
       throw new AppError({
         code: "EXTERNAL_AUTH_RESPONSE_INVALID",
         status: 502,

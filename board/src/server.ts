@@ -66,7 +66,7 @@ export interface LobbyTableSnapshot {
 
 export interface LobbySpaceSnapshot {
   readonly source: {
-    readonly provider: "meanwhile" | "github";
+    readonly provider: "github";
     readonly accountId: string;
     readonly accountName: string;
   };
@@ -91,13 +91,58 @@ const INVITATION_MAX_AGE_SECONDS = 10 * 60;
 const uiHeaders = (): Headers =>
   new Headers({
     "Content-Security-Policy":
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.githubusercontent.com; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
   });
+
+type PresentedIdentity = ProjectParticipant["principal"];
+
+const participantIndex = (
+  participants: readonly ProjectParticipant[],
+): ReadonlyMap<string, PresentedIdentity> =>
+  new Map(participants.map((participant) => [participant.principal.id, participant.principal]));
+
+const presentIdentity = <Identity extends PresentedIdentity>(
+  identity: Identity,
+  participants: ReadonlyMap<string, PresentedIdentity>,
+): Identity => {
+  const profile = participants.get(identity.id);
+  return profile === undefined ? identity : { ...identity, ...profile };
+};
+
+const presentWork = <Work extends ProjectWorkItem>(
+  work: Work,
+  participants: ReadonlyMap<string, PresentedIdentity>,
+): Work => ({ ...work, delegatedBy: presentIdentity(work.delegatedBy, participants) });
+
+const presentRelay = (
+  relay: TaskRelay,
+  participants: ReadonlyMap<string, PresentedIdentity>,
+): TaskRelay => ({
+  ...relay,
+  author: presentIdentity(relay.author, participants),
+  recipient: presentIdentity(relay.recipient, participants),
+});
+
+const presentPresence = (
+  lease: PresenceLease,
+  participants: ReadonlyMap<string, PresentedIdentity>,
+): PresenceLease => ({ ...lease, principal: presentIdentity(lease.principal, participants) });
+
+const presentAnnotation = (
+  annotation: TaskAnnotation,
+  participants: ReadonlyMap<string, PresentedIdentity>,
+): TaskAnnotation => ({
+  ...annotation,
+  author: presentIdentity(annotation.author, participants),
+  resolvedBy: annotation.resolvedBy === null
+    ? null
+    : presentIdentity(annotation.resolvedBy, participants),
+});
 
 const jsonHeaders = (): Headers => {
   const headers = uiHeaders();
@@ -127,7 +172,7 @@ export class BoardServer {
     this.#hostname = options.hostname ?? "127.0.0.1";
     this.#port = options.port ?? 7333;
     this.#assetsDir = options.assetsDir;
-    this.#defaultAgentType = options.defaultAgentType ?? "demo";
+    this.#defaultAgentType = options.defaultAgentType ?? "codex";
     this.#fetch = options.fetch ?? globalThis.fetch;
   }
 
@@ -191,6 +236,9 @@ export class BoardServer {
     }
     if (request.method === "POST" && url.pathname === "/onboarding/agent-connections") {
       return this.#connectAgent(request);
+    }
+    if (request.method === "POST" && url.pathname === "/onboarding/repositories/refresh") {
+      return this.#refreshOnboardingRepositories(request);
     }
     if (request.method === "POST" && url.pathname === "/onboarding/connector-devices") {
       return this.#createConnectorDevice(request);
@@ -757,6 +805,18 @@ export class BoardServer {
     }
   }
 
+  async #refreshOnboardingRepositories(request: Request): Promise<Response> {
+    if (!sameOriginWrite(request)) return this.#forbidden("Cross-origin writes are not allowed.");
+    const client = this.#client(request);
+    if (client === null) return this.#unauthenticated();
+    try {
+      const onboarding = await client.onboarding.refreshRepositories();
+      return new Response(JSON.stringify(onboarding), { headers: jsonHeaders() });
+    } catch (error) {
+      return this.#upstreamFailure(error);
+    }
+  }
+
   async #createConnectorDevice(request: Request): Promise<Response> {
     if (!sameOriginWrite(request)) return this.#forbidden("Cross-origin writes are not allowed.");
     const client = this.#client(request);
@@ -919,15 +979,16 @@ export class BoardServer {
         client.taskRelays.recent(project.id, 3),
         client.projects.presence(project.id),
       ]);
+      const participants = participantIndex(members);
       const snapshot: BoardSnapshot = {
-        principal: me.principal,
+        principal: presentIdentity(me.principal, participants),
         project,
-        projects: me.projects,
+        projects: githubProjects,
         members,
-        rows: work.map((item) => ({ ...item, section: sectionFor(item) })),
-        pendingRelays,
-        recentRelays,
-        presence,
+        rows: work.map((item) => ({ ...presentWork(item, participants), section: sectionFor(item) })),
+        pendingRelays: pendingRelays.map((relay) => presentRelay(relay, participants)),
+        recentRelays: recentRelays.map((relay) => presentRelay(relay, participants)),
+        presence: presence.map((lease) => presentPresence(lease, participants)),
         delegation: {
           agents: onboarding.agentConnections.filter((connection) => connection.revokedAt === null),
           repository:
@@ -965,6 +1026,7 @@ export class BoardServer {
           client.taskRelays.inbox(project.id),
           client.projects.presence(project.id),
         ]);
+        const participants = participantIndex(members);
         const projectAccess = onboarding.projects.find(
           (entry) => entry.project.id === project.id,
         );
@@ -975,8 +1037,9 @@ export class BoardServer {
             status: 404,
           });
         }
-        const rows = work.map((item) => ({ ...item, section: sectionFor(item) }));
-        const latestWork = [...work].sort(
+        const presentedWork = work.map((item) => presentWork(item, participants));
+        const rows = presentedWork.map((item) => ({ ...item, section: sectionFor(item) }));
+        const latestWork = [...presentedWork].sort(
           (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
         )[0] ?? null;
         return {
@@ -993,7 +1056,7 @@ export class BoardServer {
           },
           latestWork,
           pendingRelayCount: pendingRelays.length,
-          presence,
+          presence: presence.map((lease) => presentPresence(lease, participants)),
         } satisfies LobbyTableSnapshot;
       });
       const grouped = new Map<string, LobbySpaceSnapshot>();
@@ -1013,7 +1076,10 @@ export class BoardServer {
         });
       }
       const snapshot: LobbySnapshot = {
-        principal: me.principal,
+        principal: presentIdentity(
+          me.principal,
+          participantIndex(tables.flatMap((table) => table.members)),
+        ),
         spaces: [...grouped.values()],
         updatedAt: new Date().toISOString(),
       };
@@ -1044,17 +1110,19 @@ export class BoardServer {
         : kind === "session"
           ? await client.sessions.events(id, { after, limit: 500, signal })
           : await client.mirrors.events(id, { after, limit: 500, signal });
-      const [relays, annotations] = await Promise.all([
+      const [relays, annotations, members] = await Promise.all([
         client.taskRelays.list(projectId, { kind, id }, { signal }),
         client.taskAnnotations.list(projectId, { kind, id }, { signal }),
+        client.projects.participants(projectId, { signal }),
       ]);
+      const participants = participantIndex(members);
       return new Response(JSON.stringify({
         kind,
         id,
         events: page.items,
         nextCursor: page.nextCursor,
-        relays,
-        annotations,
+        relays: relays.map((relay) => presentRelay(relay, participants)),
+        annotations: annotations.map((annotation) => presentAnnotation(annotation, participants)),
       }), {
         headers: jsonHeaders(),
       });
@@ -1079,8 +1147,14 @@ export class BoardServer {
     const client = this.#client(request);
     if (client === null) return this.#unauthenticated();
     try {
-      const relays = await client.taskRelays.list(projectId, { kind, id }, { signal });
-      return new Response(JSON.stringify({ relays }), { headers: jsonHeaders() });
+      const [relays, members] = await Promise.all([
+        client.taskRelays.list(projectId, { kind, id }, { signal }),
+        client.projects.participants(projectId, { signal }),
+      ]);
+      const participants = participantIndex(members);
+      return new Response(JSON.stringify({
+        relays: relays.map((relay) => presentRelay(relay, participants)),
+      }), { headers: jsonHeaders() });
     } catch (error) {
       return this.#upstreamFailure(error);
     }
@@ -1096,8 +1170,14 @@ export class BoardServer {
     const client = this.#client(request);
     if (client === null) return this.#unauthenticated();
     try {
-      const annotations = await client.taskAnnotations.list(projectId, { kind, id }, { signal });
-      return new Response(JSON.stringify({ annotations }), { headers: jsonHeaders() });
+      const [annotations, members] = await Promise.all([
+        client.taskAnnotations.list(projectId, { kind, id }, { signal }),
+        client.projects.participants(projectId, { signal }),
+      ]);
+      const participants = participantIndex(members);
+      return new Response(JSON.stringify({
+        annotations: annotations.map((annotation) => presentAnnotation(annotation, participants)),
+      }), { headers: jsonHeaders() });
     } catch (error) {
       return this.#upstreamFailure(error);
     }
@@ -1153,7 +1233,10 @@ export class BoardServer {
     try {
       const input = (await request.json()) as Parameters<typeof client.taskRelays.create>[1];
       const relay = await client.taskRelays.create(projectId, input);
-      return new Response(JSON.stringify({ relay }), { status: 201, headers: jsonHeaders() });
+      const members = await client.projects.participants(projectId);
+      return new Response(JSON.stringify({
+        relay: presentRelay(relay, participantIndex(members)),
+      }), { status: 201, headers: jsonHeaders() });
     } catch (error) {
       return this.#upstreamFailure(error);
     }
@@ -1166,7 +1249,10 @@ export class BoardServer {
     try {
       const input = (await request.json()) as Parameters<typeof client.taskAnnotations.create>[1];
       const annotation = await client.taskAnnotations.create(projectId, input);
-      return new Response(JSON.stringify({ annotation } satisfies { annotation: TaskAnnotation }), {
+      const members = await client.projects.participants(projectId);
+      return new Response(JSON.stringify({
+        annotation: presentAnnotation(annotation, participantIndex(members)),
+      } satisfies { annotation: TaskAnnotation }), {
         status: 201,
         headers: jsonHeaders(),
       });

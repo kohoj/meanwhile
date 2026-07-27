@@ -68,7 +68,6 @@ describe("connected onboarding", () => {
         provider: "github",
         accountId: "44",
         accountName: "acme",
-        installationId: "55",
         repositoryId: "66",
         repositoryName: "northstar",
         repositoryFullName: "acme/northstar",
@@ -109,12 +108,13 @@ describe("connected onboarding", () => {
       browserSessionId: "91000000-0000-4000-8000-000000000009",
     }
 
-    const initial = service.snapshot(context)
+    const initial = await service.snapshot(context)
     expect(initial.identities).toHaveLength(1)
     expect(initial.repositoryGrants).toHaveLength(1)
     expect(initial.repositoryBindings).toEqual([])
     expect(initial.agentConnections).toEqual([])
     expect(initial.projects).toEqual([])
+    expect(() => service.selectProject(context, projectId, true)).toThrow()
 
     const connection = service.connectAgent(context, "codex")
     const binding = service.bindRepository(context, projectId, grantId)
@@ -123,10 +123,11 @@ describe("connected onboarding", () => {
     expect(selection).toMatchObject({ projectId, hiddenAt: null })
     expect(binding).toMatchObject({ projectId, repositoryFullName: "acme/northstar" })
 
-    const completed = service.snapshot(context)
+    const completed = await service.snapshot(context)
     expect(completed.agentConnections).toHaveLength(1)
     expect(completed.repositoryBindings).toHaveLength(1)
     expect(completed.projects[0]?.selected).toBe(true)
+    expect(completed.projects[0]?.project.id).toBe(projectId)
     expect(store.listAudit(ownerId).map((entry) => entry.action)).toEqual(
       expect.arrayContaining([
         "external_identity.link",
@@ -175,7 +176,6 @@ describe("connected onboarding", () => {
         provider: "github",
         accountId: "44",
         accountName: "acme",
-        installationId: "55",
         repositoryId: "66",
         repositoryName: "northstar",
         repositoryFullName: "acme/northstar",
@@ -219,7 +219,7 @@ describe("connected onboarding", () => {
       binding: { id: first.binding.id },
     })
     expect(store.getProjectMember(ownerId, first.project.id, principalId)).toBeNull()
-    expect(service.snapshot(context).projects).toEqual([
+    expect((await service.snapshot(context)).projects).toEqual([
       {
         project: first.project,
         access: "administer",

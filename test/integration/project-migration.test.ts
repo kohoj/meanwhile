@@ -173,7 +173,7 @@ function seedLegacyData(database: Database): void {
   database
     .query(`
       INSERT INTO runs VALUES (
-        ?,?, '{}','demo','{}',?,'{}','legacy task','{}','{}','local','[]','[]',
+        ?,?, '{}','fixture','{}',?,'{}','legacy task','{}','{}','local','[]','[]',
         60000,NULL,'queued',1,NULL,NULL,NULL,?,NULL,NULL,?,NULL,NULL
       )
     `)
@@ -181,7 +181,7 @@ function seedLegacyData(database: Database): void {
   database
     .query(`
       INSERT INTO agent_sessions VALUES (
-        ?,?,'{}','demo','{}',?,'{}','{}','{}','local','queued',1,
+        ?,?,'{}','fixture','{}',?,'{}','{}','{}','local','queued',1,
         NULL,NULL,NULL,NULL,NULL,NULL,1800000,?,NULL,NULL,?,NULL
       )
     `)

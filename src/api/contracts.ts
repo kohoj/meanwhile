@@ -14,6 +14,9 @@ const environmentName = z
   .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
   .max(128)
 const safeJson = z.unknown()
+const externalUrl = z
+  .url()
+  .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), "Expected HTTP(S) URL")
 
 export const IdentifierSchema = z.string().uuid()
 export const ArtifactIdentifierSchema = z.string().regex(/^[a-f0-9]{64}$/)
@@ -23,6 +26,7 @@ export const PrincipalSummarySchema = z
     id: IdentifierSchema,
     kind: z.enum(["person", "service"]),
     displayName: z.string().min(1).max(120),
+    avatarUrl: externalUrl.nullable().optional(),
   })
   .strict()
   .meta({ id: "PrincipalSummary" })
@@ -94,10 +98,6 @@ export const PresenceLeasePageSchema = z.object({
   items: z.array(PresenceLeaseSchema).readonly(),
 })
 
-const externalUrl = z
-  .url()
-  .refine((value) => ["http:", "https:"].includes(new URL(value).protocol), "Expected HTTP(S) URL")
-
 export const ExternalIdentitySchema = z
   .object({
     id: IdentifierSchema,
@@ -124,7 +124,6 @@ export const ExternalProjectGrantSchema = z
     provider: z.literal("github"),
     accountId: z.string().min(1).max(255),
     accountName: z.string().min(1).max(255),
-    installationId: z.string().min(1).max(255),
     repositoryId: z.string().min(1).max(255),
     repositoryName: z.string().min(1).max(255),
     repositoryFullName: z.string().min(1).max(511),
@@ -147,7 +146,6 @@ export const ProjectRepositoryBindingSchema = z
     provider: z.literal("github"),
     accountId: z.string().min(1).max(255),
     accountName: z.string().min(1).max(255),
-    installationId: z.string().min(1).max(255),
     repositoryId: z.string().min(1).max(255),
     repositoryName: z.string().min(1).max(255),
     repositoryFullName: z.string().min(1).max(511),
@@ -422,6 +420,14 @@ export const MirrorCheckpointSchema = z
 export const ConnectedOnboardingResponseSchema = z
   .object({
     principal: PrincipalSchema,
+    repositoryConnection: z
+      .object({
+        provider: z.literal("github"),
+        status: z.enum(["not_linked", "connected", "reconnect_required", "unavailable"]),
+        lastVerifiedAt: timestamp.nullable(),
+      })
+      .strict()
+      .nullable(),
     identities: z.array(ExternalIdentitySchema).readonly(),
     repositoryGrants: z.array(ExternalProjectGrantSchema).readonly(),
     repositoryBindings: z.array(ProjectRepositoryBindingSchema).readonly(),

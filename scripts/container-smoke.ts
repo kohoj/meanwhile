@@ -22,7 +22,7 @@ const created = await meanwhile.runs.create(
         },
       ],
     },
-    agentType: "demo",
+    agentType: "fixture",
     provider: "local",
     env: { FIXTURE_OUTPUT_PATH: "site/index.html" },
     artifactPaths: ["site"],

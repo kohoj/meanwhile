@@ -41,7 +41,7 @@ bun test
 
 The project uses Bun for runtime, package management, scripts, tests, process execution, and local SQLite. Do not introduce Node application shims, `dotenv`, `tsx`, root Vitest, or an alternative package manager.
 
-Never place production credentials in `.env`, fixtures, snapshots, commits, CI logs, or issue text. The default local demo must run with deterministic fixtures and no cloud account.
+Never place production credentials in `.env`, fixtures, snapshots, commits, CI logs, or issue text. The default local proof must run with deterministic fixtures and no cloud account.
 
 ## Architecture rules
 
@@ -75,7 +75,7 @@ Prefer finishing the deepest dependency your change needs before adding its cons
 4. agent session, executor, timeout, cancellation, reconciliation, cleanup, and API;
 5. artifact capture and local deployment;
 6. Cloudflare bridge and remote provider proof;
-7. CLI, doctor, demo, containers, and release documentation.
+7. CLI, doctor, proof, containers, and release documentation.
 
 Do not build a fake higher layer over an unimplemented lower contract to create visible progress.
 

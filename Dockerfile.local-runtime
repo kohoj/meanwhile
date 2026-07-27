@@ -9,7 +9,7 @@ RUN bun install --frozen-lockfile --production --analyze \
 FROM oven/bun:1.3.13-slim@sha256:7e8ed3961db1cdedf17d516dda87948cfedbd294f53bf16462e5b57ed3fff0f1
 
 COPY --from=build /build/dist/meanwhile-runner /usr/local/bin/meanwhile-runner
-COPY --from=build /build/dist/meanwhile-demo-agent /usr/local/bin/meanwhile-demo-agent
+COPY --from=build /build/dist/meanwhile-fixture-agent /usr/local/bin/meanwhile-fixture-agent
 
 WORKDIR /workspace
 ENTRYPOINT []

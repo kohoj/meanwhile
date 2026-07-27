@@ -9,7 +9,6 @@ import {
 
 const GITHUB_API_VERSION = "2022-11-28"
 const PAGE_SIZE = 100
-const INSTALLATION_CONCURRENCY = 4
 
 const GitHubIdentifierSchema = z.union([z.number().int().nonnegative(), z.string().min(1)])
 const GitHubAccountSchema = z
@@ -20,12 +19,6 @@ const GitHubAccountSchema = z
     avatar_url: z.string().url().nullable().optional(),
   })
   .passthrough()
-const GitHubInstallationSchema = z
-  .object({
-    id: GitHubIdentifierSchema,
-    account: GitHubAccountSchema,
-  })
-  .passthrough()
 const GitHubRepositorySchema = z
   .object({
     id: GitHubIdentifierSchema,
@@ -34,17 +27,11 @@ const GitHubRepositorySchema = z
     private: z.boolean(),
     default_branch: z.string().min(1),
     html_url: z.string().url(),
+    owner: GitHubAccountSchema,
     permissions: z.record(z.string(), z.boolean()).optional(),
   })
   .passthrough()
-const GitHubInstallationPageSchema = z
-  .object({ installations: z.array(GitHubInstallationSchema) })
-  .passthrough()
-const GitHubRepositoryPageSchema = z
-  .object({ repositories: z.array(GitHubRepositorySchema) })
-  .passthrough()
 
-type GitHubInstallation = z.infer<typeof GitHubInstallationSchema>
 type GitHubRepository = z.infer<typeof GitHubRepositorySchema>
 
 export interface GitHubProjectDirectoryOptions {
@@ -55,9 +42,10 @@ export interface GitHubProjectDirectoryOptions {
 type GitHubFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
 /**
- * Lists repositories visible through a GitHub App user access token. GitHub
- * applies the intersection of the App installation and the user's own access;
- * this adapter only normalizes that answer and never persists the token.
+ * Lists repositories visible to one GitHub OAuth user token. The user grants
+ * repository access once in GitHub; no per-account App installation is part of
+ * the product journey. This adapter normalizes GitHub's answer and never
+ * persists the plaintext token.
  */
 export class GitHubProjectDirectory implements RepositoryProjectDirectory {
   readonly provider = "github"
@@ -80,52 +68,27 @@ export class GitHubProjectDirectory implements RepositoryProjectDirectory {
         message: "GitHub authorization is required",
       })
     }
-    const installations = await this.#listInstallations(credential, options.signal)
-    const grouped = await mapWithConcurrency(
-      installations,
-      INSTALLATION_CONCURRENCY,
-      async (installation) => {
-        const repositories = await this.#listRepositories(installation, credential, options.signal)
-        return repositories.map((repository) => normalizeRepository(installation, repository))
-      },
-    )
-    return grouped
-      .flat()
+    return (await this.#listRepositories(credential, options.signal))
+      .map(normalizeRepository)
       .sort((left, right) => left.repository.fullName.localeCompare(right.repository.fullName))
   }
 
-  async #listInstallations(
-    credential: RepositoryDirectoryCredential,
-    signal?: AbortSignal,
-  ): Promise<readonly GitHubInstallation[]> {
-    const items: GitHubInstallation[] = []
-    let url: URL | null = new URL(`user/installations?per_page=${PAGE_SIZE}`, this.#apiOrigin)
-    while (url !== null) {
-      const response = await this.#request(url, credential, signal, "list_installations")
-      const body = GitHubInstallationPageSchema.safeParse(await response.json().catch(() => null))
-      if (!body.success) throw invalidGitHubResponse("list_installations")
-      items.push(...body.data.installations)
-      url = nextPage(response.headers.get("Link"), this.#apiOrigin)
-    }
-    return items
-  }
-
   async #listRepositories(
-    installation: GitHubInstallation,
     credential: RepositoryDirectoryCredential,
     signal?: AbortSignal,
   ): Promise<readonly GitHubRepository[]> {
     const items: GitHubRepository[] = []
-    const installationId = encodeURIComponent(String(installation.id))
     let url: URL | null = new URL(
-      `user/installations/${installationId}/repositories?per_page=${PAGE_SIZE}`,
+      `user/repos?affiliation=owner,collaborator,organization_member&per_page=${PAGE_SIZE}&sort=full_name`,
       this.#apiOrigin,
     )
     while (url !== null) {
       const response = await this.#request(url, credential, signal, "list_repositories")
-      const body = GitHubRepositoryPageSchema.safeParse(await response.json().catch(() => null))
+      const body = z
+        .array(GitHubRepositorySchema)
+        .safeParse(await response.json().catch(() => null))
       if (!body.success) throw invalidGitHubResponse("list_repositories")
-      items.push(...body.data.repositories)
+      items.push(...body.data)
       url = nextPage(response.headers.get("Link"), this.#apiOrigin)
     }
     return items
@@ -173,15 +136,12 @@ export class GitHubProjectDirectory implements RepositoryProjectDirectory {
   }
 }
 
-function normalizeRepository(
-  installation: GitHubInstallation,
-  repository: GitHubRepository,
-): RepositoryDirectoryEntry {
+function normalizeRepository(repository: GitHubRepository): RepositoryDirectoryEntry {
   const account: RepositoryDirectoryAccount = {
-    id: String(installation.account.id),
-    login: installation.account.login,
-    type: installation.account.type.toLowerCase() === "organization" ? "organization" : "user",
-    avatarUrl: installation.account.avatar_url ?? null,
+    id: String(repository.owner.id),
+    login: repository.owner.login,
+    type: repository.owner.type.toLowerCase() === "organization" ? "organization" : "user",
+    avatarUrl: repository.owner.avatar_url ?? null,
   }
   const permissions = repository.permissions ?? {}
   const access =
@@ -192,7 +152,6 @@ function normalizeRepository(
         : "watch"
   return {
     provider: "github",
-    installationId: String(installation.id),
     account,
     repository: {
       id: String(repository.id),
@@ -225,23 +184,4 @@ function invalidGitHubResponse(operation: string): RepositoryDirectoryError {
     retryable: true,
     message: "GitHub returned an invalid repository directory response",
   })
-}
-
-async function mapWithConcurrency<Input, Output>(
-  inputs: readonly Input[],
-  concurrency: number,
-  mapper: (input: Input) => Promise<Output>,
-): Promise<readonly Output[]> {
-  const results = new Array<Output>(inputs.length)
-  let index = 0
-  const worker = async () => {
-    while (index < inputs.length) {
-      const current = index
-      index += 1
-      const input = inputs[current]
-      if (input !== undefined) results[current] = await mapper(input)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, inputs.length) }, () => worker()))
-  return results
 }

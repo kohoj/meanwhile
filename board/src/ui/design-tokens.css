@@ -1,0 +1,116 @@
+:root {
+  color-scheme: light;
+
+  /* Material: one warm editorial field, one ink, one human-action accent. */
+  --color-paper: #fbfaf7;
+  --color-paper-raised: rgb(255 255 255 / 62%);
+  --color-paper-soft: #f4f2ee;
+  --color-ink: #151719;
+  --color-text-muted: #555b61;
+  --color-text-quiet: #6d7379;
+  --color-rule: rgb(54 58 62 / 16%);
+  --color-rule-strong: rgb(45 49 53 / 30%);
+  --color-accent: #dc2935;
+  --color-accent-wash: #fae8ea;
+  --color-success: #168b58;
+  --color-warning: #a45b24;
+  --color-danger: #c82b34;
+
+  /* Typography: editorial identity, condensed working prose, operational data. */
+  --font-editorial: "Newsreader Variable", Georgia, serif;
+  --font-ui: "Roboto Condensed Variable", "Arial Narrow", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+
+  --weight-regular: 430;
+  --weight-medium: 520;
+  --weight-semibold: 620;
+  --weight-bold: 720;
+
+  --text-label-size: 11px;
+  --text-label-leading: 16px;
+  --text-meta-size: 12px;
+  --text-meta-leading: 16px;
+  --text-small-size: 13px;
+  --text-small-leading: 20px;
+  --text-body-size: 15px;
+  --text-body-leading: 24px;
+  --text-lead-size: 17px;
+  --text-lead-leading: 26px;
+  --text-heading-sm-size: 20px;
+  --text-heading-sm-leading: 28px;
+  --text-heading-md-size: 24px;
+  --text-heading-md-leading: 32px;
+  --text-heading-lg-size: 32px;
+  --text-heading-lg-leading: 40px;
+  --text-display-sm-size: 44px;
+  --text-display-sm-leading: 48px;
+  --text-display-md-size: clamp(48px, 4.5vw, 68px);
+  --text-display-md-leading: .96;
+  --text-display-lg-size: clamp(60px, 5.5vw, 84px);
+  --text-display-lg-leading: .92;
+
+  --tracking-tight: -.025em;
+  --tracking-display: -.04em;
+  --tracking-wordmark: -.055em;
+  --tracking-meta: .04em;
+  --tracking-label: .08em;
+
+  /* A 4px spatial unit with an 8px reading baseline. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+
+  --control-sm: 36px;
+  --control-md: 40px;
+  --control-lg: 44px;
+  --target-min: 44px;
+
+  --radius-hairline: 1px;
+  --radius-card: 4px;
+  --radius-panel: 8px;
+  --radius-round: 999px;
+
+  --shadow-card: 0 18px 46px rgb(70 60 58 / 6%);
+  --shadow-card-active: 0 24px 54px rgb(70 60 58 / 9%);
+  --shadow-deck: 0 12px 26px rgb(79 65 57 / 3.5%);
+  --shadow-menu: 8px 8px 0 rgb(17 19 21 / 8%);
+
+  --duration-instant: 120ms;
+  --duration-fast: 160ms;
+  --duration-surface: 200ms;
+  --ease-out: ease-out;
+
+  --layer-content: 1;
+  --layer-sticky: 40;
+  --layer-guides: 200;
+  --layer-menu: 210;
+  --layer-skip-link: 220;
+  --layer-overlay: 300;
+
+  /* Shared product aliases. Components may specialize color, not semantics. */
+  --paper: var(--color-paper);
+  --paper-soft: var(--color-paper-soft);
+  --ink: var(--color-ink);
+  --muted: var(--color-text-muted);
+  --quiet: var(--color-text-quiet);
+  --rule: var(--color-rule);
+  --rule-strong: var(--color-rule-strong);
+  --accent: var(--color-accent);
+  --accent-wash: var(--color-accent-wash);
+  --danger: var(--color-danger);
+
+  --grid-columns: 10;
+  --grid-baseline: 8px;
+  --grid-leading: var(--text-body-leading);
+  --grid-gutter: var(--space-4);
+  --grid-margin: var(--space-6);
+}

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite"
 import { resolve } from "node:path"
 import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../src/persistence/schema"
 import { migrateConversationMirrorSchema } from "./conversation-mirror-schema"
+import { migrateProgressiveOnboardingSchema } from "./progressive-onboarding-schema"
 
 const PREVIOUS_SCHEMA_FINGERPRINT =
   "9056b0fc858c413261d1c5e84c435fcaa8f9052982bb21bb75490a9e993966fb"
@@ -50,6 +51,7 @@ try {
   database
     .transaction(() => {
       migrateConversationMirrorSchema(database)
+      migrateProgressiveOnboardingSchema(database)
       database
         .query("UPDATE schema_identity SET fingerprint=? WHERE singleton=1")
         .run(CURRENT_SCHEMA.fingerprint)

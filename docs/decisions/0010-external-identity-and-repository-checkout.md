@@ -1,6 +1,6 @@
 # ADR 0010: External identity and Project-bound repository checkout
 
-- Status: superseded in part by ADR 0011; token isolation and checkout revalidation remain accepted
+- Status: superseded in part by ADR 0011; GitHub App authentication amended by ADR 0013; token isolation and checkout revalidation remain accepted
 - Date: 2026-07-24
 
 ## Context

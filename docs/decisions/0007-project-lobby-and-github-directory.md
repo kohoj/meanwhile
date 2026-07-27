@@ -1,6 +1,6 @@
 # ADR 0007: Project Lobby and GitHub-backed repository access
 
-- Status: accepted
+- Status: superseded in part by ADR 0013
 - Date: 2026-07-23
 
 ## Context

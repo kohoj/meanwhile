@@ -12,11 +12,16 @@ const GitHubTokenSchema = z
   .object({
     access_token: z.string().min(1),
     token_type: z.string().min(1),
-    expires_in: z.number().int().positive(),
-    refresh_token: z.string().min(1),
-    refresh_token_expires_in: z.number().int().positive(),
+    expires_in: z.number().int().positive().optional(),
+    refresh_token: z.string().min(1).optional(),
+    refresh_token_expires_in: z.number().int().positive().optional(),
   })
   .passthrough()
+  .superRefine((token, context) => {
+    if ((token.refresh_token === undefined) !== (token.refresh_token_expires_in === undefined)) {
+      context.addIssue({ code: "custom", message: "GitHub refresh-token metadata is incomplete" })
+    }
+  })
 
 const GitHubProfileSchema = z
   .object({
@@ -75,7 +80,7 @@ export class GitHubExternalAuth implements ExternalAuthProviderAdapter {
     url.searchParams.set("state", input.state)
     url.searchParams.set("code_challenge", input.codeChallenge)
     url.searchParams.set("code_challenge_method", "S256")
-    url.searchParams.set("prompt", "select_account")
+    url.searchParams.set("scope", "read:user repo")
     return url
   }
 
@@ -164,9 +169,15 @@ export class GitHubExternalAuth implements ExternalAuthProviderAdapter {
     const now = this.#now().getTime()
     return {
       accessToken: parsed.data.access_token,
-      refreshToken: parsed.data.refresh_token,
-      accessExpiresAt: new Date(now + parsed.data.expires_in * 1_000).toISOString(),
-      refreshExpiresAt: new Date(now + parsed.data.refresh_token_expires_in * 1_000).toISOString(),
+      refreshToken: parsed.data.refresh_token ?? null,
+      accessExpiresAt:
+        parsed.data.expires_in === undefined
+          ? null
+          : new Date(now + parsed.data.expires_in * 1_000).toISOString(),
+      refreshExpiresAt:
+        parsed.data.refresh_token_expires_in === undefined
+          ? null
+          : new Date(now + parsed.data.refresh_token_expires_in * 1_000).toISOString(),
     }
   }
 

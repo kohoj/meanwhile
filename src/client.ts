@@ -378,6 +378,7 @@ export interface ProjectsClient {
 
 export interface ConnectedOnboardingClient {
   get(options?: RequestOptions): Promise<ConnectedOnboarding>
+  refreshRepositories(options?: RequestOptions): Promise<ConnectedOnboarding>
   connectAgent(agentType: string, options?: RequestOptions): Promise<AgentConnection>
   revokeAgent(connectionId: string, options?: RequestOptions): Promise<AgentConnection>
   selectProject(
@@ -1328,6 +1329,17 @@ class Onboarding implements ConnectedOnboardingClient {
       "onboarding",
       ConnectedOnboardingResponseSchema,
       signalInput(options.signal),
+    )
+  }
+
+  refreshRepositories(options: RequestOptions = {}): Promise<ConnectedOnboarding> {
+    return this.transport.json(
+      "onboarding/repositories/refresh",
+      ConnectedOnboardingResponseSchema,
+      {
+        method: "POST",
+        ...signalInput(options.signal),
+      },
     )
   }
 

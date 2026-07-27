@@ -3,12 +3,8 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import {
-  CURRENT_SCHEMA,
-  databaseSchemaFingerprint,
-  SCHEMA_SQL,
-  splitSchemaSql,
-} from "../../src/persistence/schema"
+import { githubAppSchemaStatements } from "../../scripts/progressive-onboarding-schema"
+import { CURRENT_SCHEMA, databaseSchemaFingerprint } from "../../src/persistence/schema"
 
 const PREVIOUS_SCHEMA_FINGERPRINT =
   "cbc6cdc49475a836ac05c63bbfa4505260eec0f3d07218f18002ef643269ddfc"
@@ -137,7 +133,7 @@ test("the exact migration adds owner-scoped one-repository-one-Project identity"
 })
 
 function previousSchemaStatements(): readonly string[] {
-  return splitSchemaSql(SCHEMA_SQL).filter(
+  return githubAppSchemaStatements().filter(
     (statement) => !statement.includes("project_repository_bindings_repository_identity_idx"),
   )
 }

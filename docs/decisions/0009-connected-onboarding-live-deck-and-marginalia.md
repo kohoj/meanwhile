@@ -1,6 +1,6 @@
 # ADR 0009: Connected onboarding, Live Deck, and transcript marginalia
 
-- Status: accepted
+- Status: accepted; GitHub authentication mechanism amended by ADR 0013
 - Date: 2026-07-24
 - Deciders: maintainer
 - Supersedes the room-level information architecture in ADRs 0007 and 0008; it does not replace their identity, repository, or first-task boundaries.

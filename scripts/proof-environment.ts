@@ -9,7 +9,7 @@ import { initializeInstrumentation } from "../src/instrumentation"
 import { SERVICE_VERSION } from "../src/version"
 import { captureWorkspace, type UploadedWorkspaceFile } from "../src/workspace"
 
-export interface DemoEnvironment {
+export interface ProofEnvironment {
   readonly clientOptions: {
     readonly baseUrl: string
     readonly apiKey: string
@@ -18,20 +18,20 @@ export interface DemoEnvironment {
   close(): Promise<void>
 }
 
-export class DemoError extends Error {
+export class ProofError extends Error {
   constructor(
     readonly code: string,
     message: string,
     readonly details: Readonly<Record<string, unknown>> = {},
   ) {
     super(message)
-    this.name = "DemoError"
+    this.name = "ProofError"
   }
 }
 
-export async function createDemoEnvironment(): Promise<DemoEnvironment> {
+export async function createProofEnvironment(): Promise<ProofEnvironment> {
   const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)))
-  const temporary = await mkdtemp(join(tmpdir(), "meanwhile-demo-"))
+  const temporary = await mkdtemp(join(tmpdir(), "meanwhile-fixture-"))
   const dataDir = join(temporary, "data")
   const workspace = join(temporary, "workspace")
   const runnerPath = join(temporary, "meanwhile-runner")
@@ -50,16 +50,16 @@ export async function createDemoEnvironment(): Promise<DemoEnvironment> {
 
   try {
     await ensureRunner(repositoryRoot, runnerPath)
-    await createDemoWorkspace(workspace)
+    await createProofWorkspace(workspace)
     await Bun.write(
       catalogPath,
       JSON.stringify({
         version: 1,
         agents: {
-          demo: {
+          fixture: {
             transport: "stdio",
             executable: "bun",
-            args: ["demo-agent.ts"],
+            args: ["fixture-agent.ts"],
             workingDirectory: "workspace",
             capabilities: { filesystem: true, terminal: false },
             envNames: [],
@@ -71,9 +71,9 @@ export async function createDemoEnvironment(): Promise<DemoEnvironment> {
     )
 
     const instrumentation = await initializeInstrumentation({
-      serviceName: "meanwhile-demo",
+      serviceName: "meanwhile-fixture",
       serviceVersion: SERVICE_VERSION,
-      environment: "demo",
+      environment: "fixture",
       sink: { write: () => {} },
     })
     const issued = await issueApiKey()
@@ -115,27 +115,27 @@ export async function createDemoEnvironment(): Promise<DemoEnvironment> {
 
 async function ensureRunner(root: string, runnerPath: string): Promise<void> {
   const bun = Bun.which("bun")
-  if (bun === null) throw new DemoError("BUN_NOT_FOUND", "Bun executable could not be located")
+  if (bun === null) throw new ProofError("BUN_NOT_FOUND", "Bun executable could not be located")
   const build = Bun.spawn(
     [bun, "build", "runner/main.ts", "--compile", "--minify", "--outfile", runnerPath],
     { cwd: root, stdout: "ignore", stderr: "ignore" },
   )
   if ((await build.exited) !== 0) {
-    throw new DemoError("RUNNER_BUILD_FAILED", "The Meanwhile runner could not be built")
+    throw new ProofError("RUNNER_BUILD_FAILED", "The Meanwhile runner could not be built")
   }
 }
 
-async function createDemoWorkspace(workspace: string): Promise<void> {
+async function createProofWorkspace(workspace: string): Promise<void> {
   await mkdir(join(workspace, "site"), { recursive: true })
-  await Bun.write(join(workspace, "demo-agent.ts"), demoAgentSource())
+  await Bun.write(join(workspace, "fixture-agent.ts"), fixtureAgentSource())
   await Bun.write(
     join(workspace, "site", "index.html"),
-    "<!doctype html><meta charset=utf-8><title>Meanwhile</title><h1>Meanwhile local demo</h1>\n",
+    "<!doctype html><meta charset=utf-8><title>Meanwhile</title><h1>Meanwhile local fixture</h1>\n",
   )
 }
 
-/** A dependency-free deterministic ACP server uploaded with the demo workspace. */
-function demoAgentSource(): string {
+/** A dependency-free deterministic ACP server uploaded with the fixture workspace. */
+function fixtureAgentSource(): string {
   return `
 const writer = Bun.stdout.writer()
 let buffer = ""
@@ -154,12 +154,12 @@ const handle = async (message) => {
         loadSession: false,
         promptCapabilities: { image: false, audio: false, embeddedContext: false }
       },
-      agentInfo: { name: "meanwhile-demo-agent", title: "Meanwhile Demo Agent", version: "1" }
+      agentInfo: { name: "meanwhile-fixture-agent", title: "Meanwhile Fixture Agent", version: "1" }
     } })
     return
   }
   if (message.method === "session/new") {
-    await send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "demo-" + nextSession++ } })
+    await send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "fixture-" + nextSession++ } })
     return
   }
   if (message.method === "session/prompt") {
@@ -168,7 +168,7 @@ const handle = async (message) => {
       sessionId,
       update: {
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "Deterministic demo completed." }
+        content: { type: "text", text: "Deterministic fixture completed." }
       }
     } })
     await send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } })

@@ -17,7 +17,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run check
-      - run: bun run demo
+      - run: bun run proof:local
       - run: bun run runner:build
       - run: bun run cloudflare:check
       - run: bun run --cwd providers/cloudflare-sandbox image:check

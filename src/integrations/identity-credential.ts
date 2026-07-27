@@ -5,7 +5,7 @@ import type { ExternalAuthCredentialMaterial } from "./external-auth"
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder("utf-8", { fatal: true })
-const githubCredentialSchema = z
+const githubCredentialV1Schema = z
   .object({
     version: z.literal(1),
     accessToken: z.string().min(1).max(8_192),
@@ -13,9 +13,20 @@ const githubCredentialSchema = z
   })
   .strict()
 
+const githubCredentialSchema = z.union([
+  githubCredentialV1Schema,
+  z
+    .object({
+      version: z.literal(2),
+      accessToken: z.string().min(1).max(8_192),
+      refreshToken: z.string().min(1).max(8_192).nullable(),
+    })
+    .strict(),
+])
+
 export interface OpenGitHubIdentityCredential {
   readonly accessToken: string
-  readonly refreshToken: string
+  readonly refreshToken: string | null
 }
 
 export async function sealGitHubIdentityCredential(input: {
@@ -24,12 +35,9 @@ export async function sealGitHubIdentityCredential(input: {
   readonly externalIdentityId: string
   readonly material: ExternalAuthCredentialMaterial
 }): Promise<string> {
-  if (input.material.refreshToken === null) {
-    throw new Error("GitHub refresh token is required")
-  }
   const value = encoder.encode(
     JSON.stringify({
-      version: 1,
+      version: 2,
       accessToken: input.material.accessToken,
       refreshToken: input.material.refreshToken,
     }),
@@ -57,7 +65,11 @@ export async function openGitHubIdentityCredential(input: {
     resourceId: input.credential.externalIdentityId,
   })
   try {
-    return githubCredentialSchema.parse(JSON.parse(decoder.decode(plaintext)))
+    const parsed = githubCredentialSchema.parse(JSON.parse(decoder.decode(plaintext)))
+    return {
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken,
+    }
   } finally {
     plaintext.fill(0)
   }

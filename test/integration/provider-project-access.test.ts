@@ -41,12 +41,22 @@ describe("provider-derived Project access", () => {
     ).toEqual([projectId])
     expect(active.listProjectParticipants(ownerId, projectId, now)).toEqual([
       expect.objectContaining({
-        principal: { id: aliceId, kind: "person", displayName: "Alice Chen" },
+        principal: expect.objectContaining({
+          id: aliceId,
+          kind: "person",
+          displayName: "Alice Chen",
+          avatarUrl: "https://avatars.githubusercontent.com/u/alice",
+        }),
         access: "administer",
         source: "membership",
       }),
       expect.objectContaining({
-        principal: { id: bobId, kind: "person", displayName: "Bob Li" },
+        principal: expect.objectContaining({
+          id: bobId,
+          kind: "person",
+          displayName: "Bob Li",
+          avatarUrl: "https://avatars.githubusercontent.com/u/bob",
+        }),
         access: "participate",
         source: "github",
       }),
@@ -75,8 +85,8 @@ describe("provider-derived Project access", () => {
     expect(active.listProjectsForPrincipal(ownerId, bobId, now)).toEqual([])
   })
 
-  test("keeps access when the same GitHub repository moves to a new installation", async () => {
-    const active = await setup({ installationId: "replacement-installation" })
+  test("keeps access while the same immutable GitHub repository grant is refreshed", async () => {
+    const active = await setup()
     expect(active.getProjectAccess(ownerId, projectId, bobId, now)).toMatchObject({
       access: "participate",
       source: "github",
@@ -135,7 +145,7 @@ async function setup(overrides: Partial<ExternalProjectGrant> = {}): Promise<Sto
         subjectId,
         login: subjectId,
         displayName,
-        avatarUrl: null,
+        avatarUrl: `https://avatars.githubusercontent.com/u/${principalId === aliceId ? "alice" : "bob"}`,
         createdAt: now,
         lastVerifiedAt: now,
         revokedAt: null,
@@ -160,7 +170,6 @@ async function setup(overrides: Partial<ExternalProjectGrant> = {}): Promise<Sto
       provider: "github",
       accountId: aliceGrant.accountId,
       accountName: aliceGrant.accountName,
-      installationId: aliceGrant.installationId,
       repositoryId: aliceGrant.repositoryId,
       repositoryName: aliceGrant.repositoryName,
       repositoryFullName: aliceGrant.repositoryFullName,
@@ -189,7 +198,6 @@ function grant(
     provider: "github",
     accountId: "acme-account",
     accountName: "acme",
-    installationId: "acme-installation",
     repositoryId: "northstar-repository",
     repositoryName: "northstar",
     repositoryFullName: "acme/northstar",

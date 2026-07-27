@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import {
   type ApplicationHarness,
   createApplicationHarness,
-  createDemoRun,
+  createFixtureRun,
 } from "../application-harness"
 
 let harness: ApplicationHarness | null = null
@@ -15,7 +15,7 @@ afterEach(async () => {
 describe("complete run lifecycle", () => {
   test("uploaded files traverse ACP and produce durable logs, artifacts, status, and audit", async () => {
     harness = await createApplicationHarness()
-    const created = await createDemoRun(harness)
+    const created = await createFixtureRun(harness)
     expect(created.status).toBe("queued")
 
     const terminal = await harness.waitForRun(created.id)

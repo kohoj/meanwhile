@@ -17,10 +17,6 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
-import seatAgent from "./assets/seat-agent.png";
-import seatAlice from "./assets/seat-alice.png";
-import seatBob from "./assets/seat-bob.png";
-import seatPriya from "./assets/seat-priya.png";
 import liveDeckBackground from "./assets/live-deck-background.png";
 import {
   ConnectionHealth,
@@ -38,9 +34,12 @@ import {
   workActivityAge,
 } from "./presentation";
 import { useBoard } from "./store";
+import {
+  AgentPortrait as SharedAgentPortrait,
+  PersonPortrait as SharedPersonPortrait,
+} from "./portrait";
 import { composeTranscript, type TranscriptDetail, workSummary } from "./transcript";
 
-const HUMAN_SEATS = [seatAlice, seatBob, seatPriya] as const;
 const NO_ANNOTATIONS: readonly TaskAnnotation[] = [];
 const NO_RELAYS: readonly TaskRelay[] = [];
 
@@ -80,25 +79,13 @@ export const annotationThreadForSequence = <
   };
 };
 
-const stableSeat = (identity: Pick<Principal, "id" | "displayName">): string => {
-  const name = identity.displayName.toLowerCase();
-  if (name.includes("alice")) return seatAlice;
-  if (name.includes("bob") || name.includes("owner")) return seatBob;
-  if (name.includes("priya")) return seatPriya;
-  let hash = 0;
-  for (const character of identity.id) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
-  return HUMAN_SEATS[hash % HUMAN_SEATS.length] ?? seatAlice;
-};
-
 const Portrait = ({ identity, size = "medium" }: {
-  readonly identity: Pick<Principal, "id" | "displayName">;
+  readonly identity: Pick<Principal, "id" | "displayName" | "avatarUrl">;
   readonly size?: "small" | "medium" | "large";
-}) => <img className={`cd-portrait cd-portrait-${size}`} src={stableSeat(identity)} alt="" />;
+}) => <SharedPersonPortrait className={`cd-portrait cd-portrait-${size}`} identity={identity} />;
 
 const AgentOrb = ({ size = "medium" }: { readonly size?: "small" | "medium" | "large" }) => (
-  <span className={`cd-agent-orb cd-agent-orb-${size}`} aria-hidden="true">
-    <img src={seatAgent} alt="" />
-  </span>
+  <SharedAgentPortrait className={`cd-agent-orb cd-agent-orb-${size}`} />
 );
 
 export const TranscriptMarkdown = ({ text, className, live = false, anchorCopy = false }: {
@@ -335,8 +322,9 @@ const Transcript = ({ row, live }: {
   );
 };
 
-const AnnotationCard = ({ annotation, canResolve, onResolve }: {
+const AnnotationCard = ({ annotation, projectName, canResolve, onResolve }: {
   readonly annotation: TaskAnnotation;
+  readonly projectName: string;
   readonly canResolve: boolean;
   readonly onResolve: (annotation: TaskAnnotation) => Promise<void>;
 }) => {
@@ -347,7 +335,7 @@ const AnnotationCard = ({ annotation, canResolve, onResolve }: {
       <header>
         <strong>{annotation.author.displayName}</strong>
         <time>{clock(annotation.createdAt)}</time>
-        <span><LockSimple size={13} weight="regular" aria-hidden="true" />Visible in Northstar</span>
+        <span><LockSimple size={13} weight="regular" aria-hidden="true" />Visible in {projectName}</span>
       </header>
       <TranscriptMarkdown text={annotation.body} className="cd-annotation-copy" />
       {annotation.resolvedAt ? (
@@ -918,6 +906,7 @@ export const ConversationDetail = ({
                 <AnnotationCard
                   key={annotation.id}
                   annotation={annotation}
+                  projectName={project.name}
                   canResolve={annotation.author.id === current.id || currentParticipant?.access === "administer"}
                   onResolve={resolveAnnotation}
                 />

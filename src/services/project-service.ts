@@ -10,6 +10,7 @@ import type {
 } from "../domain"
 import { AppError } from "../errors"
 import type { Store } from "../persistence/store"
+import { presentPrincipal } from "./principal-profile"
 
 const PROJECT_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
@@ -19,6 +20,7 @@ export class ProjectService {
       Store,
       | "createPrincipalWithAudit"
       | "getPrincipal"
+      | "listExternalIdentities"
       | "listPrincipals"
       | "createProjectWithAudit"
       | "getProject"
@@ -47,7 +49,10 @@ export class ProjectService {
       })
     }
     return {
-      principal,
+      principal: presentPrincipal(
+        principal,
+        this.store.listExternalIdentities(context.ownerId, context.principalId),
+      ),
       projects: this.store.listProjectsForPrincipal(
         context.ownerId,
         context.principalId,

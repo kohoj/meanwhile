@@ -1799,7 +1799,7 @@ async function doctor(args: readonly string[], context: CliContext): Promise<num
       } else {
         bootstrapStatus = store.inspectBootstrapIdentity({
           ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
-          ownerName: "Local owner",
+          ownerName: "Owner",
           apiKeyId: LOCAL_BOOTSTRAP_API_KEY_ID,
           apiKeyPrefix: prefix,
           apiKeyHash: await hashApiKey(config.apiKey),

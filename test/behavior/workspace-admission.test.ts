@@ -39,7 +39,7 @@ describe("workspace admission", () => {
         url: "https://github.com/example/project.git",
         revision: "release/2026.07",
       },
-      agentType: "demo",
+      agentType: "fixture",
       prompt: "Run",
     }
 

@@ -10,7 +10,7 @@ export const releaseProofClassSchema = z.enum([
 ])
 
 const proofProviderSchema = z.enum(["local", "cloudflare"])
-const proofAgentSchema = z.enum(["demo", "codex", "claude-code", "pi"])
+const proofAgentSchema = z.enum(["fixture", "codex", "claude-code", "pi"])
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
 const taggedSha256Schema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const timestampSchema = z.string().datetime({ offset: true })
@@ -211,7 +211,7 @@ function refineReceipt(receipt: RefinableReceipt, context: z.RefinementCtx): voi
     })
   }
 
-  const fixture = receipt.agent.type === "demo"
+  const fixture = receipt.agent.type === "fixture"
   if (
     receipt.agent.executionEvidence !==
     (fixture ? "deterministic-fixture" : "credentialed-live-agent")
@@ -265,7 +265,7 @@ function refineReceipt(receipt: RefinableReceipt, context: z.RefinementCtx): voi
 
   if (receipt.provider === "local") {
     if (
-      receipt.agent.type !== "demo" ||
+      receipt.agent.type !== "fixture" ||
       receipt.provenance.runtimeImageReference !== null ||
       receipt.provenance.runtimeImageDigest !== null ||
       receipt.provenance.bridgeProtocolVersion !== null ||
@@ -303,10 +303,11 @@ export function releaseProofClass(
   agent: z.infer<typeof proofAgentSchema>,
 ): ReleaseProofClass {
   if (provider === "local") {
-    if (agent !== "demo") throw new TypeError("Local release proof supports only the demo agent")
+    if (agent !== "fixture")
+      throw new TypeError("Local release proof supports only the fixture agent")
     return "local-control-plane"
   }
-  return agent === "demo" ? "remote-provider-compatibility" : "remote-live-agent"
+  return agent === "fixture" ? "remote-provider-compatibility" : "remote-live-agent"
 }
 
 export function createReleaseProofReceipt(

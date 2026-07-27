@@ -29,6 +29,37 @@ export const createApplicationHarness = async (
   } = {},
 ): Promise<ApplicationHarness> => {
   const directory = await mkdtemp(join(options.directoryRoot ?? tmpdir(), "meanwhile-app-"))
+  const agentCatalogPath = join(directory, "agents.json")
+  await Bun.write(
+    agentCatalogPath,
+    JSON.stringify({
+      version: 1,
+      agents: {
+        fixture: {
+          transport: "stdio",
+          executable: "meanwhile-fixture-agent",
+          args: [],
+          workingDirectory: "workspace",
+          capabilities: { filesystem: true, terminal: false },
+          envNames: [
+            "FIXTURE_DELAY_MS",
+            "FIXTURE_REQUEST_PERMISSION",
+            "FIXTURE_MALFORMED_OUTPUT",
+            "FIXTURE_OVERSIZED_BYTES",
+            "FIXTURE_OUTPUT_PATH",
+          ],
+          networkPolicy: { allowedHosts: [] },
+          credentials: [
+            {
+              environmentVariable: "TEST_RUNNER_SECRET",
+              host: "example.com",
+              methods: ["POST"],
+            },
+          ],
+        },
+      },
+    }),
+  )
   const key = await issueApiKey()
   const operationalLogs: string[] = []
   const config: AppConfig = {
@@ -43,7 +74,7 @@ export const createApplicationHarness = async (
     deploymentDir: join(directory, "deployments"),
     apiKey: key.key,
     runnerPath: resolve("dist/meanwhile-runner"),
-    agentCatalogPath: resolve("config/agents.json"),
+    agentCatalogPath,
     defaultProvider: options.defaultProvider ?? "local",
     runConcurrency: options.runConcurrency ?? 2,
     sessionConcurrency: options.sessionConcurrency ?? 2,
@@ -61,6 +92,16 @@ export const createApplicationHarness = async (
     sink: { write: (line) => operationalLogs.push(line) },
   })
   const application = await createApplication({ config, instrumentation })
+  const bootstrapPrincipal = application.store.listPrincipals(LOCAL_BOOTSTRAP_OWNER_ID)[0]
+  if (bootstrapPrincipal === undefined) throw new Error("Test bootstrap Principal is missing")
+  application.store.createProject({
+    id: crypto.randomUUID(),
+    ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
+    name: "Test Project",
+    slug: "test-project",
+    createdAt: new Date().toISOString(),
+    createdByPrincipalId: bootstrapPrincipal.id,
+  })
   await application.start()
   const request = (path: string, init: RequestInit = {}): Promise<Response> =>
     Promise.resolve(
@@ -98,7 +139,7 @@ export const createApplicationHarness = async (
   }
 }
 
-export const createDemoRun = async (
+export const createFixtureRun = async (
   harness: ApplicationHarness,
   options: {
     prompt?: string
@@ -112,7 +153,7 @@ export const createDemoRun = async (
   } = {},
 ): Promise<Run> => {
   const files = options.files ?? [
-    { path: "README.md", content: "demo" },
+    { path: "README.md", content: "fixture" },
     { path: "dist/index.html", content: "<h1>Meanwhile</h1>" },
   ]
   const response = await harness.request("/runs", {
@@ -126,7 +167,7 @@ export const createDemoRun = async (
           contentBase64: Buffer.from(file.content).toString("base64"),
         })),
       },
-      agentType: "demo",
+      agentType: "fixture",
       prompt: options.prompt ?? "Complete the deterministic task",
       env: options.env ?? {},
       secretRefs: options.secretRefs ?? {},
@@ -178,7 +219,6 @@ export function bindTestGitHubRepository(
       provider: "github",
       accountId: "test-account",
       accountName: "acme",
-      installationId: "test-installation",
       repositoryId,
       repositoryName,
       repositoryFullName,
@@ -200,7 +240,6 @@ export function bindTestGitHubRepository(
       provider: "github",
       accountId: grant.accountId,
       accountName: grant.accountName,
-      installationId: grant.installationId,
       repositoryId: grant.repositoryId,
       repositoryName: grant.repositoryName,
       repositoryFullName: grant.repositoryFullName,

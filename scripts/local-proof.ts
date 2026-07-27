@@ -1,20 +1,25 @@
 import { Meanwhile, MeanwhileError } from "../src/client"
-import { createDemoEnvironment, type DemoEnvironment, DemoError } from "./demo-environment"
+import { createProofEnvironment, type ProofEnvironment, ProofError } from "./proof-environment"
 
 const arguments_ = process.argv.slice(2)
-const proofText = "Meanwhile local demo"
+const proofText = "Meanwhile local fixture"
 const servePreview = arguments_.includes("--serve")
 const timeoutMs = 30_000
 
-let environment: DemoEnvironment | null = null
+let environment: ProofEnvironment | null = null
 
 try {
-  environment = await createDemoEnvironment()
+  environment = await createProofEnvironment()
   const meanwhile = new Meanwhile(environment.clientOptions)
+  const project = await meanwhile.projects.create({
+    name: "Local proof",
+    slug: `local-proof-${crypto.randomUUID().slice(0, 8)}`,
+  })
   const created = await meanwhile.runs.create(
     {
+      projectId: project.id,
       workspace: { type: "files", files: [...environment.workspaceFiles] },
-      agentType: "demo",
+      agentType: "fixture",
       provider: "local",
       artifactPaths: ["site"],
       timeoutMs: 20_000,
@@ -23,14 +28,14 @@ try {
       prompt: "Verify the immutable static preview",
     },
     {
-      idempotencyKey: "meanwhile-local-demo-v1",
+      idempotencyKey: "meanwhile-local-fixture-v1",
     },
   )
   const run = await meanwhile.runs.wait(created.id, { timeoutMs, pollIntervalMs: 25 })
   const logs = await meanwhile.runs.logs(run.id, { limit: 1_000 })
   const eventTypes = new Set(logs.items.map((item) => item.eventType))
   if (run.status !== "succeeded") {
-    throw new DemoError("DEMO_RUN_FAILED", "The deterministic ACP run did not succeed", {
+    throw new ProofError("PROOF_RUN_FAILED", "The deterministic ACP run did not succeed", {
       runStatus: run.status,
       runErrorCode: run.error?.code ?? null,
       acpInitialized: eventTypes.has("agent.initialized"),
@@ -42,7 +47,7 @@ try {
   const artifacts = await meanwhile.artifacts.list(run.id)
   const site = artifacts.find((artifact) => artifact.logicalPath === "site")
   if (site === undefined) {
-    throw new DemoError("DEMO_ARTIFACT_MISSING", "The declared site artifact was not captured")
+    throw new ProofError("PROOF_ARTIFACT_MISSING", "The declared site artifact was not captured")
   }
   const downloaded = await meanwhile.artifacts.download(site.id, { path: "index.html" })
   const downloadedBytes = new Uint8Array(await new Response(downloaded.body).arrayBuffer())
@@ -52,8 +57,8 @@ try {
     new Bun.CryptoHasher("sha256").update(downloadedBytes).digest("hex") !== downloaded.digest ||
     !downloadedText.includes(proofText)
   ) {
-    throw new DemoError(
-      "DEMO_ARTIFACT_DOWNLOAD_INVALID",
+    throw new ProofError(
+      "PROOF_ARTIFACT_DOWNLOAD_INVALID",
       "The SDK did not return the immutable agent output",
     )
   }
@@ -64,28 +69,31 @@ try {
       artifactPath: "site",
       deployTarget: "local-static",
     },
-    { idempotencyKey: `demo-deployment-${run.id}` },
+    { idempotencyKey: `fixture-deployment-${run.id}` },
   )
   const deployment = await meanwhile.deployments.wait(queuedDeployment.id, {
     timeoutMs,
     pollIntervalMs: 25,
   })
   if (deployment.status !== "succeeded" || deployment.url === null) {
-    throw new DemoError("DEMO_DEPLOYMENT_FAILED", "The local static deployment did not succeed")
+    throw new ProofError("PROOF_DEPLOYMENT_FAILED", "The local static deployment did not succeed")
   }
 
   const preview = await fetch(deployment.url)
   const previewBody = await preview.text()
   const expectedPreviewText = proofText
   if (!preview.ok || !previewBody.includes(expectedPreviewText)) {
-    throw new DemoError("DEMO_PREVIEW_INVALID", "The local preview did not serve immutable output")
+    throw new ProofError(
+      "PROOF_PREVIEW_INVALID",
+      "The local preview did not serve immutable output",
+    )
   }
   const deploymentLogs = await meanwhile.deployments.logs(deployment.id, { limit: 1_000 })
 
   await writeStdout({
-    demo: "meanwhile-local",
+    fixture: "meanwhile-local",
     status: "succeeded",
-    agent: { type: "demo" },
+    agent: { type: "fixture" },
     run: { id: run.id, status: run.status },
     evidence: {
       runLogCount: logs.items.length,
@@ -109,11 +117,11 @@ try {
     },
     note: servePreview
       ? "The verified preview remains available until this process receives SIGINT or SIGTERM."
-      : "The preview server is stopped when this demonstration exits.",
+      : "The preview server is stopped when this proof exits.",
   })
   if (servePreview) await waitForShutdown()
 } catch (error) {
-  const normalized = normalizeDemoError(error)
+  const normalized = normalizeProofError(error)
   await writeStderr({
     error: { code: normalized.code, message: normalized.message, details: normalized.details },
   })
@@ -122,11 +130,11 @@ try {
   await environment?.close()
 }
 
-function normalizeDemoError(error: unknown): DemoError {
-  if (error instanceof DemoError) return error
+function normalizeProofError(error: unknown): ProofError {
+  if (error instanceof ProofError) return error
   if (error instanceof MeanwhileError)
-    return new DemoError(error.code, error.message, error.details)
-  return new DemoError("DEMO_FAILED", "Local demo failed")
+    return new ProofError(error.code, error.message, error.details)
+  return new ProofError("PROOF_FAILED", "Local fixture failed")
 }
 
 async function writeStdout(value: unknown): Promise<void> {

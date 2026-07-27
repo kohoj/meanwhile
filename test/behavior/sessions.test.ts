@@ -296,7 +296,7 @@ async function createSessionResponse(
           },
         ],
       },
-      agentType: "demo",
+      agentType: "fixture",
       env,
       secretRefs,
       provider: "local",

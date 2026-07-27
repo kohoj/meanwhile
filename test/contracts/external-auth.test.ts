@@ -69,8 +69,8 @@ describe("external auth credential boundary", () => {
   })
 })
 
-describe("GitHub App external auth", () => {
-  test("uses S256 PKCE, receives expiring tokens, resolves identity, and lists intersection access", async () => {
+describe("GitHub OAuth external auth", () => {
+  test("uses S256 PKCE, requests repository authorization, resolves identity, and lists access", async () => {
     const requests: Request[] = []
     const fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init)
@@ -110,7 +110,6 @@ describe("GitHub App external auth", () => {
           return [
             {
               provider: "github",
-              installationId: "7",
               account: { id: "1", login: "northstar", type: "organization", avatarUrl: null },
               repository: {
                 id: "9",
@@ -138,6 +137,7 @@ describe("GitHub App external auth", () => {
       state: "sealed-state",
       code_challenge: "challenge",
       code_challenge_method: "S256",
+      scope: "read:user repo",
     })
 
     const result = await adapter.exchange({
@@ -188,6 +188,40 @@ describe("GitHub App external auth", () => {
     const body = await requests[0]?.text()
     expect(body).toContain("grant_type=refresh_token")
     expect(body).toContain("refresh_token=ghr_old")
+  })
+
+  test("accepts a standard non-expiring OAuth token without fabricating refresh metadata", async () => {
+    const adapter = new GitHubExternalAuth({
+      clientId: "github-client",
+      clientSecret: "github-secret",
+      redirectUri: "http://127.0.0.1:7333/auth/github/callback",
+      fetch: async (input) => {
+        const url = new URL(input instanceof Request ? input.url : input.toString())
+        if (url.pathname === "/login/oauth/access_token") {
+          return Response.json({ access_token: "gho_access", token_type: "bearer" })
+        }
+        if (url.pathname === "/user") {
+          return Response.json({ id: 42, login: "bob", name: null, avatar_url: null })
+        }
+        return new Response("Not Found", { status: 404 })
+      },
+      directory: {
+        provider: "github",
+        async list() {
+          return []
+        },
+      },
+    })
+
+    expect(
+      (await adapter.exchange({ code: "code", codeVerifier: "verifier", nonce: "unused" }))
+        .credential,
+    ).toEqual({
+      accessToken: "gho_access",
+      refreshToken: null,
+      accessExpiresAt: null,
+      refreshExpiresAt: null,
+    })
   })
 })
 

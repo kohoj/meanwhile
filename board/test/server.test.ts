@@ -65,6 +65,9 @@ describe("Project Watch boundary", () => {
     expect(shell.headers.get("x-frame-options")).toBe("DENY");
     expect(shell.headers.get("x-content-type-options")).toBe("nosniff");
     expect(shell.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(shell.headers.get("content-security-policy")).toContain(
+      "img-src 'self' data: https://avatars.githubusercontent.com",
+    );
     const traversal = await fetch(`${base}/..%2f..%2fpackage.json`);
     expect(await traversal.text()).not.toContain("dependencies");
   });
@@ -335,7 +338,6 @@ describe("team browser session", () => {
       provider: "github" as const,
       accountId: "42",
       accountName: "kohoz",
-      installationId: "84",
       repositoryId: "126",
       repositoryName: "meanwhile",
       repositoryFullName: "kohoz/meanwhile",
@@ -382,6 +384,7 @@ describe("team browser session", () => {
               createdAt: API_TIMESTAMP,
               disabledAt: null,
             },
+            repositoryConnection: null,
             identities: [],
             repositoryGrants: [],
             repositoryBindings: [binding],
@@ -390,8 +393,8 @@ describe("team browser session", () => {
                 id: connectionId,
                 ownerId: API_OWNER_ID,
                 principalId: API_PRINCIPAL_ID,
-                agentType: "demo",
-                label: "Demo",
+                agentType: "fixture",
+                label: "Fixture",
                 capabilities: {
                   oneShotRuns: true,
                   durableSessions: true,
@@ -404,8 +407,8 @@ describe("team browser session", () => {
             ],
             availableAgents: [
               {
-                agentType: "demo",
-                label: "Demo",
+                agentType: "fixture",
+                label: "Fixture",
                 capabilities: {
                   oneShotRuns: true,
                   durableSessions: true,
@@ -502,8 +505,8 @@ describe("team browser session", () => {
               id: connectionId,
               ownerId: API_OWNER_ID,
               principalId: API_PRINCIPAL_ID,
-              agentType: "demo",
-              label: "Demo",
+              agentType: "fixture",
+              label: "Fixture",
               capabilities: {
                 oneShotRuns: true,
                 durableSessions: true,
@@ -525,8 +528,8 @@ describe("team browser session", () => {
               id: connectionId,
               ownerId: API_OWNER_ID,
               principalId: API_PRINCIPAL_ID,
-              agentType: "demo",
-              label: "Demo",
+              agentType: "fixture",
+              label: "Fixture",
               capabilities: {
                 oneShotRuns: true,
                 durableSessions: true,
@@ -597,6 +600,14 @@ describe("team browser session", () => {
               disabledAt: null,
             },
             projects: [
+              {
+                id: "00000000-0000-4000-8000-000000000078",
+                ownerId: API_OWNER_ID,
+                name: "Default Project",
+                slug: "default",
+                createdAt: API_TIMESTAMP,
+                archivedAt: null,
+              },
               {
                 id: API_PROJECT_ID,
                 ownerId: API_OWNER_ID,
@@ -809,7 +820,7 @@ describe("team browser session", () => {
       expect(onboarding.status).toBe(200);
       expect(await onboarding.json()).toMatchObject({
         repositoryBindings: [{ repositoryFullName: "kohoz/meanwhile", private: true }],
-        agentConnections: [{ agentType: "demo" }],
+        agentConnections: [{ agentType: "fixture" }],
         connectorDevices: [],
         conversationShareGrants: [],
       });
@@ -818,7 +829,7 @@ describe("team browser session", () => {
           await fetch(`${teamBase}/onboarding/agent-connections`, {
             method: "POST",
             headers: { Cookie: sessionCookie, "Content-Type": "application/json" },
-            body: JSON.stringify({ agentType: "demo" }),
+            body: JSON.stringify({ agentType: "fixture" }),
           })
         ).status,
       ).toBe(403);
@@ -892,7 +903,7 @@ describe("team browser session", () => {
           await fetch(`${teamBase}/onboarding/agent-connections`, {
             method: "POST",
             headers: onboardingHeaders,
-            body: JSON.stringify({ agentType: "demo" }),
+            body: JSON.stringify({ agentType: "fixture" }),
           })
         ).status,
       ).toBe(201);
@@ -964,7 +975,7 @@ describe("team browser session", () => {
           path: `/connector-devices/${connectorDeviceId}`,
           body: null,
         },
-        { method: "POST", path: "/onboarding/agent-connections", body: { agentType: "demo" } },
+        { method: "POST", path: "/onboarding/agent-connections", body: { agentType: "fixture" } },
         { method: "POST", path: "/onboarding/projects", body: { grantId } },
         {
           method: "PUT",
@@ -991,6 +1002,7 @@ describe("team browser session", () => {
       expect(await board.json()).toMatchObject({
         principal: { displayName: "Bob Li" },
         project: { name: "Project Northstar" },
+        projects: [{ name: "Project Northstar" }],
         presence: [{ clientId: presenceClientId }],
         rows: [{ title: "Audit the migration plan", delegatedBy: { displayName: "Bob Li" } }],
       });
@@ -1026,7 +1038,7 @@ describe("team browser session", () => {
           prompt: "Audit the first-task journey",
           repositoryUrl: "https://github.com/untrusted/browser-input",
           revision: "main",
-          agentType: "demo",
+          agentType: "fixture",
           idempotencyKey: "board-first-task",
         }),
       });
@@ -1034,7 +1046,7 @@ describe("team browser session", () => {
       expect(await delegated.json()).toMatchObject({ run: { id: API_RUN_ID } });
       expect(runRequests[0]).toMatchObject({
         projectId: API_PROJECT_ID,
-        agentType: "demo",
+        agentType: "fixture",
         prompt: "Audit the first-task journey",
         workspace: {
           type: "repository",

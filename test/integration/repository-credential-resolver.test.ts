@@ -237,7 +237,6 @@ async function setup() {
       provider: "github",
       accountId: grant.accountId,
       accountName: grant.accountName,
-      installationId: grant.installationId,
       repositoryId: grant.repositoryId,
       repositoryName: grant.repositoryName,
       repositoryFullName: grant.repositoryFullName,
@@ -265,7 +264,6 @@ function repositoryGrant(): ExternalProjectGrant {
     provider: "github",
     accountId: "account-1",
     accountName: "acme",
-    installationId: "installation-1",
     repositoryId: "repository-1",
     repositoryName: "northstar",
     repositoryFullName: "acme/northstar",
@@ -281,7 +279,6 @@ function repositoryGrant(): ExternalProjectGrant {
 function directoryEntry(): RepositoryDirectoryEntry {
   return {
     provider: "github",
-    installationId: "installation-1",
     account: { id: "account-1", login: "acme", type: "organization", avatarUrl: null },
     repository: {
       id: "repository-1",

@@ -180,7 +180,7 @@ Evidence scope: this release carries the durable control-plane, session, credent
 
 - Secret-bearing run/session admission now fails on providers without credential mediation. Cloudflare agent processes receive only revocable placeholders; real values remain encrypted in trusted bridge state and are substituted only for exact authorized destinations and methods under default-deny egress.
 - Cloudflare installs deny-all outbound interception before container startup, so SDK-managed HTTPS certificate material is present even before a credential lease and exact-host handlers remain the only egress overrides.
-- Local credentialed-agent commands were removed because the local provider is not a credential boundary; the deterministic no-account local demo remains the complete local path.
+- Local credentialed-agent commands were removed because the local provider is not a credential boundary; the deterministic no-account local proof remains the complete local path.
 - Session prompts and resolved credentials stay out of process argv, runner specs, provider handles, telemetry, and durable evidence; the control plane retains an independent operation-scoped redactor through spawn/reconnect and redacts agent-controlled fields before SQLite accepts session output.
 - Cloudflare reserves each process-input sequence against a secret-safe fingerprint before sandbox delivery; exact retries are harmless and conflicting reuse fails closed.
 - Structured Codex login material is split into individually redacted secret values and reconstructed only inside the short-lived wrapper process instead of crossing the runner boundary as one opaque JSON credential.
@@ -224,14 +224,14 @@ Evidence scope: this release carries the durable control-plane, session, credent
 - Persisted provisioning-through-execution deadlines, cancellation intent, immutable terminal state, restart reconciliation, runner event deduplication, and durable cleanup with explicit bounded backoff.
 - Structured JSON operational logs, manually bounded OpenTelemetry traces and metrics, correlation IDs, exporter health, and strict separation from product logs and audit records.
 - CLI for runs, logs, cancellation, artifacts, deployments, provider diagnostics, key generation, and doctor checks; uploaded-directory support refuses links and enforces bounds.
-- No-account executable demo proving ACP execution, durable evidence, artifact capture, API deployment, and HTTP preview.
+- No-account executable proof proving ACP execution, durable evidence, artifact capture, API deployment, and HTTP preview.
 - Bun container/Compose deployment, strict TypeScript/Biome configuration, CI quality gates, provider container checks, architecture/operations/provider/threat documentation, and open-source project policy files.
-- Generated third-party production dependency notices, embedded project/license material in both distributed images, deterministic demo and image build CI proof, and an explicit fail-closed Cloudflare live-test command.
+- Generated third-party production dependency notices, embedded project/license material in both distributed images, deterministic proof and image build CI proof, and an explicit fail-closed Cloudflare live-test command.
 - Two-phase inline workspace admission that computes a canonical bundle identity before storage, validates existing bundles in the authenticated owner scope, and avoids candidate blob writes for idempotent replays and conflicts.
-- Explicit `bun run demo:codex` live proof that uses locally authenticated Codex through an exact ACP adapter and compatible exact Codex runtime, then exercises the complete local API, evidence, artifact, deployment, and preview path without copying or persisting local authentication material.
-- `bun run demo:codex:serve` inspection mode that keeps the verified Codex-generated local preview available until explicitly stopped.
-- Exact `bun run demo:claude` and `demo:claude:serve` proofs through the official Claude Agent SDK ACP adapter, importing only allowlisted environment configuration from `~/.claude/settings.json` while keeping credential material ephemeral.
-- Exact `bun run demo:pi` and `demo:pi:serve` proofs through the pinned Pi ACP adapter and headless RPC runtime, with an ephemeral allowlisted Amazon Bedrock authentication boundary and the same artifact, deployment, and preview acceptance path.
+- Explicit `bun run proof:codex` live proof that uses locally authenticated Codex through an exact ACP adapter and compatible exact Codex runtime, then exercises the complete local API, evidence, artifact, deployment, and preview path without copying or persisting local authentication material.
+- `bun run proof:codex:serve` inspection mode that keeps the verified Codex-generated local preview available until explicitly stopped.
+- Exact `bun run proof:claude` and `proof:claude:serve` proofs through the official Claude Agent SDK ACP adapter, importing only allowlisted environment configuration from `~/.claude/settings.json` while keeping credential material ephemeral.
+- Exact `bun run proof:pi` and `proof:pi:serve` proofs through the pinned Pi ACP adapter and headless RPC runtime, with an ephemeral allowlisted Amazon Bedrock authentication boundary and the same artifact, deployment, and preview acceptance path.
 - Executable documentation contracts for local links, JSON examples, and the published agent-catalog template.
 - Typed Web-standard client with resource namespaces, shared runtime-validated contracts, structured errors, deterministic terminal waits, response evidence, and replay-safe asynchronous log following.
 - Bounded link-free Bun workspace capture as a separate client entrypoint and direct client contract coverage.
@@ -242,15 +242,15 @@ Evidence scope: this release carries the durable control-plane, session, credent
 
 ### Changed
 
-- The complete quality gate now builds the standalone runner and bundled demo agent before tests, so a clean checkout proves the same executables used by local and remote runtimes.
+- The complete quality gate now builds the standalone runner and bundled proof agent before tests, so a clean checkout proves the same executables used by local and remote runtimes.
 - Container CI now boots the packaged image and drives a complete SDK run, exact ACP response, agent-written artifact capture, deployment, and separate-origin preview flow instead of stopping at readiness.
-- Agent launch configuration is now strict, portable, capability-derived, content-digested, and snapshotted into each run's durable idempotent intent; recovering runs no longer change behavior after catalog edits. The shipped catalog advertises only the bundled demo agent, with external ACP adapter entries supplied as documentation templates.
+- Agent launch configuration is now strict, portable, capability-derived, content-digested, and snapshotted into each run's durable idempotent intent; recovering runs no longer change behavior after catalog edits. Deterministic fixture agents remain internal to proof catalogs and are not product choices.
 - Run creation may omit `provider`; the configured default is resolved and validated before any run or uploaded workspace state is persisted.
 - Local preview URLs now use an explicit browser-facing origin whenever the server binds all interfaces, so deployment records never publish wildcard bind addresses.
 - Source-checkout CLI examples use the executable `bun run cli --` path and `doctor` no longer performs an implicit runner build.
 - Compose publishes only loopback host ports, makes its unsafe local-provider choice explicit, and accepts optional provider plus allowlisted `env://` values through an uncommitted runtime env file.
 - Cloudflare bridge protocol v3 binds process retries to a secret-safe full-spec fingerprint, requires an explicit version header, preserves declared workspace file modes, keeps lifecycle truth in a separate durable registry, advertises only the SDK's hard-termination capability, and bounds accumulated replay to 4 MiB of UTF-8 output.
-- CLI and executable demos now consume the same public client as external callers; public Zod contracts are separated from Hono registration, and hermetic demo-environment setup no longer obscures the SDK usage path.
+- CLI and executable proofs now consume the same public client as external callers; public Zod contracts are separated from Hono registration, and hermetic proof-environment setup no longer obscures the SDK usage path.
 - Runner protocol v2 carries a remaining timeout duration instead of a cross-machine wall-clock deadline; ACP children run in UTC, monotonic elapsed time owns runtime duration, and durable event timestamps come from control-plane acceptance.
 - Successful local-static previews resume their separate listener after a control-plane restart.
 

@@ -87,6 +87,7 @@ import {
   type ConfiguredExternalAuthProvider,
   ExternalAuthService,
 } from "./services/external-auth-service"
+import { GitHubExternalProjectGrantRefresher } from "./services/external-project-grant-refresher"
 import { PresenceService } from "./services/presence-service"
 import { PrincipalInvitationService } from "./services/principal-invitation-service"
 import { ProjectService } from "./services/project-service"
@@ -197,23 +198,34 @@ export const createApplication = async (
     const principalInvitationService = new PrincipalInvitationService(store)
     const externalAuth = await createExternalAuthComposition(store, config)
     const externalAuthService = externalAuth?.service ?? null
-    const connectedOnboardingService = new ConnectedOnboardingService(store, () => {
-      const runtimeProviders = providerRegistry
-        .list()
-        .filter((provider) => providerAdmission.has(provider.name))
-      return catalog.list().map((agentType) => ({
-        agentType,
-        label: agentType
-          .split("-")
-          .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-          .join(" "),
-        capabilities: {
-          oneShotRuns: runtimeProviders.length > 0,
-          durableSessions: runtimeProviders.some((provider) => provider.capabilities.processInput),
-          runtimeProviders: runtimeProviders.map((provider) => provider.name).sort(),
-        },
-      }))
-    })
+    const repositoryGrants = externalAuth?.repositoryGrants
+    const connectedOnboardingService = new ConnectedOnboardingService(
+      store,
+      () => {
+        const runtimeProviders = providerRegistry
+          .list()
+          .filter((provider) => providerAdmission.has(provider.name))
+        return catalog.list().map((agentType) => ({
+          agentType,
+          label: agentType
+            .split("-")
+            .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+            .join(" "),
+          capabilities: {
+            oneShotRuns: runtimeProviders.length > 0,
+            durableSessions: runtimeProviders.some(
+              (provider) => provider.capabilities.processInput,
+            ),
+            runtimeProviders: runtimeProviders.map((provider) => provider.name).sort(),
+          },
+        }))
+      },
+      undefined,
+      undefined,
+      repositoryGrants === undefined
+        ? undefined
+        : (context, force = false) => repositoryGrants.refresh(context, undefined, force),
+    )
     const projectService = new ProjectService(store)
     const connectorDeviceService = new ConnectorDeviceService(store)
     const conversationMirrorService = new ConversationMirrorService(store)
@@ -502,6 +514,14 @@ export const createApplication = async (
     }
     const controlApi = new OpenAPIHono<ApiEnv>()
     controlApi.use("*", authenticate)
+    if (repositoryGrants !== undefined) {
+      controlApi.use("*", async (context, next) => {
+        if (usesProviderDerivedProjectAccess(context.req.path)) {
+          await repositoryGrants.refresh(context.get("requestContext"), context.req.raw.signal)
+        }
+        await next()
+      })
+    }
     controlApi.route("/", createRunRoutes(runService))
     controlApi.route("/", createSessionRoutes(sessionService))
     controlApi.route("/", createProjectRoutes(projectService))
@@ -630,6 +650,7 @@ export const createApplication = async (
 interface ExternalAuthComposition {
   readonly service: ExternalAuthService
   readonly repositoryCredentials?: GitHubRepositoryCredentialResolver
+  readonly repositoryGrants?: GitHubExternalProjectGrantRefresher
 }
 
 const createExternalAuthComposition = async (
@@ -688,9 +709,27 @@ const createExternalAuthComposition = async (
             vault,
             githubAdapter,
           ),
+          repositoryGrants: new GitHubExternalProjectGrantRefresher(store, vault, githubAdapter),
         }),
   }
 }
+
+const usesProviderDerivedProjectAccess = (path: string): boolean =>
+  path !== "/onboarding/repositories/refresh" &&
+  (path === "/me" ||
+    path === "/onboarding" ||
+    path.startsWith("/onboarding/") ||
+    path === "/projects" ||
+    path.startsWith("/projects/") ||
+    path === "/runs" ||
+    path.startsWith("/runs/") ||
+    path === "/sessions" ||
+    path.startsWith("/sessions/") ||
+    path.startsWith("/connector-devices/") ||
+    path.startsWith("/conversation-mirrors/") ||
+    path.startsWith("/presence/") ||
+    path.startsWith("/task-annotations/") ||
+    path.startsWith("/task-relays/"))
 
 const bootstrapLocalIdentity = async (store: Store, key: string | undefined): Promise<void> => {
   if (key === undefined) {
@@ -707,7 +746,7 @@ const bootstrapLocalIdentity = async (store: Store, key: string | undefined): Pr
   const createdAt = new Date().toISOString()
   store.bootstrapIdentity({
     ownerId: LOCAL_BOOTSTRAP_OWNER_ID,
-    ownerName: "Local owner",
+    ownerName: "Owner",
     apiKeyId: LOCAL_BOOTSTRAP_API_KEY_ID,
     apiKeyPrefix: prefix,
     apiKeyHash: await hashApiKey(key),
@@ -753,7 +792,9 @@ const isBrowserSessionConnectorDeviceWrite = (method: string, path: string): boo
 const isBrowserSessionOnboardingWrite = (method: string, path: string): boolean => {
   if (
     method === "POST" &&
-    (path === "/onboarding/agent-connections" || path === "/onboarding/projects")
+    (path === "/onboarding/agent-connections" ||
+      path === "/onboarding/projects" ||
+      path === "/onboarding/repositories/refresh")
   ) {
     return true
   }

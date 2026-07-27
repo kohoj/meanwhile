@@ -56,7 +56,7 @@ test("Run and Session admission reject a workspace from another GitHub Project",
     body: JSON.stringify({
       projectId,
       workspace: wrongWorkspace,
-      agentType: "demo",
+      agentType: "fixture",
       prompt: "Do not run in another repository",
     }),
   })
@@ -69,7 +69,7 @@ test("Run and Session admission reject a workspace from another GitHub Project",
     body: JSON.stringify({
       projectId,
       workspace: wrongWorkspace,
-      agentType: "demo",
+      agentType: "fixture",
     }),
   })
   expect(session.status).toBe(409)
@@ -84,7 +84,7 @@ test("Run and Session admission reject a workspace from another GitHub Project",
         type: "repository",
         url: `${repository.repositoryFullName}.git`.replace(/^/, "https://github.com/"),
       },
-      agentType: "demo",
+      agentType: "fixture",
       prompt: "Stay in the Project repository",
     }),
   })

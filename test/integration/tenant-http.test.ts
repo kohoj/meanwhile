@@ -35,7 +35,7 @@ test("bearer identity enforces tenant isolation at every run-derived HTTP bounda
             },
           ],
         },
-        agentType: "demo",
+        agentType: "fixture",
         prompt: "Produce deterministic output",
         env: {},
         secretRefs: {},

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { homedir } from "node:os"
 import type { RunEvent } from "../../src/api/contracts"
-import { createApplicationHarness, createDemoRun } from "../application-harness"
+import { createApplicationHarness, createFixtureRun } from "../application-harness"
 
 const live = process.env["MEANWHILE_LIVE_LOCAL_OCI"] === "1"
 
@@ -18,7 +18,7 @@ test.skipIf(!live)(
       directoryRoot: homedir(),
     })
     try {
-      const accepted = await createDemoRun(harness, {
+      const accepted = await createFixtureRun(harness, {
         provider: "oci-local",
         prompt: "Complete the deterministic task in the local OCI sandbox",
       })

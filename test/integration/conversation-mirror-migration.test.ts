@@ -86,7 +86,7 @@ function insertLegacyCollaborationFixture(database: Database): void {
     .run("owner-1", "project-1", "principal-1", "maintainer", createdAt, null)
   database.exec(`
     INSERT INTO runs VALUES (
-      'run-1','owner-1','{}','demo','{}','${"0".repeat(64)}','{}','Prompt','{}','{}',
+      'run-1','owner-1','{}','fixture','{}','${"0".repeat(64)}','{}','Prompt','{}','{}',
       'local','[]','[]',1000,NULL,'queued',1,NULL,NULL,NULL,'${createdAt}',NULL,NULL,
       '${createdAt}',NULL,NULL
     );

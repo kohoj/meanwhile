@@ -10,7 +10,7 @@ COPY --chmod=0755 image/pi-acp /opt/meanwhile/bin/pi-acp
 COPY --chmod=0755 image/pi-runtime /opt/meanwhile/bin/pi-runtime
 COPY --chmod=0644 image/pi-settings.json /opt/meanwhile/pi/settings.json
 COPY --chmod=0755 .runner/meanwhile-runner /opt/meanwhile/bin/meanwhile-runner
-COPY --chmod=0755 .runner/meanwhile-demo-agent /opt/meanwhile/bin/meanwhile-demo-agent
+COPY --chmod=0755 .runner/meanwhile-fixture-agent /opt/meanwhile/bin/meanwhile-fixture-agent
 COPY --chmod=0644 .runner/LICENSE .runner/THIRD_PARTY_NOTICES /opt/meanwhile/licenses/
 COPY --chmod=0644 .runner/BUN_VERSION /opt/meanwhile/metadata/BUN_VERSION
 

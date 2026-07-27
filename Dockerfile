@@ -16,7 +16,7 @@ RUN bun install --frozen-lockfile
 COPY runner ./runner
 COPY test/fixtures/acp-agent.ts ./test/fixtures/acp-agent.ts
 RUN bun build runner/main.ts --compile --minify --outfile /meanwhile-runner
-RUN bun build test/fixtures/acp-agent.ts --compile --minify --outfile /meanwhile-demo-agent
+RUN bun build test/fixtures/acp-agent.ts --compile --minify --outfile /meanwhile-fixture-agent
 
 FROM runner AS board
 COPY src ./src
@@ -48,7 +48,7 @@ COPY board/src ./board/src
 COPY --from=board /app/board/dist ./board/dist
 COPY LICENSE THIRD_PARTY_NOTICES /usr/share/doc/meanwhile/
 COPY --from=runner /meanwhile-runner /usr/local/bin/meanwhile-runner
-COPY --from=runner /meanwhile-demo-agent /usr/local/bin/meanwhile-demo-agent
+COPY --from=runner /meanwhile-fixture-agent /usr/local/bin/meanwhile-fixture-agent
 RUN mkdir -p /data && chown -R bun:bun /app /data
 USER bun
 EXPOSE 7331 7332 7333

@@ -23,7 +23,7 @@ external agent. A `Run` carries one owned task to immutable output; an
 conversation. The governing decision filter is the
 [product constitution](docs/product-constitution.md).
 
-> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements connected onboarding, Project Lobby, the Live Deck Project room, source-backed Conversation Detail, immutable addressed Task Relays, Project-visible source-anchored Annotations, and expiring client-scoped PresenceLeases. Optional GitHub App and Google OIDC authorization now use PKCE, exact callbacks, provider-bound sealed state, Board-side login-CSRF correlation, sealed server-side identity credentials, and opaque HttpOnly Meanwhile sessions. A bound private GitHub repository is revalidated immediately before checkout; its user token exists only in the short-lived Git preparation process and is released before the agent starts. ADR 0012's unreleased vertical slice is also implemented in the current source: Board pairing and exact Project consent, an outbound CLI Companion, strict Codex/Claude JSONL adapters, checkpointed ConversationMirror ingestion, Live Deck/Conversation Detail projection, exact offline schema migration, and an opt-in local OCI provider. Deterministic connector fixtures, a machine-local Colima run, and a packaged OCI control-plane run are development receipts only. The same revision still needs clean verification, one real current Codex.app or Claude Code acceptance, configured live GitHub/Google and credentialed-agent receipts, and the [external two-person acceptance](docs/external-collaboration-acceptance.md). Distinct test Principals, fixtures, leases, cookie sessions, and one-machine containers are not evidence that two real people used the deployed product.
+> **Status:** the durable core, durable sessions, local runtime, and Cloudflare runtime are the published `v0.1.3` baseline. The current source implements repository-gated connected onboarding, GitHub-backed Project Lobby rooms, the Live Deck, source-backed Conversation Detail, immutable addressed Task Relays, Project-visible source-anchored Annotations, and expiring client-scoped PresenceLeases. GitHub OAuth and optional Google OIDC authorization use PKCE, exact callbacks, provider-bound sealed state, Board-side login-CSRF correlation, sealed server-side identity credentials, and opaque HttpOnly Meanwhile sessions. A private GitHub repository is revalidated immediately before checkout; its user token exists only in the short-lived Git preparation process and is released before the agent starts. ADR 0012's unreleased vertical slice is also implemented in the current source: Board pairing and exact Project consent, an outbound CLI Companion, strict Codex/Claude JSONL adapters, checkpointed ConversationMirror ingestion, Live Deck/Conversation Detail projection, exact offline schema migration, and an opt-in local OCI provider. Deterministic connector fixtures, a machine-local Colima run, and a packaged OCI control-plane run are development receipts only. The same revision still needs clean verification, one real current Codex.app or Claude Code acceptance, configured live GitHub/Google and credentialed-agent receipts, and the [external two-person acceptance](docs/external-collaboration-acceptance.md). Distinct test Principals, fixtures, leases, cookie sessions, and one-machine containers are not evidence that two real people used the deployed product.
 
 ![Meanwhile routes one-shot runs to immutable artifacts and deployments and durable sessions across ordered turns, with representative ACP agents such as Claude Code, Codex, and Pi plus additional agents, shipped Local and Cloudflare runtimes, and an open runtime-adapter contract.](docs/assets/meanwhile-product-map.webp)
 
@@ -69,7 +69,7 @@ cancel, send, recovery, artifact, or deployment authority.
 
 ## Run it locally
 
-Requires macOS or Linux, [Bun 1.3.13+](https://bun.sh/), and Git. Every Meanwhile application, CLI, Companion, demo, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The current `local` process provider needs no cloud account, but it is **not a security sandbox**. ADR 0012 selects a separate local container/VM provider for isolated owned work and keeps Cloudflare optional.
+Requires macOS or Linux, [Bun 1.3.13+](https://bun.sh/), and Git. Every Meanwhile application, CLI, Companion, proof, proof, and runtime-local runner process executes with Bun. Cloudflare's bridge executes in `workerd`, while its official deployment tooling may carry its own host runtime; neither introduces Node into the product runtime. The current `local` process provider needs no cloud account, but it is **not a security sandbox**. ADR 0012 selects a separate local container/VM provider for isolated owned work and keeps Cloudflare optional.
 
 The fastest way to start the control plane, without cloning anything, is the published package. The standalone runner is compiled once on first start:
 
@@ -131,6 +131,8 @@ before repository identity enforcement must then inspect and apply:
 ```console
 bun run migrate:project-repository-identity -- --database=/absolute/path/to/meanwhile.sqlite
 bun run migrate:project-repository-identity -- --database=/absolute/path/to/meanwhile.sqlite --write
+bun run migrate:progressive-onboarding -- --database=/absolute/path/to/meanwhile.sqlite
+bun run migrate:progressive-onboarding -- --database=/absolute/path/to/meanwhile.sqlite --write
 ```
 
 The final step rejects ambiguous duplicate GitHub repository bindings rather
@@ -202,7 +204,7 @@ bun run proof:deployed-collaboration:verify -- \
 To exercise the complete no-account path in one command:
 
 ```console
-bun run demo
+bun run proof:local
 ```
 
 That command creates a run, follows logs, captures an artifact, deploys it through `local-static`, and fetches the preview.
@@ -515,7 +517,7 @@ Meanwhile is harness-neutral because the runtime-local `meanwhile-runner` speaks
 
 `config/agents.json` is the only active launch catalog. Each entry declares a bare PATH executable, argv, working-directory policy, capabilities, and allowed environment names. The accepted definition and its digest are snapshotted into the run, so a queued or recovering run cannot silently change when the catalog changes.
 
-The checkout ships a deterministic `demo` agent. Copy the required entries from [docs/agents.example.json](docs/agents.example.json) after installing the corresponding ACP adapters in the runtime image:
+The active catalog exposes real ACP integrations only. The default catalog includes Codex and Claude Code; each deployment must install the matching adapter in its runtime image. [docs/agents.example.json](docs/agents.example.json) contains additional supported shapes:
 
 ```json
 {
@@ -543,10 +545,10 @@ The checkout ships a deterministic `demo` agent. Copy the required entries from 
 
 Claude Code, Pi, and Hermes use the same shape with `claude-agent-acp`, `pi-acp`, and `hermes-acp`. A tool without native ACP needs a small explicit adapter executable; agent-specific output parsing never belongs in the control plane.
 
-The local provider intentionally has no credential-mediation claim. It runs the deterministic, no-account proof only:
+The local provider intentionally has no credential-mediation claim. The local proof therefore supplies its own test-only deterministic fixture instead of advertising it as a product agent:
 
 ```console
-bun run demo
+bun run proof:local
 bun run proof:release
 ```
 
@@ -783,12 +785,12 @@ are deterministic fixtures and are never a live-provider, deployment, or
 external-human acceptance claim. Its first-task gate still enforces product
 truth: all 34 checks require every Live Deck card to resolve its own native event history, the
 created Run enters as running, every fixture Agent event occurs after acceptance, and no
-transcript can reuse another task's conversation. Fixture IDs and authored demo conversations
+transcript can reuse another task's conversation. Fixture IDs and authored proof conversations
 remain confined to the preview data plane; production components do not recognize them.
 
 ```console
 bun run check                       # Biome, types, notices, runner builds, deterministic suite
-bun run demo                        # no-account product path
+bun run proof:local                        # no-account product path
 bun run board:journey:check         # complete deterministic connected collaboration browser contract
 bun run proof:release               # semantic round trip, telemetry, restart, backup/restore
 bun run proof:project-collaboration # three Principals, Board auth, restart, backup/restore
@@ -802,7 +804,7 @@ bun run proof:release:cloudflare:pi     # credentialed live Pi agent
 bun run proof:verify -- .proof/cloudflare-codex.json
 ```
 
-Every release-proof command rebuilds the standalone runner and demo agent first; it never accepts a prior `dist/` directory as an implicit prerequisite.
+Every release-proof command rebuilds the standalone runner and test-only fixture agent first; it never accepts a prior `dist/` directory as an implicit prerequisite.
 
 The release proof sends a revision-bound token through ACP, structurally verifies the durable response, downloads immutable agent output through the public SDK, promotes one exact entry to a Brief, and proves a separate run can carry that frozen historical evidence into new immutable output. It then deploys the source bytes through the SDK to the explicit `local-static` target and fetches the returned control-plane preview URL. It also validates OTLP trace and metric semantics, correlated structured logs, byte-scans the live data root and backup for exact private values, verifies exact status and replay evidence, destroys both one-shot runtimes, restarts, restores into an empty data root, and boots again successfully.
 
@@ -818,19 +820,19 @@ The deterministic suite separately covers owner isolation, lifecycle transitions
 
 Meanwhile `v0.1.3` is the current public release baseline. The complete credential-free local product path, durable sessions, the delegator's board, and the packaged Cloudflare topology are implemented. Deterministic Cloudflare compatibility and each credential-bearing Codex, Claude Code, and Pi path have separate release gates; only a successful clean-revision receipt from the corresponding current command is evidence for that revision. A configured command, installed executable, historical run, or green deterministic CI job is not current live-agent evidence. This branch intentionally carries one current data and execution contract with no alternate path; the release baseline is not a blanket production-support promise.
 
-The current Board opens with GitHub/Google sign-in when configured, otherwise the explicit installation-access fallback, then connected onboarding, a truthful Project Lobby, and Live Deck. External registration is an installation choice: `closed` preserves pre-provisioned/invited Principals, while `open` lets a verified provider subject create one stable member Principal inside the configured Owner. Neither mode lets the subject choose a tenant. Every collaboration Project is the Owner-unique room for one immutable GitHub repository ID. GitHub access is projected at request time from a current repository grant matching that binding; it is never copied into durable membership or lifecycle authority. Repository rename, URL refresh, or App reinstallation updates metadata and authority without forking the room. A repository administrator can add an authorized repository to the Lobby atomically, after which matching users enter as `watch`, `participate`, or `administer`; duplicate import and Project rebinding fail closed. Opening `/join/<secret>` still provides the closed-mode invitation path and atomically links the selected identity; only its digest is stored. In team mode the resulting opaque, expiring browser session stays in an HttpOnly SameSite cookie. The session is deny-by-default and grants only capabilities justified by current Project access, while cancellation and other lifecycle commands remain restricted to the immutable original delegator. Private checkout revalidates and uses the delegator's own short-lived GitHub credential, never the room creator's token. The room composer derives the repository from the Project binding and cannot accept a manual repository URL. Run/Session admission rejects a different repository. The supported Companion proves the selected local transcript's GitHub origin before publishing it as a Linked conversation. Conversation Detail implements foldable agent work, exact text selection, marginalia, and addressed Relay; the room rail reads the latest Project-visible Relays independently of the current person's pending inbox. The optional `MEANWHILE_API_KEY` mode remains available for private local single-user and operator workflows.
+The current Board opens with GitHub/Google sign-in when configured, otherwise the explicit deployment-local access fallback, then connected onboarding, a truthful Project Lobby, and Live Deck. External registration defaults to `open`: a verified provider subject atomically receives one stable member Principal inside the configured Owner; private deployments may explicitly choose `closed`. Neither mode lets the subject choose a tenant or creates a synthetic Project. GitHub uses one ordinary OAuth App configured by the deployment, so users sign in and approve `read:user repo` without installing an App. Onboarding remains blocked until the person imports and selects at least one accessible repository-backed Project. Every Project card represents the Owner-unique room for one immutable GitHub repository ID; unbound operator or legacy Projects never enter the collaboration Lobby. GitHub access is projected at request time from a current repository grant matching that binding; it is never copied into durable membership or lifecycle authority. A repository administrator can add an authorized repository to the Lobby atomically, after which matching users enter as `watch`, `participate`, or `administer`; duplicate import and Project rebinding fail closed. Opening `/join/<secret>` still provides the closed-mode invitation path and atomically links the selected identity; only its digest is stored. In team mode the resulting opaque, expiring browser session stays in an HttpOnly SameSite cookie. The session is deny-by-default and grants only capabilities justified by current Project access, while cancellation and other lifecycle commands remain restricted to the immutable original delegator. Private checkout revalidates and uses the delegator's own sealed GitHub credential, never the room creator's token. The room composer always derives its repository from the Project binding and never accepts a manual URL. Companion proves the selected local transcript's matching GitHub origin before sharing. Conversation Detail implements foldable agent work, exact text selection, marginalia, and addressed Relay; the room rail reads the latest Project-visible Relays independently of the current person's pending inbox. The optional `MEANWHILE_API_KEY` mode remains available for private local single-user and operator workflows, but it does not bypass repository onboarding in the Board.
 
 When an invitation is opened over an existing Board session, the invitation
 becomes the explicit foreground intent until the viewer accepts it with a
 provider identity or keeps the current session. Meanwhile never merges the two
-Principals implicitly, and installation access cannot redeem an invitation.
+Principals implicitly, and deployment-local access cannot redeem an invitation.
 
 The deterministic suite proves interrupt, per-turn timeout, replay, and cleanup semantics against replaceable providers. Local release evidence proves the complete host-process product path. Cloudflare release evidence proves one ACP identity across two turns, event replay, cleanup, and control-plane restart on real remote compute; the separate live lifecycle test proves remote hard termination and credential mediation. Cloudflare evidence is bound to bridge protocol v6, an exact runner digest, and the deployed image reference/digest; these remain operator/platform assertions rather than remote attestation.
 
 Before broad multi-tenant production use, the project still needs:
 
 - the complete Shared Project release proof: distinct people, same-Project visibility, non-member isolation, credential rotation, membership revocation, deployed Board access, restart, backup, and restore on one clean revision;
-- a current clean-revision live GitHub App and Google OIDC receipt, GitHub
+- a current clean-revision live GitHub OAuth and Google OIDC receipt, GitHub
   revocation-webhook acceleration, and relink UX before GitHub-backed Lobby
   access may be claimed as production accepted;
 - automated package publication tied to verified release receipts;
@@ -859,7 +861,7 @@ Meanwhile's direction is to be the durable, trustworthy layer *under* agent work
   controls, offline migration, and opt-in OCI provider are implemented. Re-run
   all receipts from one clean revision, exercise one real current local source,
   and complete two-person acceptance before making a release claim.
-- **Next — live GitHub-backed Lobby acceptance.** Prove two independently authorized people see the same repository room, exercise rename, App reinstallation, provider revocation/relink, private checkout, and wrong-repository rejection on a deployed clean revision. Confirm that GitHub supplies repository identity and eligibility without becoming the hosted Meanwhile control plane.
+- **Next — live GitHub-backed Lobby acceptance.** Prove two independently authorized people see the same repository room, exercise rename, OAuth revocation/relink, private checkout, and wrong-repository rejection on a deployed clean revision. Confirm that GitHub supplies repository identity and eligibility without becoming the hosted Meanwhile control plane.
 - **Then — Project-scoped execution intelligence.** Bind Brief discovery and reuse to the source Project before adding fact discovery, conflict/supersession, or explicit cross-Project sharing.
 - **Then — an open integration contract.** Let external boards, IDEs, and chat entry points consume the Project and durable execution APIs instead of rebuilding identity, credentials, audit, recovery, and evidence.
 
@@ -875,6 +877,7 @@ external acceptance, review, and publication complete. Later lines are intent.
 - [Project Lobby and GitHub directory ADR](docs/decisions/0007-project-lobby-and-github-directory.md) — provider authority split, tenant boundary, permission mapping, and delivery slices
 - [Provider-derived Project access ADR](docs/decisions/0011-provider-derived-project-access.md) — owner-scoped registration, repository import, effective participant access, and per-delegator checkout authority
 - [Local Companion and Conversation Mirror ADR](docs/decisions/0012-local-companion-conversation-mirrors.md) — existing Codex/Claude observation, device consent, exact replay, truthful UI custody, and local-first sandboxing
+- [Repository-gated onboarding and GitHub OAuth ADR](docs/decisions/0013-progressive-onboarding-and-github-oauth.md) — default-open identity registration, mandatory real repository selection, and bounded checkout
 - [Product constitution](docs/product-constitution.md) — product soul, primary object, laws, and active decision gate
 - [External collaboration acceptance](docs/external-collaboration-acceptance.md) — real two-person journey, independent attestations, and exact release claim boundary
 - [Provider contract](docs/provider-contract.md) — implement and prove a runtime adapter

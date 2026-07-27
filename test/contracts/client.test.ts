@@ -45,7 +45,7 @@ describe("Meanwhile client contract", () => {
     const run = await client.runs.create(
       {
         workspace: { type: "bundle", artifactId: "a".repeat(64) },
-        agentType: "demo",
+        agentType: "fixture",
         prompt: "make it work",
         provider: "local",
         briefIds: ["f".repeat(64)],
@@ -449,7 +449,6 @@ describe("Meanwhile client contract", () => {
       provider: "github" as const,
       accountId: "42",
       accountName: "kohoz",
-      installationId: "84",
       repositoryId: "126",
       repositoryName: "meanwhile",
       repositoryFullName: "kohoz/meanwhile",
@@ -478,9 +477,10 @@ describe("Meanwhile client contract", () => {
           path: url.pathname,
           body: init?.body === undefined ? null : JSON.parse(String(init.body)),
         })
-        if (method === "GET") {
+        if (method === "GET" || url.pathname === "/onboarding/repositories/refresh") {
           return Response.json({
             principal,
+            repositoryConnection: null,
             identities: [],
             repositoryGrants: [],
             repositoryBindings: [binding],
@@ -510,6 +510,7 @@ describe("Meanwhile client contract", () => {
     expect((await client.onboarding.get()).projects).toEqual([
       { project, access: "administer", source: "membership", selected: true },
     ])
+    expect((await client.onboarding.refreshRepositories()).repositoryConnection).toBeNull()
     expect(await client.onboarding.connectAgent("codex")).toEqual(connection)
     expect(await client.onboarding.selectProject(projectId, true)).toEqual(selection)
     expect(await client.onboarding.bindRepository(projectId, grantId)).toEqual(binding)
@@ -525,6 +526,7 @@ describe("Meanwhile client contract", () => {
     })
     expect(requests).toEqual([
       { method: "GET", path: "/onboarding", body: null },
+      { method: "POST", path: "/onboarding/repositories/refresh", body: null },
       { method: "POST", path: "/onboarding/agent-connections", body: { agentType: "codex" } },
       {
         method: "PUT",

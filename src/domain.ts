@@ -44,6 +44,8 @@ export interface PrincipalSummary {
   readonly id: string
   readonly kind: PrincipalKind
   readonly displayName: string
+  /** Provider-owned portrait used only for presentation; it never contributes authority. */
+  readonly avatarUrl?: string | null
 }
 
 export interface Project {
@@ -342,7 +344,8 @@ export interface IdentityCredential {
   readonly provider: "github"
   readonly sealedPayload: string
   readonly keyVersion: string
-  readonly accessExpiresAt: Timestamp
+  /** Null means the provider declared no expiry; revocation is still revalidated on use. */
+  readonly accessExpiresAt: Timestamp | null
   readonly refreshExpiresAt: Timestamp | null
   readonly createdAt: Timestamp
   readonly updatedAt: Timestamp
@@ -361,7 +364,6 @@ export interface ExternalProjectGrant {
   readonly provider: "github"
   readonly accountId: string
   readonly accountName: string
-  readonly installationId: string
   readonly repositoryId: string
   readonly repositoryName: string
   readonly repositoryFullName: string
@@ -382,7 +384,6 @@ export interface ProjectRepositoryBinding {
   readonly provider: "github"
   readonly accountId: string
   readonly accountName: string
-  readonly installationId: string
   readonly repositoryId: string
   readonly repositoryName: string
   readonly repositoryFullName: string

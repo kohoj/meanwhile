@@ -22,11 +22,11 @@ afterEach(async () => {
 
 describe("release proof receipt", () => {
   test("classifies local, remote compatibility, and live-agent evidence without model claims", () => {
-    expect(releaseProofClass("local", "demo")).toBe("local-control-plane")
-    expect(releaseProofClass("cloudflare", "demo")).toBe("remote-provider-compatibility")
+    expect(releaseProofClass("local", "fixture")).toBe("local-control-plane")
+    expect(releaseProofClass("cloudflare", "fixture")).toBe("remote-provider-compatibility")
     expect(releaseProofClass("cloudflare", "codex")).toBe("remote-live-agent")
     expect(() => releaseProofClass("local", "codex")).toThrow(
-      "Local release proof supports only the demo agent",
+      "Local release proof supports only the fixture agent",
     )
 
     const live = createReleaseProofReceipt(proofInput("cloudflare", "codex"))
@@ -55,7 +55,7 @@ describe("release proof receipt", () => {
   })
 
   test("detects any mutation of accepted evidence", () => {
-    const receipt = createReleaseProofReceipt(proofInput("local", "demo"))
+    const receipt = createReleaseProofReceipt(proofInput("local", "fixture"))
     expect(verifyReleaseProofReceipt(receipt)).toEqual(receipt)
 
     const mutated = structuredClone(receipt)
@@ -66,7 +66,7 @@ describe("release proof receipt", () => {
   })
 
   test("emits version 2 Brief evidence while retaining version 1 verification", () => {
-    const current = createReleaseProofReceipt(proofInput("local", "demo"))
+    const current = createReleaseProofReceipt(proofInput("local", "fixture"))
     expect(RELEASE_PROOF_RECEIPT_VERSION).toBe(2)
     expect(current.schemaVersion).toBe(2)
     if (current.schemaVersion !== 2) throw new Error("Expected a version 2 receipt")
@@ -145,9 +145,9 @@ describe("release proof receipt", () => {
 
 function proofInput(
   provider: "local" | "cloudflare",
-  agent: "demo" | "codex" | "claude-code" | "pi",
+  agent: "fixture" | "codex" | "claude-code" | "pi",
 ): Parameters<typeof createReleaseProofReceipt>[0] {
-  const fixture = agent === "demo"
+  const fixture = agent === "fixture"
   const remote = provider === "cloudflare"
   return {
     proofClass: releaseProofClass(provider, agent),
@@ -156,7 +156,7 @@ function proofInput(
     provider,
     agent: {
       type: agent,
-      adapter: fixture ? "meanwhile-demo-agent" : `${agent}-acp@1.0.0`,
+      adapter: fixture ? "meanwhile-fixture-agent" : `${agent}-acp@1.0.0`,
       runtime: fixture ? "bun@1.3.13" : `${agent}@1.0.0`,
       authenticationEvidence: fixture ? "not-required" : "brokered credential",
       executionEvidence: fixture ? "deterministic-fixture" : "credentialed-live-agent",

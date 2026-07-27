@@ -27,16 +27,24 @@ describe("control-plane restart reconciliation", () => {
     const first = await application(config)
     applications.push(first)
     const request = authorized(first, key.key)
+    const projectResponse = await request("/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Restart Project", slug: "restart-project" }),
+    })
+    expect(projectResponse.status).toBe(201)
+    const projectId = ((await projectResponse.json()) as { project: { id: string } }).project.id
 
     const create = await request("/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        projectId,
         workspace: {
           type: "files",
           files: [{ path: "README.md", contentBase64: Buffer.from("restart").toString("base64") }],
         },
-        agentType: "demo",
+        agentType: "fixture",
         prompt: "survive restart",
         env: { FIXTURE_DELAY_MS: "1200" },
         secretRefs: {},
@@ -86,7 +94,7 @@ const applicationConfig = (root: string, key: string): AppConfig => ({
   deploymentDir: join(root, "deployments"),
   apiKey: key,
   runnerPath: resolve("dist/meanwhile-runner"),
-  agentCatalogPath: resolve("config/agents.json"),
+  agentCatalogPath: resolve("test/fixtures/agents.json"),
   defaultProvider: "local",
   runConcurrency: 2,
   sessionConcurrency: 2,

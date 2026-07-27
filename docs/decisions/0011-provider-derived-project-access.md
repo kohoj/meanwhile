@@ -1,6 +1,6 @@
 # ADR 0011: Owner-scoped registration and provider-derived Project access
 
-- Status: accepted
+- Status: accepted; GitHub authentication mechanism amended by ADR 0013
 - Date: 2026-07-24
 
 ## Context

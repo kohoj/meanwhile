@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite"
-import { SCHEMA_SQL, splitSchemaSql } from "../src/persistence/schema"
+import { githubAppSchemaStatements } from "./progressive-onboarding-schema"
 
 const MIRROR_OBJECTS = new Set([
   "connector_devices",
@@ -15,7 +15,7 @@ const MIRROR_OBJECTS = new Set([
 
 /** The exact schema immediately before ConversationMirror was introduced. */
 export function preConversationMirrorSchemaStatements(): readonly string[] {
-  return splitSchemaSql(SCHEMA_SQL).flatMap((statement) => {
+  return githubAppSchemaStatements().flatMap((statement) => {
     const name = schemaObjectName(statement)
     if (name !== null && MIRROR_OBJECTS.has(name)) return []
     if (name === "task_relays") return [withoutMirrorReference(statement)]
@@ -102,14 +102,14 @@ export function migrateConversationMirrorSchema(database: Database): void {
 }
 
 function statementsNamed(names: ReadonlySet<string>): readonly string[] {
-  return splitSchemaSql(SCHEMA_SQL).filter((statement) => {
+  return githubAppSchemaStatements().filter((statement) => {
     const name = schemaObjectName(statement)
     return name !== null && names.has(name)
   })
 }
 
 function schemaTableStatement(table: string): string {
-  const statement = splitSchemaSql(SCHEMA_SQL).find(
+  const statement = githubAppSchemaStatements().find(
     (candidate) => schemaObjectName(candidate) === table && /^CREATE\s+TABLE\b/i.test(candidate),
   )
   if (statement === undefined) throw new Error(`Current schema is missing ${table}`)

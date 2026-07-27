@@ -4,7 +4,7 @@ import { Meanwhile } from "../../src/client"
 import {
   type ApplicationHarness,
   createApplicationHarness,
-  createDemoRun,
+  createFixtureRun,
 } from "../application-harness"
 
 const harnesses: ApplicationHarness[] = []
@@ -17,7 +17,7 @@ describe("complete public resource boundary", () => {
   test("retrieves immutable artifact entries and hides them across owners", async () => {
     const harness = await application()
     const client = sdk(harness)
-    const run = await createDemoRun(harness)
+    const run = await createFixtureRun(harness)
     await client.runs.wait(run.id, { timeoutMs: 10_000, pollIntervalMs: 10 })
     const [artifact] = await client.artifacts.list(run.id)
     expect(artifact).toBeDefined()
@@ -44,7 +44,7 @@ describe("complete public resource boundary", () => {
     expect(createdKey.secret).toStartWith(`${createdKey.key.prefix}_`)
     expect((await client.apiKeys.list()).map(({ id }) => id)).toContain(createdKey.key.id)
 
-    const run = await createDemoRun(harness)
+    const run = await createFixtureRun(harness)
     await client.runs.wait(run.id, { timeoutMs: 10_000, pollIntervalMs: 10 })
     const deployment = await client.deployments.create(
       {

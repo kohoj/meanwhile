@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import {
   type ApplicationHarness,
   createApplicationHarness,
-  createDemoRun,
+  createFixtureRun,
 } from "../application-harness"
 
 let harness: ApplicationHarness | null = null
@@ -15,7 +15,7 @@ afterEach(async () => {
 describe("running cancellation", () => {
   test("persists intent, signals the runner, claims cancelled once, and schedules cleanup", async () => {
     harness = await createApplicationHarness()
-    const created = await createDemoRun(harness, { env: { FIXTURE_DELAY_MS: "10000" } })
+    const created = await createFixtureRun(harness, { env: { FIXTURE_DELAY_MS: "10000" } })
     await harness.waitForRun(created.id, ["running"])
 
     const response = await harness.request(`/runs/${created.id}/cancel`, { method: "POST" })

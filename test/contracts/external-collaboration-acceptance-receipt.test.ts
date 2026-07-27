@@ -95,7 +95,7 @@ describe("external collaboration acceptance receipt", () => {
     expect(() =>
       createExternalCollaborationParticipantAttestation({
         ...participantInput("first"),
-        work: { ...participantInput("first").work, ownAgentType: "demo" },
+        work: { ...participantInput("first").work, ownAgentType: "fixture" },
       }),
     ).toThrow()
     expect(() =>
@@ -295,7 +295,7 @@ function deployedInput(): Parameters<typeof createDeployedCollaborationProofRece
       controlPlaneTransport: "https",
       boardTransport: "https",
       runtimeProvider: "local",
-      agentType: "demo",
+      agentType: "fixture",
       boardBoundary: "project-watch-bff",
     },
     identities: {

@@ -104,6 +104,7 @@ export async function runTranscriptCompanion(
       options.source === "codex" ? codexTranscriptNormalizer : claudeCodeTranscriptNormalizer
     const redactionOptions: TranscriptRedactionOptions = {
       knownSecrets: [options.connectorSecret],
+      homePaths: [conversation.workspacePath],
     }
     const normalizer = redactingNormalizer(sourceNormalizer, redactionOptions)
     const initialRead =

@@ -220,7 +220,7 @@ describe("end-to-end secret boundary", () => {
             },
           ],
         },
-        agentType: "demo",
+        agentType: "fixture",
         prompt: "Attempt local execution with a credential",
         env: {},
         secretRefs: { TEST_RUNNER_SECRET: `env://${sourceName}` },
@@ -247,7 +247,7 @@ describe("end-to-end secret boundary", () => {
     try {
       harness = await createApplicationHarness()
       const shared = {
-        agentType: "demo",
+        agentType: "fixture",
         prompt: "exfiltrate the control-plane credential",
         env: {},
         provider: "local",

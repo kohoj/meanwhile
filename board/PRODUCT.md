@@ -31,9 +31,15 @@ implements exact transcript selection, Project-visible marginalia, and the
 vertical annotation rail. Streamdown renders readable agent output, and working
 notes, tool calls, plans, usage, and system facts remain structurally foldable.
 No second task lifecycle, transcript store, or Project activity journal exists.
-No production component may recognize a fixture ID or substitute authored demo turns, facts,
+No production component may recognize a fixture ID or substitute authored proof turns, facts,
 annotations, handoffs, durations, or timestamps. Visual previews are projections of the same
 native task events and collaboration records used outside the fixture environment.
+An active GitHub identity owns human presentation as well as sign-in proof: its
+current profile name and avatar appear consistently across every surface. The
+halftone texture is a Board treatment applied to that provider image, never a
+replacement portrait. No stock human face or fixture agent may ship in the
+production asset/catalog surface; an identity without an image uses a neutral
+monogram.
 In team mode each person signs in through an already-linked GitHub/Google
 identity when configured, or exchanges their own API key once for a short-lived
 opaque browser session. The Board keeps only that session in an HttpOnly,
@@ -47,12 +53,13 @@ PresenceLease heartbeat/release, and session self-revocation. Run
 creation derives the immutable delegator from the session Principal and Project
 access; browser input cannot name another delegator.
 
-External registration is an explicit installation policy. In `closed` mode the
+External registration is an explicit deployment policy. `open` is the
+friction-minimizing default: one verified GitHub or Google subject atomically
+receives a stable Principal but no Project. In `closed` mode the
 operator uses the public CLI/API to create a stable Principal and issue either
 one digest-backed invitation for provider identity binding or a separate
-revocable installation key. In `open` mode one verified GitHub or Google
-subject creates exactly one stable member Principal inside the configured
-Owner; the subject cannot select a tenant or fabricate Project access. An
+revocable deployment-local key. The subject cannot select a tenant or fabricate
+access to another person's Project. An
 invitation is accepted only through GitHub or Google; it never merges an
 existing Board identity or falls back to an API key. Subsequent visits can use
 the linked identity directly. An entered Project can delegate a one-shot Run
@@ -60,14 +67,22 @@ through the same public API used by the CLI and SDK. Neither surface invents aut
 self-delegation, Relay writes, and cross-member lifecycle denial are enforced by
 the control plane.
 
-ADR 0007 selects a GitHub App as an optional repository directory; ADR 0009
+ADR 0013 replaces the per-user GitHub App prerequisite with ordinary GitHub
+OAuth while preserving repository-gated Project admission; ADR 0009
 separates ExternalIdentity, IdentityCredential, ExternalProjectGrant,
 ProjectRepositoryBinding, AgentConnection, PresenceLease, and Annotation. The
 provider-neutral repository directory, permission normalization, durable
 ExternalIdentity/grant/binding records, agent connections, Project selection,
-and expiring client-scoped PresenceLeases are implemented. Local bootstrap now
-runs the full onboarding-to-first-task path; a bound repository and selected
-agent flow into delegation without browser-held repository credentials.
+and expiring client-scoped PresenceLeases are implemented. Local bootstrap does
+not bypass onboarding: the Lobby opens only after a real GitHub repository has
+been imported and selected. That bound repository flows into delegation without
+browser-held repository credentials. Expired repository-directory observations
+refresh from the sealed GitHub credential at the request-time authorization
+boundary, so an internal ten-minute cache never turns into another sign-in.
+Repository management distinguishes provider outage, rejected authorization,
+and a valid empty directory; it exposes search and explicit refresh for large or
+newly changed GitHub accounts. Reopening setup from the Lobby uses management
+copy and a direct return path instead of replaying `First entry`.
 ADR 0010 implements GitHub/Google OAuth/OIDC with PKCE, sealed
 IdentityCredential storage, exact login/link callback boundaries, grant
 revalidation, one-time Principal invitation binding, and Project-bound private
@@ -80,12 +95,11 @@ Online state is derived only from active PresenceLeases, never membership. The
 Northstar three-person state is an explicit deterministic lease fixture.
 
 Project selection is a personal Lobby preference and stays independent from
-Project repository governance. GitHub-backed and unbound local Projects may be
-selected together. Only a Project maintainer with an `administer` repository
+Project repository governance. Only repository-bound Projects are selectable;
+there is no Default or Personal Project card. A Project maintainer with an `administer` repository
 grant or a current provider-derived `administer` participant may bind or replace
 a Project repository; other participants see an existing binding as read-only
-context. A GitHub grant never makes an unrelated local Project incomplete and
-never becomes durable membership.
+context. A GitHub grant never becomes durable membership.
 
 Delegation stays inside the room's spatial model. `New task` opens one angular
 acrylic modal over the originating Live Deck or Conversation Detail instead of
@@ -93,7 +107,9 @@ switching back to the retired Project Watch shell. Cancel restores the source
 surface and trigger focus; acceptance refreshes authoritative Project work and
 opens the created Run's native transcript. The modal exposes the immutable
 Principal → agent custody boundary before submit and makes the underlying room
-inert while it owns focus.
+inert while it owns focus. A room without an authorized agent remains watchable;
+the composer states the missing capability and routes directly to connections
+instead of presenting an unexplained disabled submit action.
 
 That accepted transcript must belong to the created Run in time and meaning.
 Every displayed Agent event occurs after the Run's acceptance instant, and a
@@ -163,7 +179,9 @@ from the shared recent context.
 ## What should this feel like?
 
 The Lobby is a quiet shared hall where every door is one real Project and
-activity is legible before entry. Inside a room, Meanwhile feels like a shared
+activity is legible before entry. A persistent **Add project** action returns
+to repository selection without hiding this core action inside the account
+menu. Inside a room, Meanwhile feels like a shared
 live deck: pearlescent light, angular translucent conversation sheets,
 recognizable human seats, restrained agent color, and one bottom room rail that
 makes co-presence and recent handoff legible without turning the product into a
@@ -210,6 +228,14 @@ same work."**
   editorial identity layer, Roboto Condensed Variable owns conversational
   reading, and IBM Plex Mono owns code and operational metadata. All three are
   bundled, so line wrapping and density do not drift with the host system.
+  [`src/ui/design-tokens.css`](src/ui/design-tokens.css) is the single source of
+  truth for those roles and for the complete type, spacing, control, radius,
+  shadow, motion, and layer scales. Product CSS consumes semantic roles rather
+  than local pixel values: operational labels never fall below `11px`, working
+  prose defaults to `15px / 24px`, display sizes respond through the shared
+  scale, and layout spacing follows a `4px` unit with an `8px` reading baseline.
+  A new surface extends the tokens only when it introduces a genuinely new
+  semantic role; it does not introduce another font family or private scale.
 
 - **Conversation before management.** Live Deck puts the human-agent exchange,
   not a status dashboard, at the center of every work item. Explicit text still

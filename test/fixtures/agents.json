@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "agents": {
+    "fixture": {
+      "transport": "stdio",
+      "executable": "meanwhile-fixture-agent",
+      "args": [],
+      "workingDirectory": "workspace",
+      "capabilities": {
+        "filesystem": true,
+        "terminal": false
+      },
+      "envNames": [
+        "FIXTURE_DELAY_MS",
+        "FIXTURE_REQUEST_PERMISSION",
+        "FIXTURE_MALFORMED_OUTPUT",
+        "FIXTURE_OVERSIZED_BYTES",
+        "FIXTURE_OUTPUT_PATH"
+      ],
+      "networkPolicy": {
+        "allowedHosts": []
+      },
+      "credentials": [
+        {
+          "environmentVariable": "TEST_RUNNER_SECRET",
+          "host": "example.com",
+          "methods": ["POST"]
+        }
+      ]
+    }
+  }
+}

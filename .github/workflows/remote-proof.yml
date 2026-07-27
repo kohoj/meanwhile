@@ -6,10 +6,10 @@ on:
       agent:
         description: Proof class and bundled ACP toolchain
         required: true
-        default: demo
+        default: fixture
         type: choice
         options:
-          - demo
+          - fixture
           - codex
           - claude-code
           - pi

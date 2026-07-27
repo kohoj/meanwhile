@@ -43,7 +43,7 @@ const deployedCollaborationProofPayloadSchema = z
         controlPlaneTransport: z.literal("https"),
         boardTransport: z.literal("https"),
         runtimeProvider: z.literal("local"),
-        agentType: z.literal("demo"),
+        agentType: z.literal("fixture"),
         boardBoundary: z.literal("project-watch-bff"),
       })
       .strict(),

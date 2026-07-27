@@ -14,19 +14,22 @@ import type {
   TaskRelay,
 } from "@kohoz/meanwhile/contracts";
 import { code } from "@streamdown/code";
-import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/newsreader/wght.css";
 import "@fontsource-variable/roboto-condensed/wght.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/600.css";
 import {
+  ArrowLeft,
   ArrowRight,
+  ArrowsClockwise,
   Check,
   Copy,
   Desktop,
   GithubLogo,
   GoogleLogo,
   Key,
+  MagnifyingGlass,
+  Plus,
   Robot,
   Stack,
 } from "@phosphor-icons/react";
@@ -48,10 +51,6 @@ import useSWR from "swr";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
 import liveDeckBackground from "./assets/live-deck-background.png";
-import seatAgent from "./assets/seat-agent.png";
-import seatAlice from "./assets/seat-alice.png";
-import seatBob from "./assets/seat-bob.png";
-import seatPriya from "./assets/seat-priya.png";
 import { ConversationDetail } from "./conversation-detail";
 import { LiveDeckRoom } from "./live-deck";
 import {
@@ -71,12 +70,12 @@ import {
   taskAttention,
 } from "./presentation";
 import { useBoard } from "./store";
+import { AgentPortrait, PersonPortrait } from "./portrait";
 import "./styles.css";
 import { composeTranscript, type TranscriptDetail, workSummary } from "./transcript";
 
 type BoardRow = PresentedBoardRow;
 const NO_RELAYS: readonly TaskRelay[] = [];
-const HUMAN_SEAT_ASSETS = [seatAlice, seatBob, seatPriya] as const;
 const SIGNAL_FIELD_PALETTE = [
   "#f9f6f1",
   "#f9f5f0",
@@ -140,6 +139,7 @@ const SignalField: React.FC = () => (
 interface IdentityShape {
   readonly id: string;
   readonly displayName: string;
+  readonly avatarUrl?: string | null;
 }
 
 interface ExternalAuthProvidersResponse {
@@ -150,6 +150,26 @@ interface ExternalAuthProvidersResponse {
   readonly registration: "closed" | "open";
   readonly invitationReady: boolean;
 }
+
+const externalIdentityName = (
+  identity: ExternalIdentity | undefined,
+  fallback: string,
+): string => identity?.displayName ?? identity?.login ?? fallback;
+
+const identityFromProvider = (
+  principal: IdentityShape,
+  identity: ExternalIdentity | undefined,
+): IdentityShape => ({
+  ...principal,
+  displayName: externalIdentityName(identity, principal.displayName),
+  avatarUrl: identity?.avatarUrl ?? principal.avatarUrl ?? null,
+});
+
+const externalIdentityProof = (identity: ExternalIdentity): string => {
+  const provider = identity.provider === "github" ? "GitHub" : "Google";
+  const account = identity.login ?? identity.displayName;
+  return account === null ? provider : `${provider} · ${identity.login === null ? account : `@${account}`}`;
+};
 
 const callbackAuthError = (): string | null => {
   const code = new URLSearchParams(window.location.search).get("auth_error");
@@ -213,29 +233,18 @@ const transitionSurface = (update: () => void): void => {
   documentWithTransitions.startViewTransition(apply);
 };
 
-const stableSeatIndex = (identity: IdentityShape): number => {
-  const knownName = identity.displayName.toLocaleLowerCase();
-  if (knownName.includes("alice")) return 0;
-  if (knownName.includes("bob") || knownName.includes("owner")) return 1;
-  if (knownName.includes("priya")) return 2;
-  let hash = 0;
-  for (const character of identity.id) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
-  return hash % HUMAN_SEAT_ASSETS.length;
-};
-
 const SeatMark: React.FC<{
   identity?: IdentityShape;
   agent?: boolean;
   size?: "small" | "medium" | "large";
 }> = ({ identity, agent = false, size = "medium" }) => {
-  const src = agent
-    ? seatAgent
-    : HUMAN_SEAT_ASSETS[stableSeatIndex(identity ?? { id: "unknown", displayName: "Member" })];
-  return (
-    <span className={`seat-mark ${size} ${agent ? "agent-seat" : "human-seat"}`} aria-hidden="true">
-      <img src={src} alt="" />
-    </span>
-  );
+  const className = `seat-mark ${size} ${agent ? "agent-seat" : "human-seat"}`;
+  return agent
+    ? <AgentPortrait className={className} />
+    : <PersonPortrait
+        className={className}
+        identity={identity ?? { id: "unknown", displayName: "Member", avatarUrl: null }}
+      />;
 };
 
 const GRID_COLUMNS = 10;
@@ -496,6 +505,11 @@ interface BoardResponse {
 
 interface OnboardingResponse {
   principal: Principal;
+  repositoryConnection: {
+    provider: "github";
+    status: "not_linked" | "connected" | "reconnect_required" | "unavailable";
+    lastVerifiedAt: string | null;
+  } | null;
   identities: readonly ExternalIdentity[];
   repositoryGrants: readonly ExternalProjectGrant[];
   repositoryBindings: readonly ProjectRepositoryBinding[];
@@ -734,10 +748,10 @@ const Login: React.FC<{
       const status = cause instanceof ExternalAuthStartError ? cause.status : null;
       setError(
         status === 502
-          ? "The identity service is unavailable. Try again, or use installation access."
+          ? "The identity service is unavailable. Try again, or use local access."
           : status === 401 || status === 403
-            ? "This identity cannot enter yet. Use a fresh invitation, or use installation access."
-            : `${provider === "github" ? "GitHub" : "Google"} sign-in could not start. Try again, or use installation access.`,
+            ? "This identity cannot enter yet. Use a fresh invitation, or use local access."
+            : `${provider === "github" ? "GitHub" : "Google"} sign-in could not start. Try again, or use local access.`,
       );
     }
   };
@@ -785,8 +799,8 @@ const Login: React.FC<{
       </section>
       <section className="login-card" data-grid-item aria-label="Sign in to Meanwhile">
         <div className="login-card-head">
-          <span>{invitationReady ? "Accept your invitation" : registrationOpen ? "Join this installation" : "Choose an identity"}</span>
-          <small>{invitationReady ? "Ready to join" : registrationOpen ? "Open registration" : "This installation"}</small>
+          <span>{invitationReady ? "Accept your invitation" : registrationOpen ? "Join this deployment" : "Choose an identity"}</span>
+          <small>{invitationReady ? "Ready to join" : registrationOpen ? "Open registration" : "This deployment"}</small>
         </div>
         {invitationReady ? (
           <div className="invitation-note" role="status">
@@ -809,7 +823,7 @@ const Login: React.FC<{
             onClick={() => void beginProvider("github")}
           >
             <GithubLogo size={21} weight="fill" aria-hidden="true" />
-            <span><strong>Continue with GitHub</strong><small>{configuredProviders.has("github") ? (providerBusy === "github" ? "Opening GitHub…" : invitationReady || registrationOpen ? "Join and connect allowed repositories" : "Identity and repository access") : "GitHub App not configured"}</small></span>
+            <span><strong>Continue with GitHub</strong><small>{configuredProviders.has("github") ? (providerBusy === "github" ? "Opening GitHub…" : invitationReady || registrationOpen ? "Sign in and authorize repositories" : "Identity and repository access") : "GitHub OAuth not configured"}</small></span>
             <ArrowRight size={17} aria-hidden="true" />
           </button>
           <button
@@ -845,7 +859,7 @@ const Login: React.FC<{
               onClick={() => setLocalOpen((value) => !value)}
             >
               <Key size={18} weight="light" aria-hidden="true" />
-              <span><strong>Use installation access</strong><small>Self-hosted and offline mode</small></span>
+              <span><strong>Use local access key</strong><small>Self-hosted and offline mode</small></span>
               <span aria-hidden="true">{localOpen ? "−" : "+"}</span>
             </button>
             {localOpen ? (
@@ -997,10 +1011,12 @@ const ConnectorAdoption: React.FC<{
 
 const ConnectedOnboarding: React.FC<{
   data: OnboardingResponse;
+  mode: "first-entry" | "manage";
   onChanged: () => Promise<unknown>;
   onComplete: () => void;
+  onExit: () => void;
   onLogout: () => void;
-}> = ({ data, onChanged, onComplete, onLogout }) => {
+}> = ({ data, mode, onChanged, onComplete, onExit, onLogout }) => {
   const { data: providerData } = useSWR<ExternalAuthProvidersResponse>(
     "/auth/providers",
     fetchJson,
@@ -1008,8 +1024,12 @@ const ConnectedOnboarding: React.FC<{
   );
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [repositoryQuery, setRepositoryQuery] = useState("");
   const [copiedConnector, setCopiedConnector] = useState<"codex" | "claude-code" | null>(null);
   const selectedProjects = data.projects.filter((entry) => entry.selected);
+  const primaryIdentity = data.identities.find((identity) => identity.provider === "github") ??
+    data.identities[0];
+  const presentedPrincipal = identityFromProvider(data.principal, primaryIdentity);
   const connectedAgentTypes = new Set(data.agentConnections.map((item) => item.agentType));
   const bindings = new Map(data.repositoryBindings.map((item) => [item.projectId, item]));
   const grantIsMapped = (grant: OnboardingResponse["repositoryGrants"][number]) =>
@@ -1020,6 +1040,15 @@ const ConnectedOnboarding: React.FC<{
     );
   const githubConfigured =
     providerData?.providers.some((provider) => provider.provider === "github") ?? false;
+  const repositoryStatus = data.repositoryConnection?.status ??
+    (githubConfigured ? "not_linked" : null);
+  const normalizedRepositoryQuery = repositoryQuery.trim().toLocaleLowerCase();
+  const visibleRepositoryGrants = normalizedRepositoryQuery.length === 0
+    ? data.repositoryGrants
+    : data.repositoryGrants.filter((grant) =>
+      `${grant.repositoryFullName} ${grant.accountName} ${grant.private ? "private" : "public"}`
+        .toLocaleLowerCase()
+        .includes(normalizedRepositoryQuery));
   const activeConnectorDevices = data.connectorDevices.filter((device) => device.revokedAt === null);
   const activeConversationGrants = data.conversationShareGrants.filter(
     (grant) => grant.revokedAt === null,
@@ -1054,8 +1083,19 @@ const ConnectedOnboarding: React.FC<{
   };
   const identityLabel =
     data.identities.length === 0
-      ? "Installation identity"
-      : data.identities.map((identity) => identity.provider).join(" + ");
+      ? "Local access"
+      : data.identities.map(externalIdentityProof).join(" + ");
+  const beginGitHubAuthorization = async () => {
+    if (busy !== null) return;
+    setBusy("repository:github");
+    setError(null);
+    try {
+      await startExternalAuth("github", "link");
+    } catch {
+      setBusy(null);
+      setError("Could not start GitHub authorization.");
+    }
+  };
   const copyConnectorCommand = async (source: "codex" | "claude-code") => {
     const command = `MEANWHILE_URL=${window.location.origin} meanwhile companion connect --source ${source}`;
     if (await copyToClipboard(command)) {
@@ -1073,20 +1113,35 @@ const ConnectedOnboarding: React.FC<{
       <GridSystem />
       <header className="onboarding-topbar grid-band">
         <div className="brand" data-grid-item><span data-grid-optical>meanwhile</span></div>
-        <div className="onboarding-location" data-grid-item>Connected onboarding</div>
-        <button type="button" className="onboarding-exit" data-grid-item onClick={onLogout}>Sign out</button>
+        <div className="onboarding-location" data-grid-item>
+          {mode === "manage" ? "Projects & connections" : "Connected onboarding"}
+        </div>
+        <button
+          type="button"
+          className="onboarding-exit"
+          data-grid-item
+          disabled={mode === "manage" && !complete}
+          onClick={mode === "manage" ? onExit : onLogout}
+        >
+          {mode === "manage" ? <><ArrowLeft size={12} aria-hidden="true" /> Lobby</> : "Sign out"}
+        </button>
       </header>
       <section className="onboarding-intro grid-band">
-        <span data-grid-item>First entry</span>
-        <h1 data-grid-item data-grid-optical>Prepare the rooms<br />you want to share.</h1>
+        <span data-grid-item>{mode === "manage" ? "Room directory" : "First entry"}</span>
+        <h1 data-grid-item data-grid-optical>
+          {mode === "manage"
+            ? <>Choose the rooms<br />in your Lobby.</>
+            : <>Prepare the rooms<br />you want to share.</>}
+        </h1>
         <p data-grid-item>
-          Choose the rooms you may enter. Agent execution and local conversation sharing stay
-          separate, revocable capabilities; neither is required merely to watch your team.
+          {mode === "manage"
+            ? "Add repositories as Project rooms, choose what stays visible, and manage only the capabilities you intend to use."
+            : "Choose the rooms you may enter. Agent execution and local conversation sharing stay separate, revocable capabilities; neither is required merely to watch your team."}
         </p>
         <div className="onboarding-progress" data-grid-item aria-label="Onboarding progress">
           {[
             ["01", "Identity", true],
-            ["02", "Repositories", data.repositoryGrants.length > 0 || !githubConfigured],
+            ["02", "Repositories", data.repositoryGrants.length > 0],
             ["03", "Projects", selectedProjects.length > 0],
             ["04", "Agents", data.agentConnections.length > 0],
           ].map(([index, label, done]) => (
@@ -1100,8 +1155,8 @@ const ConnectedOnboarding: React.FC<{
         <article className="onboarding-step identity-step" data-grid-item>
           <header><span>01</span><h2>Identity</h2><strong>Connected</strong></header>
           <div className="identity-proof">
-            <SeatMark identity={data.principal} size="large" />
-            <div><strong>{data.principal.displayName}</strong><span>{identityLabel}</span></div>
+            <SeatMark identity={presentedPrincipal} size="large" />
+            <div><strong>{presentedPrincipal.displayName}</strong><span>{identityLabel}</span></div>
             <Check size={18} weight="bold" aria-hidden="true" />
           </div>
           <p>
@@ -1113,35 +1168,99 @@ const ConnectedOnboarding: React.FC<{
         <article className="onboarding-step repository-step" data-grid-item>
           <header>
             <span>02</span><h2>Repositories</h2>
-            <strong>{data.repositoryGrants.length > 0 ? `${data.repositoryGrants.length} available` : "Local mode"}</strong>
+            <strong>{data.repositoryGrants.length > 0 ? `${data.repositoryGrants.length} available` : "Required"}</strong>
           </header>
           {data.repositoryGrants.length === 0 ? (
             <div className="local-repository-mode">
               <GithubLogo size={22} weight="light" aria-hidden="true" />
-              <div><strong>No GitHub grant attached</strong><span>{githubConfigured ? "Link GitHub to reveal App-authorized Project rooms." : "This deployment must configure GitHub before Project rooms are available."}</span></div>
-              {githubConfigured ? (
+              <div>
+                <strong>
+                  {repositoryStatus === "unavailable"
+                    ? "GitHub is temporarily unavailable"
+                    : repositoryStatus === "reconnect_required"
+                      ? "Reconnect GitHub"
+                      : repositoryStatus === "connected"
+                        ? "No repositories available"
+                        : "GitHub authorization required"}
+                </strong>
+                <span>
+                  {repositoryStatus === "unavailable"
+                    ? "Your authorization is intact. Retry repository discovery without signing in again."
+                    : repositoryStatus === "reconnect_required"
+                      ? "GitHub rejected the saved authorization. Reconnect to restore repository access."
+                      : repositoryStatus === "connected"
+                        ? "GitHub is connected, but this account currently exposes no repositories to Meanwhile."
+                        : githubConfigured
+                          ? "Authorize GitHub to choose a real repository for your first Project room."
+                          : "This deployment must configure GitHub OAuth before Project rooms are available."}
+                </span>
+              </div>
+              {githubConfigured && repositoryStatus !== "connected" ? (
                 <button
                   type="button"
                   disabled={busy !== null}
-                  onClick={async () => {
-                    if (busy !== null) return;
-                    setBusy("repository:github");
-                    setError(null);
-                    try {
-                      await startExternalAuth("github", "link");
-                    } catch {
-                      setBusy(null);
-                      setError("Could not start GitHub authorization.");
-                    }
-                  }}
+                  onClick={repositoryStatus === "unavailable"
+                    ? () => void mutate(
+                      "repository:refresh",
+                      "/onboarding/repositories/refresh",
+                      "POST",
+                    )
+                    : () => void beginGitHubAuthorization()}
                 >
-                  {busy === "repository:github" ? "Opening…" : "Link GitHub"}
+                  {busy === "repository:github"
+                    ? "Opening…"
+                    : busy === "repository:refresh"
+                      ? "Refreshing…"
+                      : repositoryStatus === "unavailable"
+                        ? "Retry"
+                        : repositoryStatus === "reconnect_required"
+                          ? "Reconnect"
+                          : "Link GitHub"}
+                </button>
+              ) : githubConfigured && repositoryStatus === "connected" ? (
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => void beginGitHubAuthorization()}
+                >
+                  {busy === "repository:github" ? "Opening…" : "Review access"}
                 </button>
               ) : null}
             </div>
           ) : (
-            <div className="repository-grants">
-              {data.repositoryGrants.map((grant) => {
+            <>
+              <div className="repository-tools">
+                <label>
+                  <MagnifyingGlass size={14} aria-hidden="true" />
+                  <span className="sr-only">Search repositories</span>
+                  <input
+                    type="search"
+                    value={repositoryQuery}
+                    onChange={(event) => setRepositoryQuery(event.target.value)}
+                    placeholder="Find a repository"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  aria-label="Refresh repositories from GitHub"
+                  onClick={() => void mutate(
+                    "repository:refresh",
+                    "/onboarding/repositories/refresh",
+                    "POST",
+                  )}
+                >
+                  <ArrowsClockwise size={14} aria-hidden="true" />
+                  {busy === "repository:refresh" ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+              <div className="repository-result-count" aria-live="polite">
+                {normalizedRepositoryQuery.length === 0
+                  ? `${data.repositoryGrants.length} repositories from GitHub`
+                  : `${visibleRepositoryGrants.length} of ${data.repositoryGrants.length} repositories`}
+              </div>
+              <div className="repository-grants">
+              {visibleRepositoryGrants.map((grant) => {
                 const mapped = grantIsMapped(grant);
                 const key = `import:${grant.id}`;
                 return (
@@ -1154,6 +1273,7 @@ const ConnectedOnboarding: React.FC<{
                     <button
                       type="button"
                       disabled={busy !== null}
+                      aria-label={`Add ${grant.repositoryFullName} to Lobby`}
                       onClick={() => void mutate(key, "/onboarding/projects", "POST", { grantId: grant.id })}
                     >
                       {busy === key ? "Adding…" : "Add to Lobby"}
@@ -1164,51 +1284,22 @@ const ConnectedOnboarding: React.FC<{
                 </div>
                 );
               })}
-            </div>
+              {visibleRepositoryGrants.length === 0 ? (
+                <div className="repository-no-results">
+                  No repositories match “{repositoryQuery.trim()}”.
+                </div>
+              ) : null}
+              </div>
+            </>
           )}
           <p>
-            GitHub returns only repositories allowed by the App installation and your own account.
-            Checkout authority remains short-lived and never enters the transcript.
+            GitHub returns only repositories your account may access. Each Project room is backed
+            by one immutable GitHub repository identity; authorization can be revoked at any time.
           </p>
         </article>
 
-        <article className="onboarding-step agent-step" data-grid-item>
-          <header><span>03</span><h2>Agents</h2><strong>{data.agentConnections.length} authorized</strong></header>
-          <div className="agent-options">
-            {data.availableAgents.map((agent) => {
-              const connected = connectedAgentTypes.has(agent.agentType);
-              const connection = data.agentConnections.find((item) => item.agentType === agent.agentType);
-              const key = `agent:${agent.agentType}`;
-              return (
-                <button
-                  type="button"
-                  className={connected ? "selected" : ""}
-                  key={agent.agentType}
-                  disabled={busy !== null}
-                  aria-pressed={connected}
-                  onClick={() =>
-                    void mutate(
-                      key,
-                      connected && connection
-                        ? `/onboarding/agent-connections/${connection.id}`
-                        : "/onboarding/agent-connections",
-                      connected ? "DELETE" : "POST",
-                      connected ? undefined : { agentType: agent.agentType },
-                    )
-                  }
-                >
-                  <Robot size={20} weight="light" aria-hidden="true" />
-                  <span><strong>{agent.label}</strong><small>{agent.capabilities.runtimeProviders.join(" + ") || "No runtime"}</small></span>
-                  <i>{busy === key ? "…" : connected ? <Check size={14} weight="bold" /> : "+"}</i>
-                </button>
-              );
-            })}
-          </div>
-          <p>Authorizing an agent enables only your own future work. Runtime credentials remain a separate deployment concern, and this never grants control of another member&apos;s run.</p>
-        </article>
-
         <article className="onboarding-step project-step" data-grid-item>
-          <header><span>04</span><h2>Projects</h2><strong>{selectedProjects.length} selected</strong></header>
+          <header><span>03</span><h2>Projects</h2><strong>{selectedProjects.length} selected</strong></header>
           <div className="project-options">
             {data.projects.map((entry) => {
               const key = `project:${entry.project.id}`;
@@ -1220,6 +1311,7 @@ const ConnectedOnboarding: React.FC<{
                     type="button"
                     disabled={busy !== null}
                     aria-pressed={entry.selected}
+                    aria-label={`${entry.selected ? "Remove" : "Show"} ${binding.repositoryFullName} ${entry.selected ? "from" : "in"} Lobby`}
                     onClick={() =>
                       void mutate(
                         key,
@@ -1244,6 +1336,42 @@ const ConnectedOnboarding: React.FC<{
             })}
           </div>
           <p>Selection changes only what appears in your Lobby. It cannot create membership or widen repository access.</p>
+        </article>
+
+        <article className="onboarding-step agent-step" data-grid-item>
+          <header><span>04</span><h2>Agents</h2><strong>{data.agentConnections.length} authorized</strong></header>
+          <div className="agent-options">
+            {data.availableAgents.map((agent) => {
+              const connected = connectedAgentTypes.has(agent.agentType);
+              const connection = data.agentConnections.find((item) => item.agentType === agent.agentType);
+              const key = `agent:${agent.agentType}`;
+              return (
+                <button
+                  type="button"
+                  className={connected ? "selected" : ""}
+                  key={agent.agentType}
+                  disabled={busy !== null}
+                  aria-pressed={connected}
+                  aria-label={`${connected ? "Disconnect" : "Connect"} ${agent.label}`}
+                  onClick={() =>
+                    void mutate(
+                      key,
+                      connected && connection
+                        ? `/onboarding/agent-connections/${connection.id}`
+                        : "/onboarding/agent-connections",
+                      connected ? "DELETE" : "POST",
+                      connected ? undefined : { agentType: agent.agentType },
+                    )
+                  }
+                >
+                  <Robot size={20} weight="light" aria-hidden="true" />
+                  <span><strong>{agent.label}</strong><small>{agent.capabilities.runtimeProviders.join(" + ") || "No runtime"}</small></span>
+                  <i>{busy === key ? "…" : connected ? <Check size={14} weight="bold" /> : "+"}</i>
+                </button>
+              );
+            })}
+          </div>
+          <p>Authorizing an agent enables only your own future work. Runtime credentials remain a separate deployment concern, and this never grants control of another member&apos;s run.</p>
         </article>
 
         <article className="onboarding-step connector-step" data-grid-item>
@@ -1337,7 +1465,8 @@ const ConnectedOnboarding: React.FC<{
         </div>
         {error ? <p className="onboarding-error" role="alert" data-grid-item>{error}</p> : null}
         <button type="button" data-grid-item disabled={!complete || busy !== null} onClick={onComplete}>
-          Enter Project Lobby <ArrowRight size={17} aria-hidden="true" />
+          {mode === "manage" ? "Return to Project Lobby" : "Enter Project Lobby"}
+          <ArrowRight size={17} aria-hidden="true" />
         </button>
       </footer>
     </main>
@@ -1346,12 +1475,18 @@ const ConnectedOnboarding: React.FC<{
 
 const Account: React.FC<{
   principal: Principal;
+  externalIdentity?: ExternalIdentity;
+  onConnections: () => void;
   onLogout: () => void;
-}> = ({ principal, onLogout }) => {
+}> = ({ principal, externalIdentity, onConnections, onLogout }) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
+  const accountName = externalIdentityName(externalIdentity, principal.displayName);
+  const accountProof = externalIdentity === undefined
+    ? "Local access"
+    : externalIdentityProof(externalIdentity);
   useEffect(() => {
     if (!open) return;
     const closeFromOutside = (event: PointerEvent) => {
@@ -1375,18 +1510,22 @@ const Account: React.FC<{
         ref={triggerRef}
         className="identity"
         type="button"
-        aria-label={`Account for ${principal.displayName}`}
+        aria-label={`Account for ${accountProof}`}
         aria-haspopup="dialog"
         aria-controls={popoverId}
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <SeatMark identity={principal} size="small" />
-        <span>{principal.displayName}</span>
+        <SeatMark identity={identityFromProvider(principal, externalIdentity)} size="small" />
+        <span>{accountName}</span>
       </button>
       {open ? (
         <div className="account-menu" id={popoverId} role="dialog" aria-label="Account">
-          <span>Signed in as {principal.displayName}</span>
+          <div className="account-menu-identity">
+            <strong>{accountProof}</strong>
+            <span>Meanwhile Principal · {principal.displayName}</span>
+          </div>
+          <button type="button" onClick={() => { setOpen(false); onConnections(); }}>Projects &amp; connections</button>
           <button type="button" onClick={onLogout}>Sign out</button>
         </div>
       ) : null}
@@ -1416,9 +1555,11 @@ const LobbySignalField: React.FC<{ tone: (typeof LOBBY_CARD_TONES)[number] }> = 
 );
 
 const ProjectLobby: React.FC<{
+  externalIdentity?: ExternalIdentity;
   onOpen: (projectId: string) => void;
+  onManageProjects: () => void;
   onLogout: () => void;
-}> = ({ onOpen, onLogout }) => {
+}> = ({ externalIdentity, onOpen, onManageProjects, onLogout }) => {
   const { data, mutate, isLoading } = useSWR<LobbyResponse>("/lobby", fetchJson, {
     refreshInterval: 5_000,
     keepPreviousData: true,
@@ -1447,7 +1588,12 @@ const ProjectLobby: React.FC<{
         <div className="brand" data-grid-item><span data-grid-optical>meanwhile</span></div>
         <div className="lobby-location" data-grid-item data-grid-baseline>Project Lobby</div>
         <div className="lobby-account" data-grid-item>
-          <Account principal={data.principal} onLogout={onLogout} />
+          <Account
+            principal={data.principal}
+            externalIdentity={externalIdentity}
+            onConnections={onManageProjects}
+            onLogout={onLogout}
+          />
         </div>
       </header>
       <section className="lobby-intro grid-band">
@@ -1460,13 +1606,21 @@ const ProjectLobby: React.FC<{
               ? `${activeCount} agent${activeCount === 1 ? " is" : "s are"} working across your Projects.`
               : "Every Project you can enter is gathered here."}
         </p>
-        <button type="button" className="refresh" data-grid-item data-grid-edge="end" onClick={() => mutate()}>Refresh</button>
+        <div className="lobby-actions" data-grid-item data-grid-edge="end">
+          <button type="button" className="add-project" onClick={onManageProjects}>
+            <Plus size={15} weight="bold" aria-hidden="true" /> Add project
+          </button>
+          <button type="button" className="refresh" onClick={() => mutate()}>Refresh</button>
+        </div>
       </section>
       <main className="lobby-content" id="project-lobby-content" tabIndex={-1}>
         {tables.length === 0 ? (
           <section className="lobby-empty">
             <h2>No Project tables yet.</h2>
-            <p>Create or join a Project to begin watching delegated work together.</p>
+            <p>Choose a GitHub repository to create your first shared room.</p>
+            <button type="button" onClick={onManageProjects}>
+              <Plus size={15} weight="bold" aria-hidden="true" /> Add project
+            </button>
           </section>
         ) : (
           data.spaces.map((space) => (
@@ -2253,8 +2407,9 @@ const TaskComposer: React.FC<{
   agents: readonly AgentConnection[];
   repository: ProjectRepositoryBinding | null;
   onCancel: () => void;
+  onManageConnections: () => void;
   onCreated: (runId: string) => Promise<void>;
-}> = ({ project, principal, agents, repository, onCancel, onCreated }) => {
+}> = ({ project, principal, agents, repository, onCancel, onManageConnections, onCreated }) => {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const [prompt, setPrompt] = useState("");
   const [revision, setRevision] = useState("");
@@ -2356,29 +2511,45 @@ const TaskComposer: React.FC<{
               </select>
             </label>
           ) : null}
-          <section className="custody-contract" aria-label="Delegation authority">
-            <div className="custody-route">
-              <span>{principal.displayName}</span><i>delegates to</i><strong>{humanAgent(agentType)}</strong>
-            </div>
-            <dl>
-              <div><dt>Room</dt><dd>{project.name}</dd></div>
-              <div><dt>Visible to</dt><dd>Everyone at this table</dd></div>
-              <div><dt>Control stays with</dt><dd>You</dd></div>
-            </dl>
-          </section>
+          {agents.length === 0 ? (
+            <section className="composer-agent-empty" aria-label="Agent connection required">
+              <Robot size={20} weight="light" aria-hidden="true" />
+              <div>
+                <strong>Connect an agent before delegating.</strong>
+                <span>You can watch this room without one; creating work requires an explicitly authorized runtime.</span>
+              </div>
+            </section>
+          ) : (
+            <section className="custody-contract" aria-label="Delegation authority">
+              <div className="custody-route">
+                <span>{principal.displayName}</span><i>delegates to</i><strong>{humanAgent(agentType)}</strong>
+              </div>
+              <dl>
+                <div><dt>Room</dt><dd>{project.name}</dd></div>
+                <div><dt>Visible to</dt><dd>Everyone at this table</dd></div>
+                <div><dt>Control stays with</dt><dd>You</dd></div>
+              </dl>
+            </section>
+          )}
           {error ? <div className="composer-error" role="alert">{error}</div> : null}
         </div>
         <footer className="composer-actions">
           <button type="button" className="composer-cancel" disabled={busy} onClick={onCancel}>
             Cancel
           </button>
-          <button
-            type="submit"
-            className="composer-submit"
-            disabled={busy || !prompt.trim() || !repository || !agentType}
-          >
-            {busy ? "Delegating…" : `Delegate to ${humanAgent(agentType)}`}
-          </button>
+          {agents.length === 0 ? (
+            <button type="button" className="composer-submit" onClick={onManageConnections}>
+              Connect an agent
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="composer-submit"
+              disabled={busy || !prompt.trim() || !repository || !agentType}
+            >
+              {busy ? "Delegating…" : `Delegate to ${humanAgent(agentType)}`}
+            </button>
+          )}
         </footer>
       </form>
     </section>
@@ -2389,8 +2560,9 @@ export const ProjectWatch: React.FC<{
   initialProjectId: string;
   initialTaskRef: ConversationRef | null;
   onLobby: (replace?: boolean) => void;
+  onManageProjects: () => void;
   onTaskChange: (task: ConversationRef | null, replace?: boolean) => void;
-}> = ({ initialProjectId, initialTaskRef, onLobby, onTaskChange }) => {
+}> = ({ initialProjectId, initialTaskRef, onLobby, onManageProjects, onTaskChange }) => {
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0 });
   }, []);
@@ -2563,6 +2735,10 @@ export const ProjectWatch: React.FC<{
                 agents={data.delegation.agents}
                 repository={data.delegation.repository}
                 onCancel={closeComposer}
+                onManageConnections={() => {
+                  setComposerOpen(false);
+                  onManageProjects();
+                }}
                 onCreated={async (runId) => {
                   await mutate();
                   setComposerOpen(false);
@@ -2587,6 +2763,7 @@ const AuthenticatedFlow: React.FC<{
   });
   const [route, setRoute] = useState<BoardRoute>(() => parseBoardRoute(window.location.pathname));
   const [entered, setEntered] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
   const initialReady = useRef<boolean | null>(null);
   const navigate = useCallback((next: BoardRoute, replace = false) => {
     const path = boardRoutePath(next);
@@ -2618,6 +2795,8 @@ const AuthenticatedFlow: React.FC<{
     return <ProductStatus alert message="Connected onboarding is unavailable." retry={() => void mutate()} />;
   }
   const selectedProjects = data.projects.filter((entry) => entry.selected);
+  const primaryExternalIdentity = data.identities.find((identity) => identity.provider === "github") ??
+    data.identities[0];
   const ready = selectedProjects.length > 0;
   if (initialReady.current === null) initialReady.current = ready;
   if (connectorAdoption !== null) {
@@ -2641,12 +2820,14 @@ const AuthenticatedFlow: React.FC<{
       />
     );
   }
-  if (!ready || (initialReady.current === false && !entered)) {
+  if (setupOpen || !ready || (initialReady.current === false && !entered)) {
     return (
       <ConnectedOnboarding
         data={data}
+        mode={setupOpen ? "manage" : "first-entry"}
         onChanged={() => mutate()}
-        onComplete={() => transitionSurface(() => setEntered(true))}
+        onComplete={() => transitionSurface(() => { setEntered(true); setSetupOpen(false); })}
+        onExit={() => transitionSurface(() => setSetupOpen(false))}
         onLogout={onLogout}
       />
     );
@@ -2656,7 +2837,9 @@ const AuthenticatedFlow: React.FC<{
   ) ? route : ({ surface: "lobby" } as const);
   return accessibleRoute.surface === "lobby" ? (
     <ProjectLobby
+      externalIdentity={primaryExternalIdentity}
       onOpen={(projectId) => navigate({ surface: "project", projectId, conversation: null })}
+      onManageProjects={() => transitionSurface(() => setSetupOpen(true))}
       onLogout={onLogout}
     />
   ) : (
@@ -2665,6 +2848,7 @@ const AuthenticatedFlow: React.FC<{
       initialProjectId={accessibleRoute.projectId}
       initialTaskRef={accessibleRoute.conversation}
       onLobby={(replace = false) => navigate({ surface: "lobby" }, replace)}
+      onManageProjects={() => transitionSurface(() => setSetupOpen(true))}
       onTaskChange={(conversation, replace = false) => navigate({
         surface: "project",
         projectId: accessibleRoute.projectId,

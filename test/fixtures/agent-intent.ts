@@ -11,7 +11,7 @@ export const testAgentSpec = (
   version: 1,
   catalogVersion: 1,
   definitionDigest: "1".repeat(64),
-  executable: "meanwhile-demo-agent",
+  executable: "meanwhile-fixture-agent",
   args: [],
   workingDirectory: "workspace",
   capabilities: { filesystem: true, terminal: false },

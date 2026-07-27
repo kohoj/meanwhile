@@ -346,7 +346,7 @@ be disclosed truthfully.
 
 ## Delivery and acceptance
 
-The implementation proceeds as one vertical path, not disconnected demos:
+The implementation proceeds as one vertical path, not disconnected proofs:
 
 1. contracts, additive schema, device/share authorization, exact replay, and
    deterministic Codex/Claude fixture adapters;

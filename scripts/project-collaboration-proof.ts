@@ -67,9 +67,9 @@ try {
 
   phase = "connected onboarding"
   await Promise.all([
-    alice.onboarding.connectAgent("demo"),
+    alice.onboarding.connectAgent("fixture"),
     alice.onboarding.selectProject(project.id, true),
-    bob.onboarding.connectAgent("demo"),
+    bob.onboarding.connectAgent("fixture"),
     bob.onboarding.selectProject(project.id, true),
   ])
   const [aliceOnboarding, bobOnboarding] = await Promise.all([
@@ -91,7 +91,7 @@ try {
             type: "files",
             files: [uploadedFile("README.md", "Shared Project release proof workspace")],
           },
-          agentType: "demo",
+          agentType: "fixture",
           provider: "local",
           prompt: runPrompt,
           env: { FIXTURE_OUTPUT_PATH: "site/index.html" },
@@ -114,7 +114,7 @@ try {
         type: "files",
         files: [uploadedFile("README.md", "Shared Project session proof workspace")],
       },
-      agentType: "demo",
+      agentType: "fixture",
       provider: "local",
       idleTimeoutMs: 120_000,
     },
@@ -856,7 +856,7 @@ function onboardingReady(value: unknown, projectId: string): boolean {
     connections.some(
       (connection) =>
         isRecord(connection) &&
-        connection["agentType"] === "demo" &&
+        connection["agentType"] === "fixture" &&
         connection["revokedAt"] === null,
     ) &&
     Array.isArray(projects) &&

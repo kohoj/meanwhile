@@ -23,10 +23,15 @@ describe("application restart", () => {
     let application: Awaited<ReturnType<typeof start>> | undefined
     try {
       application = await start(config, key.key)
+      const project = await application.client.projects.create({
+        name: "Application Restart",
+        slug: "application-restart",
+      })
       const run = await application.client.runs.wait(
         (
           await application.client.runs.create(
             {
+              projectId: project.id,
               workspace: {
                 type: "files",
                 files: [
@@ -36,7 +41,7 @@ describe("application restart", () => {
                   },
                 ],
               },
-              agentType: "demo",
+              agentType: "fixture",
               provider: "local",
               prompt: "Verify restart persistence",
               artifactPaths: ["site"],
@@ -84,8 +89,13 @@ describe("application restart", () => {
     let application: Awaited<ReturnType<typeof start>> | undefined
     try {
       application = await start(config, key.key)
+      const project = await application.client.projects.create({
+        name: "Session Restart",
+        slug: "session-restart",
+      })
       const session = await application.client.sessions.create(
         {
+          projectId: project.id,
           workspace: {
             type: "files",
             files: [
@@ -95,7 +105,7 @@ describe("application restart", () => {
               },
             ],
           },
-          agentType: "demo",
+          agentType: "fixture",
           provider: "local",
           env: { FIXTURE_DELAY_MS: "1200" },
           idleTimeoutMs: 10_000,
@@ -180,7 +190,7 @@ function configuration(root: string, apiKey: string, previewPort: number): AppCo
     deploymentDir: join(root, "deployments"),
     apiKey,
     runnerPath: resolve("dist/meanwhile-runner"),
-    agentCatalogPath: resolve("config/agents.json"),
+    agentCatalogPath: resolve("test/fixtures/agents.json"),
     defaultProvider: "local",
     runConcurrency: 2,
     sessionConcurrency: 2,

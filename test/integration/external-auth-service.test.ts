@@ -57,7 +57,7 @@ describe("external auth service", () => {
       resourceId: linked.identity.id,
     })
     expect(JSON.parse(new TextDecoder().decode(plaintext))).toEqual({
-      version: 1,
+      version: 2,
       accessToken: "github-access-token",
       refreshToken: "github-refresh-token",
     })
@@ -106,7 +106,7 @@ describe("external auth service", () => {
     ).toBe(0)
   })
 
-  test("open registration atomically creates one stable Principal before onboarding", async () => {
+  test("open registration atomically creates one stable Principal and requires repository onboarding", async () => {
     const { active, service } = await setup(githubResult(), undefined, () => new Date(now), "open")
     const started = await service.startLogin("github")
     const registered = await service.callback({
@@ -126,9 +126,16 @@ describe("external auth service", () => {
       disabledAt: null,
     })
     expect(registered.grants).toHaveLength(1)
-    expect(active.listAudit(ownerId).map((entry) => entry.action)).toContain(
-      "principal.external_register",
-    )
+    expect(
+      active.listProjectsForPrincipal(ownerId, registered.identity.principalId, now.toISOString()),
+    ).toEqual([])
+    expect(
+      active.listProjectSelections(ownerId, registered.identity.principalId, now.toISOString()),
+    ).toEqual([])
+    const registrationActions = active.listAudit(ownerId).map((entry) => entry.action)
+    expect(registrationActions).toEqual(expect.arrayContaining(["principal.external_register"]))
+    expect(registrationActions).not.toContain("project.personal_create")
+    expect(registrationActions).not.toContain("project_selection.show")
 
     const repeated = await service.startLogin("github")
     const signedIn = await service.callback({
@@ -144,6 +151,10 @@ describe("external auth service", () => {
       active.database.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM principals").get()
         ?.count,
     ).toBe(2)
+    expect(
+      active.database.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM projects").get()
+        ?.count,
+    ).toBe(0)
   })
 
   test("rejects an expired sealed transaction before calling the provider", async () => {
@@ -344,7 +355,6 @@ function githubResult(): ExternalAuthExchangeResult {
     repositories: [
       {
         provider: "github",
-        installationId: "installation-1",
         account: { id: "account-1", login: "acme", type: "organization", avatarUrl: null },
         repository: {
           id: "repository-1",

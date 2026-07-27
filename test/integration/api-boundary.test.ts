@@ -53,6 +53,7 @@ test("the route inventory is exact and every control operation fails closed", as
     "/onboarding/projects",
     "/onboarding/projects/{projectId}/repository",
     "/onboarding/projects/{projectId}/selection",
+    "/onboarding/repositories/refresh",
     "/openapi.json",
     "/principal-invitations",
     "/principal-invitations/{id}",

@@ -46,7 +46,7 @@ describe("data-root lifecycle", () => {
       id: "run-a",
       ownerId: "owner-a",
       workspace: { type: "repository", url: "https://example.test/repo.git" },
-      agentType: "demo",
+      agentType: "fixture",
       agentSpec,
       agentCatalogDigest: TEST_AGENT_CATALOG_DIGEST,
       executionProvenance: testExecutionProvenanceFor("local", agentSpec),

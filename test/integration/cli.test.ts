@@ -156,7 +156,7 @@ describe("Meanwhile CLI", () => {
           "--files",
           workspace,
           "--agent",
-          "demo",
+          "fixture",
           "--project",
           API_PROJECT_ID,
           "--artifact",
@@ -177,7 +177,7 @@ describe("Meanwhile CLI", () => {
       expect(observed.authorization).toBe(`Bearer ${key.key}`)
       expect(observed.idempotencyKey).toBe("cli-test")
       expect(observed.requestBody).toMatchObject({
-        agentType: "demo",
+        agentType: "fixture",
         projectId: API_PROJECT_ID,
         prompt: "make it work",
         provider: "local",
@@ -195,7 +195,7 @@ describe("Meanwhile CLI", () => {
       await symlink("README.md", join(workspace, "linked.md"))
       const unsafe = capture()
       const unsafeExit = await runCli(
-        ["run", "--files", workspace, "--agent", "demo", "--", "do not upload links"],
+        ["run", "--files", workspace, "--agent", "fixture", "--", "do not upload links"],
         unsafe.options({ MEANWHILE_URL: server.url.origin, MEANWHILE_API_KEY: key.key }),
       )
       expect(unsafeExit).toBe(2)
@@ -279,7 +279,7 @@ describe("Meanwhile CLI", () => {
             "--files",
             workspace,
             "--agent",
-            "demo",
+            "fixture",
             "--project",
             API_PROJECT_ID,
             "--idle-timeout",
@@ -320,7 +320,7 @@ describe("Meanwhile CLI", () => {
           path: "/sessions",
           idempotency: "session-once",
           body: {
-            agentType: "demo",
+            agentType: "fixture",
             projectId: API_PROJECT_ID,
             idleTimeoutMs: 600_000,
             workspace: { type: "files" },

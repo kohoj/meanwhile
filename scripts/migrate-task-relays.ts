@@ -5,6 +5,7 @@ import {
   migrateConversationMirrorSchema,
   preConversationMirrorSchemaStatements,
 } from "./conversation-mirror-schema"
+import { migrateProgressiveOnboardingSchema } from "./progressive-onboarding-schema"
 
 const PROJECT_WATCH_SCHEMA_FINGERPRINT =
   "c2defba13120fe341f211a6d56d6abfe4df5ccf91f499959761951be6c79d4f8"
@@ -57,6 +58,7 @@ try {
     .transaction(() => {
       for (const statement of taskRelaySchemaStatements()) database.query(statement).run()
       migrateConversationMirrorSchema(database)
+      migrateProgressiveOnboardingSchema(database)
       database
         .query("UPDATE schema_identity SET fingerprint=? WHERE singleton=1")
         .run(CURRENT_SCHEMA.fingerprint)
